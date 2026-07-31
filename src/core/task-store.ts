@@ -294,6 +294,59 @@ export async function writeTaskArtifact(
   artifact: "brief.md" | "plan.md",
   contents: string,
 ): Promise<void> {
+  await writeTaskTextArtifact(paths, location, artifact, contents);
+}
+
+export async function writeCheckArtifact(
+  paths: VineaPaths,
+  location: TaskLocation,
+  contents: string,
+): Promise<void> {
+  await writeTaskTextArtifact(paths, location, "check.md", contents);
+}
+
+export async function removeTaskSessionBindings(
+  paths: VineaPaths,
+  taskId: string,
+): Promise<string[]> {
+  await assertNoSymlink(paths.repoRoot, paths.sessions);
+  let entries;
+  try {
+    entries = await readdir(paths.sessions, { withFileTypes: true });
+  } catch (error) {
+    throw new SchemaError(`Unable to list session bindings in ${paths.sessions}`, error);
+  }
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    const filename = join(paths.sessions, entry.name);
+    await assertNoSymlink(paths.repoRoot, filename);
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(filename, "utf8")) as unknown;
+    } catch (error) {
+      if (error instanceof SyntaxError) continue;
+      throw new SchemaError(`Unable to inspect session binding ${filename}`, error);
+    }
+    if (!isSessionBinding(value) || value.taskId !== taskId) continue;
+    try {
+      await unlink(filename);
+      removed.push(filename);
+    } catch (error) {
+      if (!isCode(error, "ENOENT")) {
+        throw new SchemaError(`Unable to remove session binding ${filename}`, error);
+      }
+    }
+  }
+  return removed;
+}
+
+async function writeTaskTextArtifact(
+  paths: VineaPaths,
+  location: TaskLocation,
+  artifact: "brief.md" | "plan.md" | "check.md",
+  contents: string,
+): Promise<void> {
   const filename = join(location.directory, artifact);
   await assertNoSymlink(paths.repoRoot, filename);
   const temporary = join(location.directory, `.${artifact}.${randomUUID()}.tmp`);

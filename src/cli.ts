@@ -1,6 +1,11 @@
 import packageJson from "../package.json" with { type: "json" };
 import { initializeWorkspace, readConfig } from "./core/config.js";
 import {
+  showCheck,
+  upsertCheck,
+  type CheckSummary,
+} from "./core/check.js";
+import {
   addContextReference,
   listContextReferences,
   type ContextManifest,
@@ -13,7 +18,9 @@ import {
   appendInlineAudit,
   addAcceptanceCriterion,
   addRequirement,
+  archiveTask,
   createTask,
+  finishTask,
   incompleteRequirements,
   listTasks,
   nextGate,
@@ -43,6 +50,7 @@ Commands:
   continue
   check
   finish
+  archive
   doctor
   validate
   task list
@@ -145,6 +153,30 @@ export async function main(args: string[]): Promise<number> {
   if (command === "evidence") {
     try {
       return await handleEvidence(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "check") {
+    try {
+      return await handleCheck(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "finish") {
+    try {
+      return await handleFinish(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "archive") {
+    try {
+      return await handleArchive(args.slice(1));
     } catch (error) {
       return reportError(error, json);
     }
@@ -296,6 +328,9 @@ async function handleTask(args: string[]): Promise<number> {
       ["planning", "ready", "in_progress", "checking", "finished", "archived", "blocked"] as const,
       "--to",
     );
+    if (to === "finished" || to === "archived") {
+      throw new UsageError(`Use the confirmed ${to === "finished" ? "finish" : "archive"} command for ${to} transitions.`);
+    }
     if (subcommand === "unblock" && !["ready", "in_progress", "checking"].includes(to)) {
       throw new UsageError("unblock --to must be ready, in_progress, or checking.");
     }
@@ -401,6 +436,64 @@ async function handleEvidence(args: string[]): Promise<number> {
   return 0;
 }
 
+async function handleCheck(args: string[]): Promise<number> {
+  const paths = resolveVineaPaths(process.cwd());
+  if (args[0] === "show") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), new Set(), new Set(["--json"]));
+    const summary = await showCheck(paths, taskId);
+    writeOutput(summary, options.has("--json"), renderCheckSummary(summary));
+    return 0;
+  }
+
+  const taskId = requiredTaskId(args[0]);
+  const options = parseOptions(
+    args.slice(1),
+    new Set(["--requirement", "--plan-item", "--paths", "--evidence", "--result", "--summary"]),
+    new Set(["--json"]),
+  );
+  const evidence = optionalValue(options, "--evidence");
+  const summary = await upsertCheck(paths, taskId, {
+    requirementId: requiredOption(options, "--requirement"),
+    planItem: requiredOption(options, "--plan-item"),
+    paths: commaList(requiredOption(options, "--paths"), "--paths"),
+    evidenceIds: evidence === undefined ? [] : commaList(evidence, "--evidence"),
+    result: oneOf(
+      requiredOption(options, "--result"),
+      ["pass", "fail", "uncovered"] as const,
+      "--result",
+    ),
+    summary: requiredOption(options, "--summary"),
+    actor: "cli",
+  });
+  writeOutput(summary, options.has("--json"), renderCheckSummary(summary));
+  return 0;
+}
+
+async function handleFinish(args: string[]): Promise<number> {
+  const taskId = requiredTaskId(args[0]);
+  const options = parseOptions(args.slice(1), new Set(), new Set(["--confirmed", "--json"]));
+  if (!options.has("--confirmed")) throw new UsageError("Finish requires explicit --confirmed.");
+  const task = await finishTask(resolveVineaPaths(process.cwd()), taskId, {
+    confirmed: true,
+    actor: "cli",
+  });
+  writeOutput(task, options.has("--json"), renderTask(task));
+  return 0;
+}
+
+async function handleArchive(args: string[]): Promise<number> {
+  const taskId = requiredTaskId(args[0]);
+  const options = parseOptions(args.slice(1), new Set(), new Set(["--confirmed", "--json"]));
+  if (!options.has("--confirmed")) throw new UsageError("Archive requires explicit --confirmed.");
+  const task = await archiveTask(resolveVineaPaths(process.cwd()), taskId, {
+    confirmed: true,
+    actor: "cli",
+  });
+  writeOutput(task, options.has("--json"), renderTask(task));
+  return 0;
+}
+
 function reportError(error: unknown, json: boolean): number {
   const code = error instanceof VineaError || error instanceof UsageError
     ? error.code
@@ -478,6 +571,14 @@ function parseExitCode(value: string): number {
   return parsed;
 }
 
+function commaList(value: string, option: string): string[] {
+  const values = value.split(",").map((item) => item.trim());
+  if (values.some((item) => item === "")) {
+    throw new UsageError(`${option} must be a comma-separated list of nonempty values.`);
+  }
+  return values;
+}
+
 function writeOutput(value: unknown, json: boolean, human: string): void {
   process.stdout.write(json ? `${JSON.stringify(value)}\n` : human);
 }
@@ -547,6 +648,17 @@ function renderEvidence(evidence: EvidenceRecord): string {
     `summary: ${evidence.summary}`,
     "",
   ].join("\n");
+}
+
+function renderCheckSummary(summary: CheckSummary): string {
+  const lines = summary.rows.map((row) =>
+    `${row.requirementId}: ${row.result}; paths: ${row.paths.join(", ")}; evidence: ${row.evidenceIds.join(", ") || "none"}; ${row.summary}`
+  );
+  lines.push(
+    `Totals: ${summary.totals.total} rows; ${summary.totals.pass} pass; ${summary.totals.fail} fail; ${summary.totals.uncovered} uncovered.`,
+    "",
+  );
+  return lines.join("\n");
 }
 
 function renderOrient(summary: OrientSummary): string {

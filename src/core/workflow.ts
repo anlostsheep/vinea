@@ -3,9 +3,11 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { DEFAULT_CONFIG, readConfig } from "./config.js";
+import { readCheckForLocation } from "./check.js";
 import { listContextReferences } from "./context.js";
-import { SchemaError, TransitionError, ValidationError } from "./errors.js";
+import { FinishGateError, SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { assertTddReadyForCheck } from "./evidence.js";
+import { inspectBusinessGitStatus } from "./git.js";
 import {
   appendTaskContinuation,
   createTaskArtifacts,
@@ -17,6 +19,7 @@ import {
   readLatestCheckEvent,
   readLatestEvidence,
   readSessionBinding,
+  removeTaskSessionBindings,
   sessionBindingPath,
   writeSessionBinding,
   writeTaskArtifact,
@@ -100,6 +103,12 @@ export interface TaskDocumentResult {
   taskId: string;
   artifact: "brief.md" | "plan.md";
   estimatedBytes: number;
+}
+
+export interface CompletionInput {
+  confirmed: boolean;
+  actor: string;
+  now?: Clock;
 }
 
 const FORWARD_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus>> = {
@@ -352,6 +361,98 @@ export async function transitionTask(
   return (await persistTaskTransition(paths, location, task, transition)).task;
 }
 
+export async function finishTask(
+  paths: VineaPaths,
+  taskId: string,
+  input: CompletionInput,
+): Promise<TaskRecord> {
+  if (!input.confirmed) throw new ValidationError("Finish requires explicit --confirmed.");
+  await readConfig(paths);
+  assertBoundedNonempty(input.actor, "Finish actor", 200);
+  const location = await findTask(paths, taskId);
+  if (location.scope !== "active" || location.task.status !== "checking") {
+    throw new FinishGateError(
+      `Finish requires task ${taskId} to be active with status checking; found ${location.task.status}.`,
+    );
+  }
+
+  const { summary, evidence } = await readCheckForLocation(paths, location);
+  const declaredIds = [
+    ...location.task.requirements.map(({ id }) => id),
+    ...location.task.acceptanceCriteria.map(({ id }) => id),
+  ];
+  const coveredIds = new Set(summary.rows.map(({ requirementId }) => requirementId));
+  const missing = declaredIds.filter((id) => !coveredIds.has(id));
+  if (missing.length > 0) {
+    throw new FinishGateError(`Finish coverage is missing declared requirement or acceptance IDs: ${missing.join(", ")}.`);
+  }
+  const unsuccessful = summary.rows.filter(({ result }) => result !== "pass");
+  if (unsuccessful.length > 0) {
+    throw new FinishGateError(
+      `Finish is blocked by failed or uncovered check rows: ${unsuccessful.map(({ requirementId }) => requirementId).join(", ")}.`,
+    );
+  }
+  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
+  const withoutPassingEvidence = summary.rows.filter(
+    (row) => !row.evidenceIds.some((id) => evidenceById.get(id)?.result === "pass"),
+  );
+  if (withoutPassingEvidence.length > 0) {
+    throw new FinishGateError(
+      `Finish is blocked by check rows without passing evidence: ${withoutPassingEvidence.map(({ requirementId }) => requirementId).join(", ")}.`,
+    );
+  }
+
+  try {
+    await assertTddReadyForCheck(location);
+  } catch (error) {
+    throw new FinishGateError(
+      `Finish TDD evidence is invalid; a valid tdd-red must precede tdd-green for ${taskId}.`,
+    );
+  }
+  assertLearningCandidatesClassified(location.task);
+
+  const gitStatus = await inspectBusinessGitStatus(paths.repoRoot);
+  if (gitStatus.gitUnavailable) {
+    throw new FinishGateError(
+      `Finish gitUnavailable: ${gitStatus.error ?? "Git status could not be inspected."}`,
+    );
+  }
+  if (gitStatus.businessDirtyPaths.length > 0) {
+    throw new FinishGateError(
+      `Finish is blocked by business dirty paths: ${gitStatus.businessDirtyPaths.join(", ")}.`,
+    );
+  }
+
+  return transitionTask(paths, taskId, "finished", {
+    actor: input.actor,
+    reason: "Completion gates satisfied.",
+    now: input.now,
+  });
+}
+
+export async function archiveTask(
+  paths: VineaPaths,
+  taskId: string,
+  input: CompletionInput,
+): Promise<TaskRecord> {
+  if (!input.confirmed) throw new ValidationError("Archive requires explicit --confirmed.");
+  await readConfig(paths);
+  assertBoundedNonempty(input.actor, "Archive actor", 200);
+  const location = await findTask(paths, taskId);
+  if (location.task.status !== "finished") {
+    throw new TransitionError(
+      `Archive requires task ${taskId} to have status finished; found ${location.task.status}.`,
+    );
+  }
+  const task = await transitionTask(paths, taskId, "archived", {
+    actor: input.actor,
+    reason: "Task archived after confirmed finish.",
+    now: input.now,
+  });
+  await removeTaskSessionBindings(paths, taskId);
+  return task;
+}
+
 export async function addRequirement(
   paths: VineaPaths,
   taskId: string,
@@ -582,6 +683,56 @@ function assertHost(value: string): asserts value is Host {
   if (value !== "codex" && value !== "claude") {
     throw new ValidationError(`Invalid host: ${value}. Expected codex|claude.`);
   }
+}
+
+function assertLearningCandidatesClassified(task: TaskRecord): void {
+  const candidates = (task as TaskRecord & { learningCandidates?: unknown }).learningCandidates;
+  if (candidates === undefined) return;
+  if (!Array.isArray(candidates)) {
+    throw new FinishGateError("Finish learning candidate data is malformed.");
+  }
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)
+      || candidate.schemaVersion !== SCHEMA_VERSION
+      || typeof candidate.id !== "string"
+      || candidate.id.trim() === ""
+      || typeof candidate.domain !== "string"
+      || candidate.domain.trim() === ""
+      || typeof candidate.text !== "string"
+      || candidate.text.trim() === ""
+      || typeof candidate.rationale !== "string"
+      || candidate.rationale.trim() === ""
+      || !isIsoTimestamp(candidate.proposedAt)) {
+      throw new FinishGateError("Finish learning candidate data is malformed.");
+    }
+    if (candidate.status === "accepted") {
+      if (candidate.confirmedBy !== "user" || !isIsoTimestamp(candidate.acceptedAt)) {
+        throw new FinishGateError(`Finish learning candidate ${candidate.id} is not validly accepted.`);
+      }
+      continue;
+    }
+    if (candidate.status === "archived") {
+      if (!isIsoTimestamp(candidate.archivedAt)
+        || typeof candidate.archiveReason !== "string"
+        || candidate.archiveReason.trim() === "") {
+        throw new FinishGateError(`Finish learning candidate ${candidate.id} is not validly archived.`);
+      }
+      continue;
+    }
+    throw new FinishGateError(
+      `Finish learning candidate ${candidate.id} must be accepted or archived before completion.`,
+    );
+  }
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function inspectGitStatus(repoRoot: string): Promise<OrientSummary["gitStatus"]> {
