@@ -9,6 +9,7 @@ import {
   appendTaskMutationIntent,
   assertTaskMutable,
   findTask,
+  withTaskLock,
   type TaskLocation,
 } from "./task-store.js";
 import {
@@ -55,6 +56,15 @@ export async function recordEvidence(
   taskId: string,
   input: RecordEvidenceInput,
   now: Clock = () => new Date(),
+): Promise<EvidenceRecord> {
+  return withTaskLock(paths, taskId, () => recordEvidenceLocked(paths, taskId, input, now));
+}
+
+async function recordEvidenceLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: RecordEvidenceInput,
+  now: Clock,
 ): Promise<EvidenceRecord> {
   await readConfig(paths);
   const location = await findTask(paths, taskId);

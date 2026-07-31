@@ -11,6 +11,7 @@ import {
   findTask,
   persistTaskMutation,
   type TaskLocation,
+  withTaskLock,
 } from "./task-store.js";
 import {
   SCHEMA_VERSION,
@@ -58,6 +59,15 @@ export async function proposeLearning(
   taskId: string,
   input: ProposeLearningInput,
   now: Clock = () => new Date(),
+): Promise<TaskRecord> {
+  return withTaskLock(paths, taskId, () => proposeLearningLocked(paths, taskId, input, now));
+}
+
+async function proposeLearningLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: ProposeLearningInput,
+  now: Clock,
 ): Promise<TaskRecord> {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
@@ -111,10 +121,10 @@ export async function acceptLearning(
   if (input.confirmedBy !== "user") {
     throw new ValidationError("Learning acceptance requires literal --confirmed-by user.");
   }
-  return withPromotionLock(
+  return withTaskLock(paths, taskId, () => withPromotionLock(
     paths,
     () => acceptLearningWhileLocked(paths, taskId, id, actor, now),
-  );
+  ));
 }
 
 async function acceptLearningWhileLocked(
@@ -211,6 +221,15 @@ export async function archiveLearning(
   taskId: string,
   input: ArchiveLearningInput,
   now: Clock = () => new Date(),
+): Promise<TaskRecord> {
+  return withTaskLock(paths, taskId, () => archiveLearningLocked(paths, taskId, input, now));
+}
+
+async function archiveLearningLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: ArchiveLearningInput,
+  now: Clock,
 ): Promise<TaskRecord> {
   await readConfig(paths);
   const location = await findTask(paths, taskId);

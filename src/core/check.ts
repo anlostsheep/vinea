@@ -8,6 +8,7 @@ import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
 import {
   assertNoPendingTaskTransition,
   findTask,
+  withTaskLock,
   writeCheckArtifact,
   type TaskLocation,
 } from "./task-store.js";
@@ -56,6 +57,15 @@ export async function upsertCheck(
   taskId: string,
   input: UpsertCheckInput,
   now: Clock = () => new Date(),
+): Promise<CheckSummary> {
+  return withTaskLock(paths, taskId, () => upsertCheckLocked(paths, taskId, input, now));
+}
+
+async function upsertCheckLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: UpsertCheckInput,
+  now: Clock,
 ): Promise<CheckSummary> {
   await readConfig(paths);
   const location = await findTask(paths, taskId);

@@ -4,8 +4,9 @@ import { beforeEach, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
 import { recordEvidence } from "../../src/core/evidence.js";
 import { SchemaError } from "../../src/core/errors.js";
+import { appendJsonl } from "../../src/core/json.js";
 import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
-import { findTask, persistTaskTransition } from "../../src/core/task-store.js";
+import { findTask, persistTaskMutation, persistTaskTransition } from "../../src/core/task-store.js";
 import { validateWorkspace } from "../../src/core/validate.js";
 import {
   createTask,
@@ -399,6 +400,72 @@ test("a failed active task commit reuses its pending intent on retry and validat
   expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
 
+test("task mutation serialization prevents an interleaved pending transition from duplicating its intent", async () => {
+  const { task } = await createReadyTask();
+  const location = await findTask(paths, task.id);
+  const mutationAppendStarted = deferred<void>();
+  const releaseMutationAppend = deferred<void>();
+  const mutationTask: TaskRecord = {
+    ...location.task,
+    requirements: [...location.task.requirements, {
+      schemaVersion: 1,
+      id: "R2",
+      text: "Serialized mutation",
+      createdAt: "2026-07-31T08:11:00.000Z",
+    }],
+    updatedAt: "2026-07-31T08:11:00.000Z",
+  };
+  const mutation = persistTaskMutation(
+    paths,
+    location,
+    mutationTask,
+    {
+      schemaVersion: 1,
+      type: "requirement_added",
+      timestamp: "2026-07-31T08:11:00.000Z",
+      actor: "codex",
+      requirementId: "R2",
+    },
+    {
+      appendJournal: async (filename, value, repoRoot) => {
+        mutationAppendStarted.resolve();
+        await releaseMutationAppend.promise;
+        await appendJsonl(filename, value, repoRoot);
+      },
+    },
+  );
+  await mutationAppendStarted.promise;
+
+  const transition = persistTaskTransition(
+    paths,
+    location,
+    { ...location.task, status: "in_progress", updatedAt: "2026-07-31T08:12:00.000Z" },
+    {
+      schemaVersion: 1,
+      timestamp: "2026-07-31T08:12:00.000Z",
+      actor: "codex",
+      reason: "Concurrent transition",
+      oldStatus: "ready",
+      newStatus: "in_progress",
+    },
+    { writeTask: async () => { throw new SchemaError("Injected transition commit failure"); } },
+  );
+  releaseMutationAppend.resolve();
+  await mutation;
+  await expect(transition).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
+
+  const retried = await transitionTask(paths, task.id, "in_progress", {
+    actor: "codex",
+    reason: "Retry concurrent transition",
+    now: () => new Date("2026-07-31T08:13:00.000Z"),
+  });
+  expect(retried.status).toBe("in_progress");
+  const intents = (parseJournal(await readFile(join(location.directory, "journal.md"), "utf8")) as Array<Record<string, unknown>>)
+    .filter((event) => event.type === "transition_intent" && event.oldStatus === "ready");
+  expect(intents).toHaveLength(1);
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+});
+
 test("blocked tasks require explicit unblock and both transitions are auditable", async () => {
   const { task, directory } = await createReadyTask();
   await transitionTask(paths, task.id, "blocked", {
@@ -513,4 +580,12 @@ async function createFinishedTask() {
 
 function parseJournal(contents: string): unknown[] {
   return contents.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown);
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  return {
+    promise: new Promise<T>((resolve_) => { resolve = resolve_; }),
+    resolve,
+  };
 }

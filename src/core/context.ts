@@ -8,7 +8,7 @@ import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl } from "./json.js";
 import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
-import { appendTaskMutationIntent, assertTaskMutable, findTask } from "./task-store.js";
+import { appendTaskMutationIntent, assertTaskMutable, findTask, withTaskLock } from "./task-store.js";
 import {
   SCHEMA_VERSION,
   type ContextReference,
@@ -37,6 +37,15 @@ export async function addContextReference(
   taskId: string,
   input: AddContextInput,
   now: Clock = () => new Date(),
+): Promise<ContextReference> {
+  return withTaskLock(paths, taskId, () => addContextReferenceLocked(paths, taskId, input, now));
+}
+
+async function addContextReferenceLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: AddContextInput,
+  now: Clock,
 ): Promise<ContextReference> {
   const config = await readConfig(paths);
   assertNonempty(input.purpose, "Context purpose");

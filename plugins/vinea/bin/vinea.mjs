@@ -440,8 +440,9 @@ import { readFile as readFile3 } from "node:fs/promises";
 import { isAbsolute as isAbsolute2, join as join4, relative as relative2, resolve as resolve2 } from "node:path";
 
 // src/core/task-store.ts
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { lstat as lstat5, mkdir as mkdir2, readFile as readFile2, readdir, rename as rename2, rm, unlink, writeFile as writeFile3 } from "node:fs/promises";
+import { lstat as lstat5, mkdir as mkdir2, readFile as readFile2, readdir, rename as rename2, rmdir, rm, unlink, writeFile as writeFile3 } from "node:fs/promises";
 import { basename as basename2, join as join3 } from "node:path";
 var ARTIFACTS = [
   "brief.md",
@@ -452,6 +453,9 @@ var ARTIFACTS = [
   "journal.md"
 ];
 var TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+var TASK_LOCK_RETRY_MILLISECONDS = 25;
+var TASK_LOCK_TIMEOUT_MILLISECONDS = 5e3;
+var taskLockContext = new AsyncLocalStorage();
 function assertTaskMutable(location) {
   if (location.scope === "archive" || location.task.status === "finished" || location.task.status === "archived") {
     throw new ValidationError(`Task is terminal and cannot be mutated: ${location.task.id}`);
@@ -525,6 +529,9 @@ async function listStoredTasks(paths, status) {
   return tasks.sort((left, right) => left.task.id.localeCompare(right.task.id));
 }
 async function persistTaskTransition(paths, location, task, transition, operationOverrides = {}) {
+  return withTaskLock(paths, task.id, () => persistTaskTransitionLocked(paths, location, task, transition, operationOverrides));
+}
+async function persistTaskTransitionLocked(paths, location, task, transition, operationOverrides) {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
   const journalPath = join3(location.directory, "journal.md");
   const shouldMoveToArchive = task.status === "archived" && location.scope === "active";
@@ -568,6 +575,9 @@ async function persistTaskTransition(paths, location, task, transition, operatio
   return { task: committedTask, directory: targetDirectory, scope: targetScope };
 }
 async function persistTaskMutation(paths, location, task, event, operationOverrides = {}) {
+  return withTaskLock(paths, task.id, () => persistTaskMutationLocked(paths, location, task, event, operationOverrides));
+}
+async function persistTaskMutationLocked(paths, location, task, event, operationOverrides) {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
   await appendTaskMutationIntent(paths, location, event, operations);
   try {
@@ -593,6 +603,9 @@ async function assertNoPendingTaskTransition(paths, location) {
   }
 }
 async function appendTaskMutationIntent(paths, location, event, operationOverrides = {}) {
+  return withTaskLock(paths, location.task.id, () => appendTaskMutationIntentLocked(paths, location, event, operationOverrides));
+}
+async function appendTaskMutationIntentLocked(paths, location, event, operationOverrides) {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
   await assertNoPendingTaskTransition(paths, location);
   const journalPath = join3(location.directory, "journal.md");
@@ -606,6 +619,9 @@ async function appendTaskMutationIntent(paths, location, event, operationOverrid
   return intent;
 }
 async function appendTaskContinuation(paths, location, event) {
+  return withTaskLock(paths, location.task.id, () => appendTaskContinuationLocked(paths, location, event));
+}
+async function appendTaskContinuationLocked(paths, location, event) {
   await assertNoPendingTaskTransition(paths, location);
   const journalPath = join3(location.directory, "journal.md");
   await assertNoSymlink(paths.repoRoot, journalPath);
@@ -670,10 +686,16 @@ async function readLatestCheckEvent(paths, location) {
   return null;
 }
 async function writeTaskArtifact(paths, location, artifact, contents) {
+  return withTaskLock(paths, location.task.id, () => writeTaskArtifactLocked(paths, location, artifact, contents));
+}
+async function writeTaskArtifactLocked(paths, location, artifact, contents) {
   await assertNoPendingTaskTransition(paths, location);
   await writeTaskTextArtifact(paths, location, artifact, contents);
 }
 async function writeCheckArtifact(paths, location, contents) {
+  return withTaskLock(paths, location.task.id, () => writeCheckArtifactLocked(paths, location, contents));
+}
+async function writeCheckArtifactLocked(paths, location, contents) {
   await assertNoPendingTaskTransition(paths, location);
   await writeTaskTextArtifact(paths, location, "check.md", contents);
 }
@@ -769,6 +791,92 @@ async function pathExists(path) {
     if (isCode(error, "ENOENT")) return false;
     throw error;
   }
+}
+async function withTaskLock(paths, taskId, operation) {
+  if (!TASK_ID_PATTERN.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
+  const key = `${paths.repoRoot}\0${taskId}`;
+  const inherited = taskLockContext.getStore();
+  if (inherited?.has(key)) return operation();
+  const lock = await acquireTaskLock(paths, taskId);
+  const context = new Set(inherited ?? []);
+  context.add(key);
+  try {
+    return await taskLockContext.run(context, operation);
+  } finally {
+    await releaseTaskLock(paths, lock);
+  }
+}
+async function acquireTaskLock(paths, taskId) {
+  const locks = join3(paths.runtime, "task-locks");
+  const directory = join3(locks, `${taskId}.lock`);
+  const ownerPath = join3(directory, "owner.json");
+  const token = randomUUID2();
+  const deadline = Date.now() + TASK_LOCK_TIMEOUT_MILLISECONDS;
+  await ensureDirectory(paths.repoRoot, locks);
+  for (; ; ) {
+    await assertNoSymlink(paths.repoRoot, directory);
+    try {
+      await mkdir2(directory);
+    } catch (error) {
+      if (!isCode(error, "EEXIST")) {
+        throw new SchemaError(`Unable to acquire task lock for ${taskId}`, error);
+      }
+      if (Date.now() >= deadline) {
+        throw new ValidationError(
+          `Task ${taskId} is busy in another Vinea process; wait for it to finish and retry. Vinea will not remove a lock it does not own.`
+        );
+      }
+      await delay(TASK_LOCK_RETRY_MILLISECONDS);
+      continue;
+    }
+    try {
+      await writeFile3(ownerPath, `${JSON.stringify({ token, pid: process.pid, acquiredAt: (/* @__PURE__ */ new Date()).toISOString() })}
+`, {
+        encoding: "utf8",
+        flag: "wx"
+      });
+    } catch (error) {
+      try {
+        await rmdir(directory);
+      } catch (cleanupError) {
+        if (!isCode(cleanupError, "ENOENT")) {
+          throw new SchemaError(`Unable to initialize task lock for ${taskId}; empty lock cleanup failed`, {
+            error,
+            cleanupError
+          });
+        }
+      }
+      throw new SchemaError(`Unable to initialize task lock for ${taskId}`, error);
+    }
+    return { directory, ownerPath, token };
+  }
+}
+async function releaseTaskLock(paths, lock) {
+  await assertNoSymlink(paths.repoRoot, lock.ownerPath);
+  let owner;
+  try {
+    owner = JSON.parse(await readFile2(lock.ownerPath, "utf8"));
+  } catch (error) {
+    throw new SchemaError(`Unable to verify task lock ownership at ${lock.directory}`, error);
+  }
+  if (!isRecord2(owner) || owner.token !== lock.token) {
+    throw new SchemaError(`Task lock ownership changed at ${lock.directory}; refusing unsafe cleanup.`);
+  }
+  await removeOwnedTaskLock(lock.directory, lock.ownerPath, lock.token);
+}
+async function removeOwnedTaskLock(directory, ownerPath, token) {
+  try {
+    const owner = JSON.parse(await readFile2(ownerPath, "utf8"));
+    if (!isRecord2(owner) || owner.token !== token) return;
+    await unlink(ownerPath);
+    await rmdir(directory);
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return;
+    throw new SchemaError(`Unable to release owned task lock ${directory}`, error);
+  }
+}
+async function delay(milliseconds) {
+  await new Promise((resolve7) => setTimeout(resolve7, milliseconds));
 }
 function isCode(error, code) {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
@@ -900,6 +1008,9 @@ var CHECK_SUFFIX = " -->";
 var MAX_TEXT_BYTES = 4e3;
 var MAX_ID_BYTES = 200;
 async function upsertCheck(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
+  return withTaskLock(paths, taskId, () => upsertCheckLocked(paths, taskId, input, now));
+}
+async function upsertCheckLocked(paths, taskId, input, now) {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
   if (location.scope === "archive" || location.task.status === "archived") {
@@ -1218,6 +1329,9 @@ import {
   resolve as resolve3
 } from "node:path";
 async function addContextReference(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
+  return withTaskLock(paths, taskId, () => addContextReferenceLocked(paths, taskId, input, now));
+}
+async function addContextReferenceLocked(paths, taskId, input, now) {
   const config = await readConfig(paths);
   assertNonempty(input.purpose, "Context purpose");
   assertBoundedNonempty(input.actor, "Context actor", 200);
@@ -1391,6 +1505,9 @@ var EVIDENCE_FIELDS = /* @__PURE__ */ new Set([
   "actor"
 ]);
 async function recordEvidence(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
+  return withTaskLock(paths, taskId, () => recordEvidenceLocked(paths, taskId, input, now));
+}
+async function recordEvidenceLocked(paths, taskId, input, now) {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
@@ -1766,6 +1883,9 @@ async function orientWorkspace(paths, input) {
   return { health, gitStatus, binding, candidates, recommendation };
 }
 async function continueTask(paths, taskId, input) {
+  return withTaskLock(paths, taskId, () => continueTaskLocked(paths, taskId, input));
+}
+async function continueTaskLocked(paths, taskId, input) {
   assertHost(input.host);
   if (input.sessionId !== void 0) {
     sessionBindingPath(paths, input.host, input.sessionId);
@@ -1825,6 +1945,9 @@ async function continueTask(paths, taskId, input) {
   return { task, binding };
 }
 async function transitionTask(paths, taskId, newStatus, options) {
+  return withTaskLock(paths, taskId, () => transitionTaskLocked(paths, taskId, newStatus, options));
+}
+async function transitionTaskLocked(paths, taskId, newStatus, options) {
   await readConfig(paths);
   assertNonempty2(options.actor, "Transition actor");
   assertNonempty2(options.reason, "Transition reason");
@@ -1846,6 +1969,9 @@ async function transitionTask(paths, taskId, newStatus, options) {
   return (await persistTaskTransition(paths, location, task, transition)).task;
 }
 async function finishTask(paths, taskId, input) {
+  return withTaskLock(paths, taskId, () => finishTaskLocked(paths, taskId, input));
+}
+async function finishTaskLocked(paths, taskId, input) {
   if (!input.confirmed) throw new ValidationError("Finish requires explicit --confirmed.");
   await readConfig(paths);
   assertBoundedNonempty2(input.actor, "Finish actor", 200);
@@ -1906,6 +2032,9 @@ async function finishTask(paths, taskId, input) {
   });
 }
 async function archiveTask(paths, taskId, input, operationOverrides = {}) {
+  return withTaskLock(paths, taskId, () => archiveTaskLocked(paths, taskId, input, operationOverrides));
+}
+async function archiveTaskLocked(paths, taskId, input, operationOverrides) {
   if (!input.confirmed) throw new ValidationError("Archive requires explicit --confirmed.");
   await readConfig(paths);
   assertBoundedNonempty2(input.actor, "Archive actor", 200);
@@ -1924,17 +2053,17 @@ async function archiveTask(paths, taskId, input, operationOverrides = {}) {
   });
 }
 async function addRequirement(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return addRequirementLike(paths, taskId, input, "requirements", "requirement_added", now);
+  return withTaskLock(paths, taskId, () => addRequirementLike(paths, taskId, input, "requirements", "requirement_added", now));
 }
 async function addAcceptanceCriterion(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return addRequirementLike(
+  return withTaskLock(paths, taskId, () => addRequirementLike(
     paths,
     taskId,
     input,
     "acceptanceCriteria",
     "acceptance_criterion_added",
     now
-  );
+  ));
 }
 async function setTaskBrief(paths, taskId, sourceFile, actor = "cli", now = () => /* @__PURE__ */ new Date()) {
   return setTaskDocument(paths, taskId, sourceFile, "brief.md", actor, now);
@@ -1994,6 +2123,9 @@ async function addRequirementLike(paths, taskId, input, collection, eventType, n
   })).task;
 }
 async function setTaskDocument(paths, taskId, sourceFile, artifact, actor, now) {
+  return withTaskLock(paths, taskId, () => setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor, now));
+}
+async function setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor, now) {
   await readConfig(paths);
   assertNonempty2(sourceFile, "Source file");
   assertBoundedNonempty2(actor, "Task document actor", 200);
@@ -2390,7 +2522,7 @@ function isMissing5(error) {
 
 // src/core/learning.ts
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { lstat as lstat9, mkdir as mkdir3, readFile as readFile7, rename as rename3, rmdir, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
+import { lstat as lstat9, mkdir as mkdir3, readFile as readFile7, rename as rename3, rmdir as rmdir2, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
 import { basename as basename3, dirname as dirname2, join as join7 } from "node:path";
 var DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 var MAX_DOMAIN_CHARACTERS = 100;
@@ -2405,6 +2537,9 @@ var PROMOTION_LOCK_RETRY_MILLISECONDS = 25;
 var PROMOTION_LOCK_TIMEOUT_MILLISECONDS = 5e3;
 var PROMOTION_LOCK_STALE_MILLISECONDS = 5 * 60 * 1e3;
 async function proposeLearning(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
+  return withTaskLock(paths, taskId, () => proposeLearningLocked(paths, taskId, input, now));
+}
+async function proposeLearningLocked(paths, taskId, input, now) {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
@@ -2451,10 +2586,10 @@ async function acceptLearning(paths, taskId, input, now = () => /* @__PURE__ */ 
   if (input.confirmedBy !== "user") {
     throw new ValidationError("Learning acceptance requires literal --confirmed-by user.");
   }
-  return withPromotionLock(
+  return withTaskLock(paths, taskId, () => withPromotionLock(
     paths,
     () => acceptLearningWhileLocked(paths, taskId, id, actor, now)
-  );
+  ));
 }
 async function acceptLearningWhileLocked(paths, taskId, id, actor, now) {
   const location = await findTask(paths, taskId);
@@ -2534,6 +2669,9 @@ async function acceptLearningWhileLocked(paths, taskId, id, actor, now) {
   return task;
 }
 async function archiveLearning(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
+  return withTaskLock(paths, taskId, () => archiveLearningLocked(paths, taskId, input, now));
+}
+async function archiveLearningLocked(paths, taskId, input, now) {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
@@ -2777,7 +2915,7 @@ async function acquirePromotionLock(paths) {
       if (Date.now() >= deadline) {
         throw new ValidationError(await describePromotionLock(paths, directory, ownerPath));
       }
-      await delay(PROMOTION_LOCK_RETRY_MILLISECONDS);
+      await delay2(PROMOTION_LOCK_RETRY_MILLISECONDS);
       continue;
     }
     const owner = {
@@ -2819,7 +2957,7 @@ async function releasePromotionLock(paths, lock) {
   }
   try {
     await unlink2(lock.ownerPath);
-    await rmdir(lock.directory);
+    await rmdir2(lock.directory);
   } catch (error) {
     throw new SchemaError(
       `Unable to release learning promotion lock ${lock.directory}; inspect and remove it only after confirming no promotion is active`,
@@ -2859,13 +2997,13 @@ async function cleanupOwnedLock(directory, ownerPath) {
     if (!isCode2(error, "ENOENT")) failures.push(ownerPath);
   }
   try {
-    await rmdir(directory);
+    await rmdir2(directory);
   } catch (error) {
     if (!isCode2(error, "ENOENT")) failures.push(directory);
   }
   return failures;
 }
-function delay(milliseconds) {
+function delay2(milliseconds) {
   return new Promise((resolve7) => {
     setTimeout(resolve7, milliseconds);
   });

@@ -24,6 +24,7 @@ import {
   sessionBindingPath,
   writeSessionBinding,
   writeTaskArtifact,
+  withTaskLock,
   type TaskLocation,
 } from "./task-store.js";
 import { assertNoSymlink, type VineaPaths } from "./paths.js";
@@ -284,6 +285,14 @@ export async function continueTask(
   taskId: string,
   input: ContinueTaskInput,
 ): Promise<ContinuationResult> {
+  return withTaskLock(paths, taskId, () => continueTaskLocked(paths, taskId, input));
+}
+
+async function continueTaskLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: ContinueTaskInput,
+): Promise<ContinuationResult> {
   assertHost(input.host);
   if (input.sessionId !== undefined) {
     sessionBindingPath(paths, input.host, input.sessionId);
@@ -351,6 +360,15 @@ export async function transitionTask(
   newStatus: TaskStatus,
   options: TransitionOptions,
 ): Promise<TaskRecord> {
+  return withTaskLock(paths, taskId, () => transitionTaskLocked(paths, taskId, newStatus, options));
+}
+
+async function transitionTaskLocked(
+  paths: VineaPaths,
+  taskId: string,
+  newStatus: TaskStatus,
+  options: TransitionOptions,
+): Promise<TaskRecord> {
   await readConfig(paths);
   assertNonempty(options.actor, "Transition actor");
   assertNonempty(options.reason, "Transition reason");
@@ -374,6 +392,14 @@ export async function transitionTask(
 }
 
 export async function finishTask(
+  paths: VineaPaths,
+  taskId: string,
+  input: CompletionInput,
+): Promise<TaskRecord> {
+  return withTaskLock(paths, taskId, () => finishTaskLocked(paths, taskId, input));
+}
+
+async function finishTaskLocked(
   paths: VineaPaths,
   taskId: string,
   input: CompletionInput,
@@ -448,6 +474,15 @@ export async function archiveTask(
   input: CompletionInput,
   operationOverrides: Partial<ArchiveOperations> = {},
 ): Promise<TaskRecord> {
+  return withTaskLock(paths, taskId, () => archiveTaskLocked(paths, taskId, input, operationOverrides));
+}
+
+async function archiveTaskLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: CompletionInput,
+  operationOverrides: Partial<ArchiveOperations>,
+): Promise<TaskRecord> {
   if (!input.confirmed) throw new ValidationError("Archive requires explicit --confirmed.");
   await readConfig(paths);
   assertBoundedNonempty(input.actor, "Archive actor", 200);
@@ -472,7 +507,7 @@ export async function addRequirement(
   input: RequirementInput,
   now: Clock = () => new Date(),
 ): Promise<TaskRecord> {
-  return addRequirementLike(paths, taskId, input, "requirements", "requirement_added", now);
+  return withTaskLock(paths, taskId, () => addRequirementLike(paths, taskId, input, "requirements", "requirement_added", now));
 }
 
 export async function addAcceptanceCriterion(
@@ -481,14 +516,14 @@ export async function addAcceptanceCriterion(
   input: RequirementInput,
   now: Clock = () => new Date(),
 ): Promise<TaskRecord> {
-  return addRequirementLike(
+  return withTaskLock(paths, taskId, () => addRequirementLike(
     paths,
     taskId,
     input,
     "acceptanceCriteria",
     "acceptance_criterion_added",
     now,
-  );
+  ));
 }
 
 export async function setTaskBrief(
@@ -576,6 +611,17 @@ async function addRequirementLike(
 }
 
 async function setTaskDocument(
+  paths: VineaPaths,
+  taskId: string,
+  sourceFile: string,
+  artifact: "brief.md" | "plan.md",
+  actor: string,
+  now: Clock,
+): Promise<TaskDocumentResult> {
+  return withTaskLock(paths, taskId, () => setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor, now));
+}
+
+async function setTaskDocumentLocked(
   paths: VineaPaths,
   taskId: string,
   sourceFile: string,

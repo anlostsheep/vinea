@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rmdir, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { AmbiguousTaskError, SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
@@ -26,6 +27,9 @@ const ARTIFACTS = [
   "journal.md",
 ] as const;
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const TASK_LOCK_RETRY_MILLISECONDS = 25;
+const TASK_LOCK_TIMEOUT_MILLISECONDS = 5000;
+const taskLockContext = new AsyncLocalStorage<Set<string>>();
 
 export interface TaskLocation {
   task: TaskRecord;
@@ -136,6 +140,16 @@ export async function persistTaskTransition(
   transition: JournalTransitionDetails,
   operationOverrides: Partial<TransitionPersistenceOperations> = {},
 ): Promise<TaskLocation> {
+  return withTaskLock(paths, task.id, () => persistTaskTransitionLocked(paths, location, task, transition, operationOverrides));
+}
+
+async function persistTaskTransitionLocked(
+  paths: VineaPaths,
+  location: TaskLocation,
+  task: TaskRecord,
+  transition: JournalTransitionDetails,
+  operationOverrides: Partial<TransitionPersistenceOperations>,
+): Promise<TaskLocation> {
   // The append-only intent is the audit record; task.json's atomic status write is
   // the commit marker. Archive moves happen while the old status is still stored,
   // so any returned failure is either old-state + intent or new-state + no later failure.
@@ -194,6 +208,16 @@ export async function persistTaskMutation(
   event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
   operationOverrides: Partial<TransitionPersistenceOperations> = {},
 ): Promise<TaskLocation> {
+  return withTaskLock(paths, task.id, () => persistTaskMutationLocked(paths, location, task, event, operationOverrides));
+}
+
+async function persistTaskMutationLocked(
+  paths: VineaPaths,
+  location: TaskLocation,
+  task: TaskRecord,
+  event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
+  operationOverrides: Partial<TransitionPersistenceOperations>,
+): Promise<TaskLocation> {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
   await appendTaskMutationIntent(paths, location, event, operations);
   try {
@@ -229,6 +253,15 @@ export async function appendTaskMutationIntent(
   event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
   operationOverrides: Partial<TransitionPersistenceOperations> = {},
 ): Promise<TaskMutationJournalEvent> {
+  return withTaskLock(paths, location.task.id, () => appendTaskMutationIntentLocked(paths, location, event, operationOverrides));
+}
+
+async function appendTaskMutationIntentLocked(
+  paths: VineaPaths,
+  location: TaskLocation,
+  event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
+  operationOverrides: Partial<TransitionPersistenceOperations>,
+): Promise<TaskMutationJournalEvent> {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
   await assertNoPendingTaskTransition(paths, location);
   const journalPath = join(location.directory, "journal.md");
@@ -243,6 +276,14 @@ export async function appendTaskMutationIntent(
 }
 
 export async function appendTaskContinuation(
+  paths: VineaPaths,
+  location: TaskLocation,
+  event: JournalContinuationEvent,
+): Promise<void> {
+  return withTaskLock(paths, location.task.id, () => appendTaskContinuationLocked(paths, location, event));
+}
+
+async function appendTaskContinuationLocked(
   paths: VineaPaths,
   location: TaskLocation,
   event: JournalContinuationEvent,
@@ -334,11 +375,28 @@ export async function writeTaskArtifact(
   artifact: "brief.md" | "plan.md",
   contents: string,
 ): Promise<void> {
+  return withTaskLock(paths, location.task.id, () => writeTaskArtifactLocked(paths, location, artifact, contents));
+}
+
+async function writeTaskArtifactLocked(
+  paths: VineaPaths,
+  location: TaskLocation,
+  artifact: "brief.md" | "plan.md",
+  contents: string,
+): Promise<void> {
   await assertNoPendingTaskTransition(paths, location);
   await writeTaskTextArtifact(paths, location, artifact, contents);
 }
 
 export async function writeCheckArtifact(
+  paths: VineaPaths,
+  location: TaskLocation,
+  contents: string,
+): Promise<void> {
+  return withTaskLock(paths, location.task.id, () => writeCheckArtifactLocked(paths, location, contents));
+}
+
+async function writeCheckArtifactLocked(
   paths: VineaPaths,
   location: TaskLocation,
   contents: string,
@@ -473,6 +531,107 @@ async function pathExists(path: string): Promise<boolean> {
     if (isCode(error, "ENOENT")) return false;
     throw error;
   }
+}
+
+export async function withTaskLock<T>(
+  paths: VineaPaths,
+  taskId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!TASK_ID_PATTERN.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
+  const key = `${paths.repoRoot}\0${taskId}`;
+  const inherited = taskLockContext.getStore();
+  if (inherited?.has(key)) return operation();
+
+  const lock = await acquireTaskLock(paths, taskId);
+  const context = new Set(inherited ?? []);
+  context.add(key);
+  try {
+    return await taskLockContext.run(context, operation);
+  } finally {
+    await releaseTaskLock(paths, lock);
+  }
+}
+
+interface TaskLock {
+  directory: string;
+  ownerPath: string;
+  token: string;
+}
+
+async function acquireTaskLock(paths: VineaPaths, taskId: string): Promise<TaskLock> {
+  const locks = join(paths.runtime, "task-locks");
+  const directory = join(locks, `${taskId}.lock`);
+  const ownerPath = join(directory, "owner.json");
+  const token = randomUUID();
+  const deadline = Date.now() + TASK_LOCK_TIMEOUT_MILLISECONDS;
+  await ensureDirectory(paths.repoRoot, locks);
+  for (;;) {
+    await assertNoSymlink(paths.repoRoot, directory);
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      if (!isCode(error, "EEXIST")) {
+        throw new SchemaError(`Unable to acquire task lock for ${taskId}`, error);
+      }
+      if (Date.now() >= deadline) {
+        throw new ValidationError(
+          `Task ${taskId} is busy in another Vinea process; wait for it to finish and retry. Vinea will not remove a lock it does not own.`,
+        );
+      }
+      await delay(TASK_LOCK_RETRY_MILLISECONDS);
+      continue;
+    }
+    try {
+      await writeFile(ownerPath, `${JSON.stringify({ token, pid: process.pid, acquiredAt: new Date().toISOString() })}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      try {
+        await rmdir(directory);
+      } catch (cleanupError) {
+        if (!isCode(cleanupError, "ENOENT")) {
+          throw new SchemaError(`Unable to initialize task lock for ${taskId}; empty lock cleanup failed`, {
+            error,
+            cleanupError,
+          });
+        }
+      }
+      throw new SchemaError(`Unable to initialize task lock for ${taskId}`, error);
+    }
+    return { directory, ownerPath, token };
+  }
+}
+
+async function releaseTaskLock(paths: VineaPaths, lock: TaskLock): Promise<void> {
+  await assertNoSymlink(paths.repoRoot, lock.ownerPath);
+  let owner: unknown;
+  try {
+    owner = JSON.parse(await readFile(lock.ownerPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new SchemaError(`Unable to verify task lock ownership at ${lock.directory}`, error);
+  }
+  if (!isRecord(owner) || owner.token !== lock.token) {
+    throw new SchemaError(`Task lock ownership changed at ${lock.directory}; refusing unsafe cleanup.`);
+  }
+  await removeOwnedTaskLock(lock.directory, lock.ownerPath, lock.token);
+}
+
+async function removeOwnedTaskLock(directory: string, ownerPath: string, token: string): Promise<void> {
+  try {
+    const owner = JSON.parse(await readFile(ownerPath, "utf8")) as unknown;
+    if (!isRecord(owner) || owner.token !== token) return;
+    await unlink(ownerPath);
+    await rmdir(directory);
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return;
+    throw new SchemaError(`Unable to release owned task lock ${directory}`, error);
+  }
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function isCode(error: unknown, code: string): error is NodeJS.ErrnoException {
