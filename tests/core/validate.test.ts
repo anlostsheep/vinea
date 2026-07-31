@@ -36,6 +36,81 @@ test("validate emits one deterministic JSON object and accepts a missing local r
   expect(JSON.parse(result.stdout)).toEqual({ issues: [] });
 });
 
+test("validate reports retained task lock owner states in sorted JSON without modifying them", async () => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+  const paths = resolveVineaPaths(cwd);
+  const locks = join(paths.runtime, "task-locks");
+  const retained = [
+    ["t-20260731-195000-a-valid", "{\"token\":\"valid-owner\"}\n", "TASK_LOCK_RETAINED"],
+    ["t-20260731-195001-b-missing", undefined, "TASK_LOCK_OWNER_MISSING"],
+    ["t-20260731-195002-c-malformed", "{\"token\":42}\n", "TASK_LOCK_OWNER_MALFORMED"],
+    ["t-20260731-195003-d-unreadable", "directory", "TASK_LOCK_OWNER_UNREADABLE"],
+    ["t-20260731-195004-e-unsafe", "symlink", "TASK_LOCK_OWNER_UNSAFE"],
+  ] as const;
+  const outsideOwner = join(cwd, "outside-owner.json");
+  await writeFile(outsideOwner, "{\"token\":\"outside\"}\n", "utf8");
+  for (const [taskId, owner] of retained) {
+    const lock = join(locks, `${taskId}.lock`);
+    await mkdir(lock, { recursive: true });
+    if (owner === "directory") await mkdir(join(lock, "owner.json"));
+    else if (owner === "symlink") await symlink(outsideOwner, join(lock, "owner.json"));
+    else if (owner !== undefined) await writeFile(join(lock, "owner.json"), owner, "utf8");
+  }
+  const validLock = join(locks, `${retained[0][0]}.lock`);
+  const before = await stat(validLock);
+
+  const result = await runCli(["validate", "--json"], cwd);
+  const issues = (JSON.parse(result.stdout) as { issues: Array<{ code: string; path: string; message: string }> }).issues;
+
+  expect(result.exitCode).toBe(1);
+  expect(issues.map(({ code }) => code)).toEqual(retained.map(([, , code]) => code));
+  expect(issues).toEqual([...issues].sort((left, right) =>
+    left.path.localeCompare(right.path) || left.code.localeCompare(right.code) || left.message.localeCompare(right.message),
+  ));
+  for (const [taskId] of retained) {
+    const issue = issues.find(({ path }) => path.endsWith(`${taskId}.lock`));
+    expect(issue?.message).toContain(`task ${taskId}`);
+    expect(issue?.message).toContain("age");
+    expect(issue?.message).toContain(
+      `Confirm no active process, then remove exact lock directory .vinea/.runtime/task-locks/${taskId}.lock.`,
+    );
+  }
+  expect((await stat(validLock)).mtimeMs).toBe(before.mtimeMs);
+  expect(await readFile(join(validLock, "owner.json"), "utf8")).toBe("{\"token\":\"valid-owner\"}\n");
+  expect(await readFile(outsideOwner, "utf8")).toBe("{\"token\":\"outside\"}\n");
+});
+
+test.each(["file", "symbolic link"] as const)(
+  "validate reports a %s task-lock directory without following or repairing it",
+  async (kind) => {
+    const cwd = await createTempRepo();
+    expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+    const locks = join(cwd, ".vinea", ".runtime", "task-locks");
+    await rm(locks, { recursive: true, force: true });
+    if (kind === "file") {
+      await writeFile(locks, "not a directory\n", "utf8");
+    } else {
+      const outside = join(cwd, "outside-locks");
+      await mkdir(outside);
+      await symlink(outside, locks);
+    }
+
+    const result = await runCli(["validate", "--json"], cwd);
+    const issues = (JSON.parse(result.stdout) as { issues: Array<{ code: string; path: string; message: string }> }).issues;
+
+    expect(result.exitCode).toBe(1);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      code: "TASK_LOCK_DIRECTORY_INVALID",
+      path: ".vinea/.runtime/task-locks",
+      message: expect.stringContaining(
+        "Confirm no active process, then remove exact lock directory .vinea/.runtime/task-locks.",
+      ),
+    });
+  },
+);
+
 test("validate verifies managed spec files, index targets, and the runtime ignore contract", async () => {
   const cwd = await createTempRepo();
   expect((await runCli(["init"], cwd)).exitCode).toBe(0);

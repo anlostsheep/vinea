@@ -65,6 +65,7 @@ test.each([
       path: string;
       taskId: string | null;
       ageMilliseconds: number;
+      status: string;
       owner: { status: string; token?: string };
       recoveryInstruction: string;
     }>;
@@ -76,6 +77,7 @@ test.each([
     path: `.vinea/.runtime/task-locks/${taskId}.lock`,
     taskId,
     ageMilliseconds: expect.any(Number),
+    status: ownerStatus === "valid" ? "retained" : `owner_${ownerStatus}`,
     owner: ownerStatus === "valid" ? { status: "valid", token: "retained-owner" } : { status: ownerStatus },
     recoveryInstruction: `Confirm no active process, then remove exact lock directory .vinea/.runtime/task-locks/${taskId}.lock.`,
   }]);

@@ -2473,33 +2473,13 @@ function normalizeError(error) {
 
 // src/core/doctor.ts
 import { execFile as execFile3 } from "node:child_process";
+import { lstat as lstat9, readdir as readdir3 } from "node:fs/promises";
+import { promisify as promisify3 } from "node:util";
+
+// src/core/task-locks.ts
 import { lstat as lstat8, readFile as readFile7, readdir as readdir2 } from "node:fs/promises";
 import { basename as basename3, join as join7, relative as relative4 } from "node:path";
-import { promisify as promisify3 } from "node:util";
-var execFileAsync3 = promisify3(execFile3);
 var TASK_LOCK_FILENAME = /^(t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*)\.lock$/;
-async function diagnoseWorkspace(paths) {
-  const [workspace, runtimeSessions, taskLocks, gitStatus] = await Promise.all([
-    inspectWorkspace(paths),
-    inspectRuntimeSessions(paths),
-    inspectTaskLocks(paths),
-    inspectGitAvailability(paths.repoRoot)
-  ]);
-  const missingRequiredDirectories = workspace.missingRequiredDirectories.filter(
-    (directory) => directory !== ".runtime/sessions" || runtimeSessions !== "missing"
-  );
-  if (runtimeSessions === "invalid" && !missingRequiredDirectories.includes(".runtime/sessions")) {
-    missingRequiredDirectories.push(".runtime/sessions");
-  }
-  return {
-    ...workspace,
-    missingRequiredDirectories,
-    migrationGuidance: runtimeSessions === "invalid" && workspace.migrationGuidance === null ? "Repair or remove malformed local .runtime/sessions state before using session recovery." : workspace.migrationGuidance,
-    healthy: workspace.supportedSchema && missingRequiredDirectories.length === 0 && taskLocks.length === 0,
-    taskLocks,
-    gitStatus
-  };
-}
 async function inspectTaskLocks(paths) {
   const locksDirectory = join7(paths.runtime, "task-locks");
   let entries;
@@ -2507,32 +2487,32 @@ async function inspectTaskLocks(paths) {
     await assertNoSymlink(paths.repoRoot, locksDirectory);
     const locks = await lstat8(locksDirectory);
     if (!locks.isDirectory() || locks.isSymbolicLink()) {
-      return [taskLockDiagnostic(paths, locksDirectory, null, null, { status: "unsafe" })];
+      return [taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" })];
     }
     entries = await readdir2(locksDirectory);
   } catch (error) {
     if (isMissing5(error)) return [];
-    return [taskLockDiagnostic(paths, locksDirectory, null, null, { status: "unreadable" })];
+    return [taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" })];
   }
   const diagnostics = await Promise.all(entries.map(async (entry) => inspectTaskLock(paths, join7(locksDirectory, entry))));
   return diagnostics.sort((left, right) => left.path.localeCompare(right.path));
 }
 async function inspectTaskLock(paths, directory) {
-  const filename = basename3(directory);
-  const taskId = TASK_LOCK_FILENAME.exec(filename)?.[1] ?? null;
+  const taskId = TASK_LOCK_FILENAME.exec(basename3(directory))?.[1] ?? null;
   let ageMilliseconds = null;
   try {
     await assertNoSymlink(paths.repoRoot, directory);
     const entry = await lstat8(directory);
     ageMilliseconds = Math.max(0, Date.now() - entry.mtimeMs);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
-      return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, { status: "unsafe" });
+      return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, "directory_invalid", { status: "unsafe" });
     }
   } catch {
-    return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, { status: "unsafe" });
+    return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, "directory_invalid", { status: "unsafe" });
   }
   const owner = await inspectTaskLockOwner(paths, join7(directory, "owner.json"));
-  return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, owner);
+  const status = owner.status === "valid" ? "retained" : `owner_${owner.status}`;
+  return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, status, owner);
 }
 async function inspectTaskLockOwner(paths, ownerPath) {
   try {
@@ -2556,25 +2536,57 @@ async function inspectTaskLockOwner(paths, ownerPath) {
     return { status: "malformed" };
   }
 }
-function taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, owner) {
-  const path = displayPath(paths, directory);
+function taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, status, owner) {
+  const path = relative4(paths.repoRoot, directory).split("\\").join("/");
   return {
     path,
     taskId,
     ageMilliseconds,
+    status,
     owner,
     recoveryInstruction: `Confirm no active process, then remove exact lock directory ${path}.`
+  };
+}
+function isMissing5(error) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+function isRecord6(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/core/doctor.ts
+var execFileAsync3 = promisify3(execFile3);
+async function diagnoseWorkspace(paths) {
+  const [workspace, runtimeSessions, taskLocks, gitStatus] = await Promise.all([
+    inspectWorkspace(paths),
+    inspectRuntimeSessions(paths),
+    inspectTaskLocks(paths),
+    inspectGitAvailability(paths.repoRoot)
+  ]);
+  const missingRequiredDirectories = workspace.missingRequiredDirectories.filter(
+    (directory) => directory !== ".runtime/sessions" || runtimeSessions !== "missing"
+  );
+  if (runtimeSessions === "invalid" && !missingRequiredDirectories.includes(".runtime/sessions")) {
+    missingRequiredDirectories.push(".runtime/sessions");
+  }
+  return {
+    ...workspace,
+    missingRequiredDirectories,
+    migrationGuidance: runtimeSessions === "invalid" && workspace.migrationGuidance === null ? "Repair or remove malformed local .runtime/sessions state before using session recovery." : workspace.migrationGuidance,
+    healthy: workspace.supportedSchema && missingRequiredDirectories.length === 0 && taskLocks.length === 0,
+    taskLocks,
+    gitStatus
   };
 }
 async function inspectRuntimeSessions(paths) {
   try {
     await assertNoSymlink(paths.repoRoot, paths.sessions);
-    const entry = await lstat8(paths.sessions);
+    const entry = await lstat9(paths.sessions);
     if (!entry.isDirectory() || entry.isSymbolicLink()) return "invalid";
-    await readdir2(paths.sessions);
+    await readdir3(paths.sessions);
     return "usable";
   } catch (error) {
-    return isMissing5(error) ? "missing" : "invalid";
+    return isMissing6(error) ? "missing" : "invalid";
   }
 }
 async function inspectGitAvailability(repoRoot) {
@@ -2592,19 +2604,13 @@ async function inspectGitAvailability(repoRoot) {
     };
   }
 }
-function isMissing5(error) {
+function isMissing6(error) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-function isRecord6(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function displayPath(paths, filename) {
-  return relative4(paths.repoRoot, filename).split("\\").join("/");
 }
 
 // src/core/learning.ts
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { lstat as lstat9, mkdir as mkdir3, readFile as readFile8, rename as rename3, rmdir as rmdir2, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
+import { lstat as lstat10, mkdir as mkdir3, readFile as readFile8, rename as rename3, rmdir as rmdir2, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
 import { basename as basename4, dirname as dirname2, join as join8 } from "node:path";
 var DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 var MAX_DOMAIN_CHARACTERS = 100;
@@ -3050,7 +3056,7 @@ async function releasePromotionLock(paths, lock) {
 async function describePromotionLock(paths, directory, ownerPath) {
   let ageMilliseconds;
   try {
-    ageMilliseconds = Math.max(0, Date.now() - (await lstat9(directory)).mtimeMs);
+    ageMilliseconds = Math.max(0, Date.now() - (await lstat10(directory)).mtimeMs);
   } catch (error) {
     if (!isCode2(error, "ENOENT")) {
       return `Learning promotion lock is busy at ${directory}; retry after the active promotion completes.`;
@@ -3106,7 +3112,7 @@ function isRecord7(value) {
 }
 
 // src/core/validate.ts
-import { lstat as lstat10, readFile as readFile9, readdir as readdir3 } from "node:fs/promises";
+import { lstat as lstat11, readFile as readFile9, readdir as readdir4 } from "node:fs/promises";
 import { isAbsolute as isAbsolute5, join as join9, relative as relative5, resolve as resolve6 } from "node:path";
 var REQUIRED_TASK_ARTIFACTS = [
   "brief.md",
@@ -3144,7 +3150,7 @@ var MANAGED_SPEC_TARGET = /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
 async function validateWorkspace(paths) {
   const issues = [];
   const add = (code, filename, message) => {
-    issues.push({ code, path: displayPath2(paths, filename), message });
+    issues.push({ code, path: displayPath(paths, filename), message });
   };
   const root = await entryKind(paths.vineaRoot);
   if (root === "missing") {
@@ -3186,7 +3192,29 @@ async function validateWorkspace(paths) {
     }
   }
   await validateSessionBindings(paths, taskScan.activeTaskIds, add);
+  await validateTaskLocks(paths, add);
   return { issues: sortIssues(issues) };
+}
+async function validateTaskLocks(paths, add) {
+  const locks = await inspectTaskLocks(paths);
+  for (const lock of locks) {
+    const association = lock.taskId === null ? "unknown task" : `task ${lock.taskId}`;
+    const age = lock.ageMilliseconds === null ? "unknown age" : `age ${lock.ageMilliseconds}ms`;
+    const message = `${association}; ${age}. ${lock.recoveryInstruction}`;
+    if (lock.status === "directory_invalid") {
+      add("TASK_LOCK_DIRECTORY_INVALID", join9(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "retained") {
+      add("TASK_LOCK_RETAINED", join9(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "owner_missing") {
+      add("TASK_LOCK_OWNER_MISSING", join9(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "owner_malformed") {
+      add("TASK_LOCK_OWNER_MALFORMED", join9(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "owner_unreadable") {
+      add("TASK_LOCK_OWNER_UNREADABLE", join9(paths.repoRoot, lock.path), message);
+    } else {
+      add("TASK_LOCK_OWNER_UNSAFE", join9(paths.repoRoot, lock.path), message);
+    }
+  }
 }
 async function validateManagedSpecs(paths, add) {
   const gitignore = await readRequiredRegularFile(paths.gitignore, "VINEA_GITIGNORE", add);
@@ -3284,7 +3312,7 @@ async function scanTaskScope(paths, directory, scope, limits, scan, add) {
   if (await entryKind(directory) !== "directory") return;
   let entries;
   try {
-    entries = await readdir3(directory, { withFileTypes: true });
+    entries = await readdir4(directory, { withFileTypes: true });
   } catch (error) {
     add("DIRECTORY_UNREADABLE", directory, describeError("Unable to list task storage", error));
     return;
@@ -3580,7 +3608,7 @@ async function validateSessionBindings(paths, activeTaskIds, add) {
   }
   let entries;
   try {
-    entries = await readdir3(paths.sessions, { withFileTypes: true });
+    entries = await readdir4(paths.sessions, { withFileTypes: true });
   } catch (error) {
     add("RUNTIME_UNREADABLE", paths.sessions, describeError("Unable to list session bindings", error));
     return;
@@ -3884,7 +3912,7 @@ function normalizeRepositoryPath3(input) {
 }
 async function entryKind(path) {
   try {
-    const entry = await lstat10(path);
+    const entry = await lstat11(path);
     if (entry.isSymbolicLink()) return "symlink";
     if (entry.isFile()) return "file";
     if (entry.isDirectory()) return "directory";
@@ -3894,7 +3922,7 @@ async function entryKind(path) {
     return "other";
   }
 }
-function displayPath2(paths, filename) {
+function displayPath(paths, filename) {
   const value = relative5(paths.repoRoot, filename).split("\\").join("/");
   return value === "" ? "." : value;
 }

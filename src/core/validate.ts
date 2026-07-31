@@ -4,6 +4,7 @@ import { parseCheckDocument } from "./check.js";
 import { validateEvidenceRecord } from "./evidence.js";
 import { normalizeSpecTarget, parseSpecIndexTarget } from "./learning.js";
 import type { VineaPaths } from "./paths.js";
+import { inspectTaskLocks } from "./task-locks.js";
 import { SCHEMA_VERSION, type EvidenceRecord, type TaskStatus } from "./types.js";
 
 const REQUIRED_TASK_ARTIFACTS = [
@@ -110,7 +111,30 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
   }
 
   await validateSessionBindings(paths, taskScan.activeTaskIds, add);
+  await validateTaskLocks(paths, add);
   return { issues: sortIssues(issues) };
+}
+
+async function validateTaskLocks(paths: VineaPaths, add: IssueAdder): Promise<void> {
+  const locks = await inspectTaskLocks(paths);
+  for (const lock of locks) {
+    const association = lock.taskId === null ? "unknown task" : `task ${lock.taskId}`;
+    const age = lock.ageMilliseconds === null ? "unknown age" : `age ${lock.ageMilliseconds}ms`;
+    const message = `${association}; ${age}. ${lock.recoveryInstruction}`;
+    if (lock.status === "directory_invalid") {
+      add("TASK_LOCK_DIRECTORY_INVALID", join(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "retained") {
+      add("TASK_LOCK_RETAINED", join(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "owner_missing") {
+      add("TASK_LOCK_OWNER_MISSING", join(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "owner_malformed") {
+      add("TASK_LOCK_OWNER_MALFORMED", join(paths.repoRoot, lock.path), message);
+    } else if (lock.status === "owner_unreadable") {
+      add("TASK_LOCK_OWNER_UNREADABLE", join(paths.repoRoot, lock.path), message);
+    } else {
+      add("TASK_LOCK_OWNER_UNSAFE", join(paths.repoRoot, lock.path), message);
+    }
+  }
 }
 
 async function validateManagedSpecs(paths: VineaPaths, add: IssueAdder): Promise<void> {
