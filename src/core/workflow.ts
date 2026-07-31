@@ -12,7 +12,6 @@ import {
   appendTaskContinuation,
   assertTaskMutable,
   createTaskArtifacts,
-  appendTaskMutationIntent,
   executeTaskMutation,
   findTask,
   listStoredTasks,
@@ -26,7 +25,7 @@ import {
   removeTaskSessionBindings,
   sessionBindingPath,
   writeSessionBinding,
-  writeTaskArtifact,
+  writeManagedMutationTarget,
   withTaskLock,
   type TaskLocation,
 } from "./task-store.js";
@@ -690,16 +689,34 @@ async function setTaskDocumentLocked(
   if (contents.trim() === "") {
     throw new ValidationError(`Task document source must not be empty: ${sourceFile}`);
   }
-  const timestamp = now().toISOString();
   const type = artifact === "brief.md" ? "brief_set" : "plan_set";
-  await appendTaskMutationIntent(paths, location, {
-    schemaVersion: SCHEMA_VERSION,
-    type,
-    timestamp,
-    actor: actor.trim(),
-    artifact,
-  });
-  await writeTaskArtifact(paths, location, artifact, contents);
+  const normalizedActor = actor.trim();
+  await executeTaskMutation(paths, location, {
+    mutationKind: type,
+    actor: normalizedActor,
+    timestamp: now().toISOString(),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type,
+      actor: normalizedActor,
+      artifact,
+      contentsSha256: mutationFingerprint(contents),
+    }),
+  }, async (timestamp) => ({
+    expected: mutationTargetSummary(paths, [{
+      filename: join(location.directory, artifact),
+      contents,
+    }], { artifact, valueSha256: mutationFingerprint(contents) }),
+    completion: {
+      schemaVersion: SCHEMA_VERSION,
+      type,
+      mutationKind: type,
+      timestamp,
+      actor: normalizedActor,
+      artifact,
+    },
+    apply: () => writeManagedMutationTarget(paths, location, join(location.directory, artifact), contents),
+  }));
   return { taskId, artifact, estimatedBytes: bytes.byteLength };
 }
 

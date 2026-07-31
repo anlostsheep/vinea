@@ -6,9 +6,17 @@ import {
 } from "node:path";
 import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
-import { appendJsonl } from "./json.js";
 import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
-import { appendTaskMutationIntent, assertTaskMutable, findTask, withTaskLock } from "./task-store.js";
+import {
+  assertTaskMutable,
+  executeTaskMutation,
+  findTask,
+  mutationFingerprint,
+  mutationTargetSummary,
+  mutationValueIdentity,
+  withTaskLock,
+  writeManagedMutationTarget,
+} from "./task-store.js";
 import {
   SCHEMA_VERSION,
   type ContextReference,
@@ -57,43 +65,72 @@ async function addContextReferenceLocked(
     throw new ValidationError("Context path exceeds the 4096-byte audit metadata limit.");
   }
   const estimatedBytes = await inspectContextFile(paths.repoRoot, normalizedPath);
+  const purpose = input.purpose.trim();
+  const actor = input.actor.trim();
   const filename = resolve(location.directory, "context.jsonl");
-  const references = await readContextReferences(paths.repoRoot, filename);
-
-  if (references.some((reference) => reference.path === normalizedPath)) {
-    throw new ValidationError(`Context path is already registered for task ${taskId}: ${normalizedPath}`);
-  }
-  const nextFiles = references.length + 1;
-  const nextEstimatedBytes = references.reduce(
-    (total, reference) => total + reference.estimatedBytes,
-    estimatedBytes,
-  );
-  if (nextFiles > config.context.maxFiles) {
-    throw new ValidationError(
-      `Context file budget exceeded for task ${taskId}: ${nextFiles} > ${config.context.maxFiles}`,
+  const intent = await executeTaskMutation(paths, location, {
+    mutationKind: "context_added",
+    actor,
+    timestamp: now().toISOString(),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: "context_added",
+      actor,
+      path: normalizedPath,
+      purpose,
+      estimatedBytes,
+    }),
+  }, async (timestamp, recovering) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const currentFilename = resolve(current.directory, "context.jsonl");
+    const references = await readContextReferences(paths.repoRoot, currentFilename);
+    if (references.some((reference) => reference.path === normalizedPath)) {
+      if (recovering) {
+        throw new SchemaError(`Pending context mutation already contains ${normalizedPath}, but its managed target does not match.`);
+      }
+      throw new ValidationError(`Context path is already registered for task ${taskId}: ${normalizedPath}`);
+    }
+    const nextFiles = references.length + 1;
+    const nextEstimatedBytes = references.reduce(
+      (total, reference) => total + reference.estimatedBytes,
+      estimatedBytes,
     );
-  }
-  if (nextEstimatedBytes > config.context.maxEstimatedBytes) {
-    throw new ValidationError(
-      `Context byte budget exceeded for task ${taskId}: ${nextEstimatedBytes} > ${config.context.maxEstimatedBytes}`,
-    );
-  }
-
-  const reference: ContextReference = {
-    schemaVersion: SCHEMA_VERSION,
-    path: normalizedPath,
-    purpose: input.purpose.trim(),
-    estimatedBytes,
-    addedAt: now().toISOString(),
-  };
-  await appendTaskMutationIntent(paths, location, {
-    schemaVersion: SCHEMA_VERSION,
-    type: "context_added",
-    timestamp: reference.addedAt,
-    actor: input.actor.trim(),
-    path: reference.path,
+    if (!recovering && nextFiles > config.context.maxFiles) {
+      throw new ValidationError(
+        `Context file budget exceeded for task ${taskId}: ${nextFiles} > ${config.context.maxFiles}`,
+      );
+    }
+    if (!recovering && nextEstimatedBytes > config.context.maxEstimatedBytes) {
+      throw new ValidationError(
+        `Context byte budget exceeded for task ${taskId}: ${nextEstimatedBytes} > ${config.context.maxEstimatedBytes}`,
+      );
+    }
+    const reference: ContextReference = {
+      schemaVersion: SCHEMA_VERSION,
+      path: normalizedPath,
+      purpose,
+      estimatedBytes,
+      addedAt: timestamp,
+    };
+    const contents = renderContextReferences([...references, reference]);
+    return {
+      expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ path: normalizedPath }, reference)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: "context_added",
+        mutationKind: "context_added",
+        timestamp,
+        actor,
+        path: normalizedPath,
+      },
+      apply: () => writeManagedMutationTarget(paths, current, currentFilename, contents),
+    };
   });
-  await appendJsonl(filename, reference, paths.repoRoot);
+  const reference = (await readContextReferences(paths.repoRoot, filename)).find(
+    (candidate) => candidate.path === intent.expected.identity.path,
+  );
+  if (reference === undefined) throw new SchemaError(`Recovered context mutation did not record ${normalizedPath}.`);
   return reference;
 }
 
@@ -195,6 +232,10 @@ function isContextReference(value: unknown): value is ContextReference {
     && Number.isSafeInteger(record.estimatedBytes)
     && record.estimatedBytes >= 0
     && typeof record.addedAt === "string";
+}
+
+function renderContextReferences(references: ContextReference[]): string {
+  return references.map((reference) => JSON.stringify(reference)).join("\n") + "\n";
 }
 
 function assertNonempty(value: string, label: string): void {

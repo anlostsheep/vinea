@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rmdir, rm, unlink, writeFile } from "node:fs/promises";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { AmbiguousTaskError, SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
 import { assertInside, assertNoSymlink, ensureDirectory, type VineaPaths } from "./paths.js";
@@ -280,7 +280,11 @@ export async function executeTaskMutation(
     timestamp: string;
     fingerprint: string;
   },
-  prepare: (timestamp: string, recovering: boolean) => Promise<PreparedTaskMutation>,
+  prepare: (
+    timestamp: string,
+    recovering: boolean,
+    pending: JournalMutationIntentEvent | null,
+  ) => Promise<PreparedTaskMutation>,
   operationOverrides: Partial<TransitionPersistenceOperations> = {},
 ): Promise<JournalMutationIntentEvent> {
   return withTaskLock(paths, location.task.id, () => executeTaskMutationLocked(
@@ -301,7 +305,11 @@ async function executeTaskMutationLocked(
     timestamp: string;
     fingerprint: string;
   },
-  prepare: (timestamp: string, recovering: boolean) => Promise<PreparedTaskMutation>,
+  prepare: (
+    timestamp: string,
+    recovering: boolean,
+    pending: JournalMutationIntentEvent | null,
+  ) => Promise<PreparedTaskMutation>,
   operations: TransitionPersistenceOperations,
 ): Promise<JournalMutationIntentEvent> {
   await assertNoPendingTaskTransition(paths, location);
@@ -317,7 +325,7 @@ async function executeTaskMutationLocked(
       await appendMutationCompletion(paths, journalPath, pending, operations);
       return pending;
     }
-    const prepared = await prepare(pending.timestamp, true);
+    const prepared = await prepare(pending.timestamp, true, pending);
     if (stableJson(prepared.expected) !== stableJson(pending.expected) || !matchesCompletion(prepared.completion, pending.completion)) {
       throw new SchemaError(`Pending mutation ${pending.operationId} no longer matches the requested target; inspect it before retrying.`);
     }
@@ -329,7 +337,7 @@ async function executeTaskMutationLocked(
     return pending;
   }
 
-  const prepared = await prepare(request.timestamp, false);
+  const prepared = await prepare(request.timestamp, false, null);
   const intent: JournalMutationIntentEvent = {
     schemaVersion: SCHEMA_VERSION,
     type: "mutation_intent",
@@ -385,7 +393,7 @@ async function readPendingTaskMutationIntent(
       continue;
     }
     if (pending !== null && record.operationId === pending.operationId) {
-      if (record.type !== pending.mutationKind || !matchesCompletion(recordWithoutOperationId(record), pending.completion)) {
+      if (!matchesCompletion(recordWithoutOperationId(record), pending.completion)) {
         throw new SchemaError(`Mutation completion ${pending.operationId} does not match its journal intent.`);
       }
       pending = null;
@@ -421,6 +429,33 @@ function isManagedMutationTarget(paths: VineaPaths, location: TaskLocation, targ
   if (MUTATION_TASK_ARTIFACTS.has(taskArtifact)) return true;
   return target === ".vinea/specs/index.md"
     || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
+}
+
+export async function writeManagedMutationTarget(
+  paths: VineaPaths,
+  location: TaskLocation,
+  filename: string,
+  contents: string,
+): Promise<void> {
+  const target = relative(paths.repoRoot, filename).split("\\").join("/");
+  if (!isManagedMutationTarget(paths, location, target)) {
+    throw new ValidationError(`Mutation target is not managed for task ${location.task.id}: ${target}`);
+  }
+  await assertNoSymlink(paths.repoRoot, filename);
+  const temporary = join(dirname(filename), `.${basename(filename)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx" });
+    await rename(temporary, filename);
+  } catch (error) {
+    try {
+      await unlink(temporary);
+    } catch (cleanupError) {
+      if (!isCode(cleanupError, "ENOENT")) {
+        throw new SchemaError(`Unable to clean temporary mutation target ${temporary}`, cleanupError);
+      }
+    }
+    throw new SchemaError(`Unable to write managed mutation target ${filename}`, error);
+  }
 }
 
 async function appendMutationCompletion(
@@ -584,6 +619,7 @@ async function appendTaskMutationIntentLocked(
   event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
   operationOverrides: Partial<TransitionPersistenceOperations>,
 ): Promise<TaskMutationJournalEvent> {
+  await assertNoPendingTaskMutation(paths, location);
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
   await assertNoPendingTaskTransition(paths, location);
   const journalPath = join(location.directory, "journal.md");
@@ -708,7 +744,8 @@ async function writeTaskArtifactLocked(
   contents: string,
 ): Promise<void> {
   await assertNoPendingTaskTransition(paths, location);
-  await writeTaskTextArtifact(paths, location, artifact, contents);
+  await assertNoPendingTaskMutation(paths, location);
+  await writeManagedMutationTarget(paths, location, join(location.directory, artifact), contents);
 }
 
 export async function writeCheckArtifact(
@@ -725,7 +762,8 @@ async function writeCheckArtifactLocked(
   contents: string,
 ): Promise<void> {
   await assertNoPendingTaskTransition(paths, location);
-  await writeTaskTextArtifact(paths, location, "check.md", contents);
+  await assertNoPendingTaskMutation(paths, location);
+  await writeManagedMutationTarget(paths, location, join(location.directory, "check.md"), contents);
 }
 
 export async function removeTaskSessionBindings(
@@ -765,29 +803,6 @@ export async function removeTaskSessionBindings(
   return removed;
 }
 
-async function writeTaskTextArtifact(
-  paths: VineaPaths,
-  location: TaskLocation,
-  artifact: "brief.md" | "plan.md" | "check.md",
-  contents: string,
-): Promise<void> {
-  const filename = join(location.directory, artifact);
-  await assertNoSymlink(paths.repoRoot, filename);
-  const temporary = join(location.directory, `.${artifact}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx" });
-    await rename(temporary, filename);
-  } catch (error) {
-    try {
-      await unlink(temporary);
-    } catch (cleanupError) {
-      if (!isCode(cleanupError, "ENOENT")) {
-        throw new SchemaError(`Unable to clean temporary task artifact ${temporary}`, cleanupError);
-      }
-    }
-    throw new SchemaError(`Unable to write task artifact ${filename}`, error);
-  }
-}
 
 async function findInScope(
   paths: VineaPaths,

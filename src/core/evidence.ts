@@ -3,13 +3,16 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readConfig } from "./config.js";
 import { SchemaError, TransitionError, ValidationError } from "./errors.js";
-import { appendJsonl } from "./json.js";
 import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import {
-  appendTaskMutationIntent,
   assertTaskMutable,
+  executeTaskMutation,
   findTask,
+  mutationFingerprint,
+  mutationTargetSummary,
+  mutationValueIdentity,
   withTaskLock,
+  writeManagedMutationTarget,
   type TaskLocation,
 } from "./task-store.js";
 import {
@@ -79,27 +82,63 @@ async function recordEvidenceLocked(
   const result = input.result === undefined ? inferResult(kind, exitCode) : validateResult(input.result);
   assertConsistentEvidence(kind, result, exitCode);
 
-  const record: EvidenceRecord = {
-    schemaVersion: SCHEMA_VERSION,
-    id: randomUUID(),
-    kind,
-    summary,
-    result,
-    recordedAt: now().toISOString(),
+  const filename = join(location.directory, "evidence.jsonl");
+  const intent = await executeTaskMutation(paths, location, {
+    mutationKind: "evidence_recorded",
     actor,
-    ...(command === undefined ? {} : { command }),
-    ...(exitCode === undefined ? {} : { exitCode }),
-  };
-  validateEvidenceRecord(record);
-  await appendTaskMutationIntent(paths, location, {
-    schemaVersion: SCHEMA_VERSION,
-    type: "evidence_recorded",
-    timestamp: record.recordedAt,
-    actor: record.actor,
-    evidenceId: record.id,
-    evidenceKind: record.kind,
+    timestamp: now().toISOString(),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: "evidence_recorded",
+      actor,
+      kind,
+      summary,
+      command: command ?? null,
+      exitCode: exitCode ?? null,
+      result,
+    }),
+  }, async (timestamp, recovering, pending) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const evidenceId = pending?.expected.identity.evidenceId ?? randomUUID();
+    const record: EvidenceRecord = {
+      schemaVersion: SCHEMA_VERSION,
+      id: evidenceId,
+      kind,
+      summary,
+      result,
+      recordedAt: timestamp,
+      actor,
+      ...(command === undefined ? {} : { command }),
+      ...(exitCode === undefined ? {} : { exitCode }),
+    };
+    validateEvidenceRecord(record);
+    const currentFilename = join(current.directory, "evidence.jsonl");
+    const records = await readEvidenceRecords(paths.repoRoot, currentFilename);
+    if (records.some((candidate) => candidate.id === evidenceId)) {
+      if (recovering) {
+        throw new SchemaError(`Pending evidence mutation already contains ${evidenceId}, but its managed target does not match.`);
+      }
+      throw new SchemaError(`Generated evidence ID already exists in ${currentFilename}: ${evidenceId}`);
+    }
+    const contents = renderEvidenceRecords([...records, record]);
+    return {
+      expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ evidenceId }, record)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: "evidence_recorded",
+        mutationKind: "evidence_recorded",
+        timestamp,
+        actor,
+        evidenceId,
+        evidenceKind: kind,
+      },
+      apply: () => writeManagedMutationTarget(paths, current, currentFilename, contents),
+    };
   });
-  await appendJsonl(join(location.directory, "evidence.jsonl"), record, paths.repoRoot);
+  const evidenceId = intent.expected.identity.evidenceId;
+  const record = (await readEvidenceRecords(paths.repoRoot, filename)).find((candidate) => candidate.id === evidenceId);
+  if (record === undefined) throw new SchemaError(`Recovered evidence mutation did not record ${evidenceId}.`);
   return record;
 }
 
@@ -189,6 +228,10 @@ async function readEvidenceRecords(repoRoot: string, filename: string): Promise<
       throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`, error);
     }
   });
+}
+
+function renderEvidenceRecords(records: EvidenceRecord[]): string {
+  return records.map((record) => JSON.stringify(record)).join("\n") + "\n";
 }
 
 function isValidRed(value: EvidenceRecord): boolean {

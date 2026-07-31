@@ -382,6 +382,34 @@ test("late archive commit failure leaves only an intent and is recoverable by re
   expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
 
+test("archive validation maps only this task's historical active artifacts", async () => {
+  const { task } = await createFinishedTask();
+  await transitionTask(paths, task.id, "archived", {
+    actor: "codex",
+    reason: "Archive validated mutation history",
+    now: () => new Date("2026-07-31T08:14:00.000Z"),
+  });
+  const archivedJournal = join(paths.archivedTasks, task.id, "journal.md");
+  const events = parseJournal(await readFile(archivedJournal, "utf8")) as Array<Record<string, unknown>>;
+  const intent = events.find((event) => event.type === "mutation_intent" && event.mutationKind === "evidence_recorded")!;
+  const expected = intent.expected as { files: Array<{ path: string; sha256: string }> };
+  const originalPath = expected.files[0]!.path;
+
+  expected.files[0]!.path = ".vinea/tasks/active/t-20260731-080910-foreign-task/evidence.jsonl";
+  await writeFile(archivedJournal, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  expect(await validateWorkspace(paths)).toMatchObject({
+    issues: [expect.objectContaining({ code: "MUTATION_TARGET_MISMATCH" })],
+  });
+
+  expected.files[0]!.path = `.vinea/tasks/active/${task.id}/journal.md`;
+  await writeFile(archivedJournal, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  expect(await validateWorkspace(paths)).toMatchObject({
+    issues: [expect.objectContaining({ code: "MUTATION_TARGET_MISMATCH" })],
+  });
+
+  expected.files[0]!.path = originalPath;
+});
+
 test("a failed active task commit reuses its pending intent on retry and validates cleanly", async () => {
   const { task, directory } = await createReadyTask();
   const location = await findTask(paths, task.id);

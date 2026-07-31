@@ -1,15 +1,17 @@
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
-import { appendJsonl } from "./json.js";
 import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
 import {
   assertNoPendingTaskTransition,
+  executeTaskMutation,
   findTask,
+  mutationFingerprint,
+  mutationTargetSummary,
+  mutationValueIdentity,
   withTaskLock,
-  writeCheckArtifact,
+  writeManagedMutationTarget,
   type TaskLocation,
 } from "./task-store.js";
 import {
@@ -94,41 +96,87 @@ async function upsertCheckLocked(
   if (result === "pass" && evidenceIds.length === 0) {
     throw new ValidationError("A passing check row requires at least one evidence ID.");
   }
-  const row: CheckRow = {
-    schemaVersion: SCHEMA_VERSION,
-    requirementId,
-    planItem: boundedNonempty(input.planItem, "Check plan item", MAX_TEXT_BYTES),
-    paths: uniqueStrings(input.paths.map((path) => normalizeRepositoryPath(paths.repoRoot, path))),
-    evidenceIds,
-    result,
-    summary: boundedNonempty(input.summary, "Check summary", MAX_TEXT_BYTES),
-    checkedAt: now().toISOString(),
-  };
-  if (row.paths.length === 0) {
+  const planItem = boundedNonempty(input.planItem, "Check plan item", MAX_TEXT_BYTES);
+  const checkedPaths = uniqueStrings(
+    input.paths.map((path) => normalizeRepositoryPath(paths.repoRoot, path)),
+  );
+  if (checkedPaths.length === 0) {
     throw new ValidationError("Check paths must contain at least one repository-relative path.");
   }
-
-  const existing = await readRows(paths, location, evidence);
-  const eventType = existing.some((candidate) => candidate.requirementId === requirementId)
-    ? "check_updated"
-    : "check_recorded";
-  const byId = new Map(existing.map((candidate) => [candidate.requirementId, candidate]));
-  byId.set(requirementId, row);
-  const rows = declaredIds.flatMap((id) => {
-    const candidate = byId.get(id);
-    return candidate === undefined ? [] : [candidate];
-  });
-  await appendJsonl(join(location.directory, "journal.md"), {
+  const summary = boundedNonempty(input.summary, "Check summary", MAX_TEXT_BYTES);
+  const actor = boundedNonempty(input.actor, "Check actor", MAX_ID_BYTES);
+  const request = {
     schemaVersion: SCHEMA_VERSION,
-    type: eventType,
-    operationId: randomUUID(),
-    timestamp: row.checkedAt,
-    actor: boundedNonempty(input.actor, "Check actor", MAX_ID_BYTES),
+    actor,
     requirementId,
+    planItem,
+    paths: checkedPaths,
+    evidenceIds,
     result,
-  }, paths.repoRoot);
-  await writeCheckArtifact(paths, location, renderCheckDocument(rows));
-  return summarize(taskId, rows);
+    summary,
+  };
+  await executeTaskMutation(paths, location, {
+    mutationKind: "check_upsert",
+    actor,
+    timestamp: now().toISOString(),
+    fingerprint: mutationFingerprint(request),
+  }, async (timestamp, recovering, pending) => {
+    const current = await findTask(paths, taskId);
+    if (current.scope === "archive" || current.task.status === "archived" || current.task.status === "finished") {
+      throw new ValidationError(`Task check rows cannot be edited: ${taskId}`);
+    }
+    const currentEvidence = await readEvidence(paths, current);
+    const currentDeclaredIds = declaredRequirementIds(current);
+    if (!currentDeclaredIds.includes(requirementId)) {
+      throw new ValidationError(`Requirement or acceptance ID is not declared for ${taskId}: ${requirementId}`);
+    }
+    const currentEvidenceIds = new Set(currentEvidence.map(({ id }) => id));
+    const missingEvidence = evidenceIds.find((id) => !currentEvidenceIds.has(id));
+    if (missingEvidence !== undefined) {
+      throw new ValidationError(`Evidence ID is not present for ${taskId}: ${missingEvidence}`);
+    }
+    const row: CheckRow = {
+      schemaVersion: SCHEMA_VERSION,
+      requirementId,
+      planItem,
+      paths: checkedPaths,
+      evidenceIds,
+      result,
+      summary,
+      checkedAt: timestamp,
+    };
+    const existing = await readRows(paths, current, currentEvidence);
+    const eventType = existing.some((candidate) => candidate.requirementId === requirementId)
+      ? "check_updated"
+      : "check_recorded";
+    if (recovering && pending?.completion.type !== eventType) {
+      throw new SchemaError(`Pending check mutation for ${requirementId} no longer has the expected operation type.`);
+    }
+    const byId = new Map(existing.map((candidate) => [candidate.requirementId, candidate]));
+    byId.set(requirementId, row);
+    const rows = currentDeclaredIds.flatMap((id) => {
+      const candidate = byId.get(id);
+      return candidate === undefined ? [] : [candidate];
+    });
+    const contents = renderCheckDocument(rows);
+    return {
+      expected: mutationTargetSummary(paths, [{
+        filename: join(current.directory, "check.md"),
+        contents,
+      }], mutationValueIdentity({ requirementId }, row)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: eventType,
+        mutationKind: eventType,
+        timestamp,
+        actor,
+        requirementId,
+        result,
+      },
+      apply: () => writeManagedMutationTarget(paths, current, join(current.directory, "check.md"), contents),
+    };
+  });
+  return showCheck(paths, taskId);
 }
 
 export async function showCheck(paths: VineaPaths, taskId: string): Promise<CheckSummary> {

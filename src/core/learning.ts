@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { lstat, mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
 import { writeJsonAtomic } from "./json.js";
 import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import {
-  appendTaskMutationIntent,
   assertTaskMutable,
   executeTaskMutation,
   findTask,
@@ -15,6 +14,7 @@ import {
   mutationValueIdentity,
   type TaskLocation,
   withTaskLock,
+  writeManagedMutationTarget,
 } from "./task-store.js";
 import {
   SCHEMA_VERSION,
@@ -167,84 +167,87 @@ async function acceptLearningWhileLocked(
 ): Promise<TaskRecord> {
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
-  const candidates = taskLearningCandidates(location);
-  const candidate = requireProposedCandidate(candidates, taskId, id);
-  const normalizedRule = normalizeWhitespace(candidate.text);
-  const specPath = join(paths.specs, `${candidate.domain}.md`);
-  const [previousSpec, previousIndex] = await Promise.all([
-    readTextIfPresent(paths, specPath),
-    readTextIfPresent(paths, paths.specIndex),
-  ]);
-  if (previousIndex === undefined) {
-    throw new SchemaError(`Missing managed spec index ${paths.specIndex}`);
-  }
-  if (containsNormalizedRule(previousSpec ?? "", normalizedRule)) {
-    throw new ValidationError(
-      `Learning rule already exists in ${candidate.domain} spec: ${normalizedRule}`,
-    );
-  }
-  const domainIndexEntries = countDomainIndexTargets(previousIndex, candidate.domain);
-  if (domainIndexEntries > 1) {
-    throw new ValidationError(
-      `Spec index contains duplicate targets for learning domain ${candidate.domain}; resolve them before promotion.`,
-    );
-  }
-
-  const timestamp = timestampFrom(now);
-  const accepted: LearningCandidate = {
-    ...candidate,
-    status: "accepted",
-    acceptedAt: timestamp,
-    confirmedBy: "user",
-  };
-  const task: TaskRecord = {
-    ...location.task,
-    learningCandidates: replaceCandidate(candidates, accepted),
-    updatedAt: timestamp,
-  };
-  const nextSpec = appendRule(previousSpec, candidate.domain, timestamp.slice(0, 10), normalizedRule);
-  const indexEntry = `- [${candidate.domain}](${candidate.domain}.md)`;
-  const nextIndex = domainIndexEntries === 1
-    ? previousIndex
-    : appendLine(previousIndex, indexEntry);
-
-  await appendTaskMutationIntent(paths, location, {
-    schemaVersion: SCHEMA_VERSION,
-    type: "learning_accepted",
-    timestamp,
+  await executeTaskMutation(paths, location, {
+    mutationKind: "learning_accepted",
     actor,
-    learningCandidateId: id,
-    confirmedBy: "user",
-  });
-
-  let specWritten = false;
-  let indexWritten = false;
-  try {
-    await writeTextAtomic(paths, specPath, nextSpec);
-    specWritten = true;
-    if (nextIndex !== previousIndex) {
-      await writeTextAtomic(paths, paths.specIndex, nextIndex);
-      indexWritten = true;
+    timestamp: timestampFrom(now),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: "learning_accepted",
+      actor,
+      learningCandidateId: id,
+      confirmedBy: "user",
+    }),
+  }, async (timestamp, recovering) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const candidates = taskLearningCandidates(current);
+    const candidate = reconcileAcceptedCandidate(candidates, taskId, id, timestamp, recovering);
+    const normalizedRule = normalizeWhitespace(candidate.text);
+    const specPath = join(paths.specs, `${candidate.domain}.md`);
+    const [previousSpec, previousIndex] = await Promise.all([
+      readTextIfPresent(paths, specPath),
+      readTextIfPresent(paths, paths.specIndex),
+    ]);
+    if (previousIndex === undefined) {
+      throw new SchemaError(`Missing managed spec index ${paths.specIndex}`);
     }
-    await writeJsonAtomic(join(location.directory, "task.json"), task, paths.repoRoot);
-  } catch (error) {
-    const rollbackFailures = await rollbackPromotion(
-      paths,
-      specWritten ? [specPath, previousSpec] : undefined,
-      indexWritten ? [paths.specIndex, previousIndex] : undefined,
+    const nextSpec = reconcilePromotionRule(
+      previousSpec,
+      candidate.domain,
+      timestamp.slice(0, 10),
+      normalizedRule,
+      recovering,
     );
-    if (rollbackFailures.length > 0) {
-      throw new SchemaError(
-        `Unable to commit learning acceptance for ${id}; rollback also failed for ${rollbackFailures.join(", ")}`,
-        error,
+    const domainIndexEntries = countDomainIndexTargets(previousIndex, candidate.domain);
+    if (domainIndexEntries > 1) {
+      throw new ValidationError(
+        `Spec index contains duplicate targets for learning domain ${candidate.domain}; resolve them before promotion.`,
       );
     }
-    throw new SchemaError(
-      `Unable to commit learning acceptance for ${id}; spec changes were rolled back and journal intent remains pending`,
-      error,
-    );
-  }
-  return task;
+    const indexEntry = `- [${candidate.domain}](${candidate.domain}.md)`;
+    const nextIndex = domainIndexEntries === 1
+      ? previousIndex
+      : appendLine(previousIndex, indexEntry);
+    const accepted = candidate.status === "accepted"
+      ? candidate
+      : {
+        ...candidate,
+        status: "accepted" as const,
+        acceptedAt: timestamp,
+        confirmedBy: "user" as const,
+      };
+    const task: TaskRecord = candidate.status === "accepted"
+      ? current.task
+      : {
+        ...current.task,
+        learningCandidates: replaceCandidate(candidates, accepted),
+        updatedAt: timestamp,
+      };
+    const taskContents = `${JSON.stringify(task, null, 2)}\n`;
+    return {
+      expected: mutationTargetSummary(paths, [
+        { filename: specPath, contents: nextSpec },
+        { filename: paths.specIndex, contents: nextIndex },
+        { filename: join(current.directory, "task.json"), contents: taskContents },
+      ], mutationValueIdentity({ learningCandidateId: id }, accepted)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: "learning_accepted",
+        mutationKind: "learning_accepted",
+        timestamp,
+        actor,
+        learningCandidateId: id,
+        confirmedBy: "user",
+      },
+      apply: async () => {
+        await writeManagedMutationTarget(paths, current, specPath, nextSpec);
+        await writeManagedMutationTarget(paths, current, paths.specIndex, nextIndex);
+        await writeManagedMutationTarget(paths, current, join(current.directory, "task.json"), taskContents);
+      },
+    };
+  });
+  return (await findTask(paths, taskId)).task;
 }
 
 export async function archiveLearning(
@@ -380,12 +383,57 @@ function normalizeWhitespace(value: string): string {
   return value.trim().replace(/\s+/gu, " ");
 }
 
-function containsNormalizedRule(contents: string, normalizedRule: string): boolean {
-  return contents.split(/\r?\n/u).some((line) => {
+function reconcileAcceptedCandidate(
+  candidates: LearningCandidate[],
+  taskId: string,
+  id: string,
+  timestamp: string,
+  recovering: boolean,
+): LearningCandidate {
+  const candidate = candidates.find((item) => item.id === id);
+  if (candidate === undefined) {
+    throw new ValidationError(`Learning candidate not found in task ${taskId}: ${id}`);
+  }
+  if (candidate.status === "proposed") return candidate;
+  if (recovering
+    && candidate.status === "accepted"
+    && candidate.confirmedBy === "user"
+    && candidate.acceptedAt === timestamp) {
+    return candidate;
+  }
+  throw new ValidationError(
+    `Learning candidate ${id} must be proposed before classification; found ${candidate.status}.`,
+  );
+}
+
+function reconcilePromotionRule(
+  previous: string | undefined,
+  domain: string,
+  date: string,
+  normalizedRule: string,
+  recovering: boolean,
+): string {
+  const matchingRules = normalizedRuleLines(previous ?? "", normalizedRule);
+  if (matchingRules.length === 0) return appendRule(previous, domain, date, normalizedRule);
+  const expected = `${date}: ${normalizedRule}`;
+  if (recovering && matchingRules.length === 1 && matchingRules[0] === expected) {
+    return previous!;
+  }
+  if (!recovering) {
+    throw new ValidationError(`Learning rule already exists in ${domain} spec: ${normalizedRule}`);
+  }
+  throw new SchemaError(
+    `Pending learning acceptance has an incompatible rule in ${domain} spec; inspect it before retrying.`,
+  );
+}
+
+function normalizedRuleLines(contents: string, normalizedRule: string): string[] {
+  return contents.split(/\r?\n/u).flatMap((line) => {
     const match = line.match(/^\s*-\s+(.*?)\s*$/u);
-    if (match === null) return false;
-    const rule = match[1]!.replace(/^\d{4}-\d{2}-\d{2}:\s*/u, "");
-    return normalizeWhitespace(rule) === normalizedRule;
+    if (match === null) return [];
+    const rule = match[1]!;
+    const withoutDate = rule.replace(/^\d{4}-\d{2}-\d{2}:\s*/u, "");
+    return normalizeWhitespace(withoutDate) === normalizedRule ? [rule.trim()] : [];
   });
 }
 
@@ -472,57 +520,6 @@ async function readTextIfPresent(paths: VineaPaths, filename: string): Promise<s
   } catch (error) {
     if (isCode(error, "ENOENT")) return undefined;
     throw new SchemaError(`Unable to read managed learning file ${filename}`, error);
-  }
-}
-
-async function writeTextAtomic(paths: VineaPaths, filename: string, contents: string): Promise<void> {
-  await assertNoSymlink(paths.repoRoot, filename);
-  const temporary = join(dirname(filename), `.${basename(filename)}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx" });
-    await rename(temporary, filename);
-  } catch (error) {
-    try {
-      await unlink(temporary);
-    } catch (cleanupError) {
-      if (!isCode(cleanupError, "ENOENT")) {
-        throw new SchemaError(`Unable to clean temporary learning file ${temporary}`, cleanupError);
-      }
-    }
-    throw new SchemaError(`Unable to write managed learning file ${filename}`, error);
-  }
-}
-
-async function rollbackPromotion(
-  paths: VineaPaths,
-  spec: readonly [string, string | undefined] | undefined,
-  index: readonly [string, string] | undefined,
-): Promise<string[]> {
-  const restorations = [
-    ...(spec === undefined ? [] : [restoreText(paths, spec[0], spec[1])]),
-    ...(index === undefined ? [] : [restoreText(paths, index[0], index[1])]),
-  ];
-  const results = await Promise.allSettled(restorations);
-  return results.flatMap((result, index_) => result.status === "rejected"
-    ? [index_ === 0 && spec !== undefined ? spec[0] : index?.[0] ?? "unknown"]
-    : []);
-}
-
-async function restoreText(
-  paths: VineaPaths,
-  filename: string,
-  contents: string | undefined,
-): Promise<void> {
-  if (contents !== undefined) {
-    await writeTextAtomic(paths, filename, contents);
-    return;
-  }
-  try {
-    await unlink(filename);
-  } catch (error) {
-    if (!isCode(error, "ENOENT")) {
-      throw new SchemaError(`Unable to remove rolled-back learning file ${filename}`, error);
-    }
   }
 }
 
