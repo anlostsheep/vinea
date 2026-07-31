@@ -10,6 +10,7 @@ import { assertTddReadyForCheck } from "./evidence.js";
 import { inspectBusinessGitStatus } from "./git.js";
 import {
   appendTaskContinuation,
+  assertTaskMutable,
   createTaskArtifacts,
   appendTaskMutationIntent,
   findTask,
@@ -110,6 +111,12 @@ export interface CompletionInput {
   actor: string;
   now?: Clock;
 }
+
+export interface ArchiveOperations {
+  removeTaskSessionBindings(paths: VineaPaths, taskId: string): Promise<string[]>;
+}
+
+const DEFAULT_ARCHIVE_OPERATIONS: ArchiveOperations = { removeTaskSessionBindings };
 
 const FORWARD_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus>> = {
   planning: "ready",
@@ -434,6 +441,7 @@ export async function archiveTask(
   paths: VineaPaths,
   taskId: string,
   input: CompletionInput,
+  operationOverrides: Partial<ArchiveOperations> = {},
 ): Promise<TaskRecord> {
   if (!input.confirmed) throw new ValidationError("Archive requires explicit --confirmed.");
   await readConfig(paths);
@@ -444,13 +452,13 @@ export async function archiveTask(
       `Archive requires task ${taskId} to have status finished; found ${location.task.status}.`,
     );
   }
-  const task = await transitionTask(paths, taskId, "archived", {
+  const operations = { ...DEFAULT_ARCHIVE_OPERATIONS, ...operationOverrides };
+  await operations.removeTaskSessionBindings(paths, taskId);
+  return transitionTask(paths, taskId, "archived", {
     actor: input.actor,
     reason: "Task archived after confirmed finish.",
     now: input.now,
   });
-  await removeTaskSessionBindings(paths, taskId);
-  return task;
 }
 
 export async function addRequirement(
@@ -534,6 +542,7 @@ async function addRequirementLike(
   assertNonempty(input.text, "Requirement text");
   assertBoundedNonempty(input.actor, "Requirement actor", 200);
   const location = await findTask(paths, taskId);
+  assertTaskMutable(location);
   const id = input.id.trim();
   const allRequirements = [...location.task.requirements, ...location.task.acceptanceCriteria];
   if (allRequirements.some((requirement) => requirement.id === id)) {
@@ -572,6 +581,7 @@ async function setTaskDocument(
   assertNonempty(sourceFile, "Source file");
   assertBoundedNonempty(actor, "Task document actor", 200);
   const location = await findTask(paths, taskId);
+  assertTaskMutable(location);
   const filename = isAbsolute(sourceFile) ? sourceFile : resolve(paths.repoRoot, sourceFile);
   let entry;
   try {

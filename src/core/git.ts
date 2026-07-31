@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -12,6 +13,17 @@ export interface BusinessGitStatus {
 export async function inspectBusinessGitStatus(repoRoot: string): Promise<BusinessGitStatus> {
   let porcelain: string;
   try {
+    const topLevel = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    if (resolve(topLevel.stdout.trim()) !== resolve(repoRoot)) {
+      return {
+        gitUnavailable: true,
+        businessDirtyPaths: [],
+        error: "Vinea repository root is nested below a different Git worktree root.",
+      };
+    }
     const result = await execFileAsync("git", ["status", "--porcelain=v1", "-z"], {
       cwd: repoRoot,
       encoding: "utf8",

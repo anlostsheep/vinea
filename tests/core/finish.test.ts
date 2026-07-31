@@ -1,10 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
+import { SchemaError } from "../../src/core/errors.js";
+import { resolveVineaPaths } from "../../src/core/paths.js";
 import type { EvidenceRecord, LearningCandidate, TaskRecord } from "../../src/core/types.js";
+import { archiveTask, readTask } from "../../src/core/workflow.js";
 import { createTempRepo, readJson, runCli, writeJson } from "../helpers/fixture.js";
 
 const execFileAsync = promisify(execFile);
@@ -99,6 +102,16 @@ test("finish fails closed outside a Git repository", async () => {
   await expectFinishBlocked(cwd, fixture.task.id, "gitUnavailable");
 });
 
+test("finish fails closed when Vinea is nested below a different Git root", async () => {
+  const parent = await createTempRepo();
+  const nested = join(parent, "nested-vinea");
+  await mkdir(nested);
+  const fixture = await createCheckingTask("standard", nested);
+  await coverTask(fixture);
+
+  await expectFinishBlocked(nested, fixture.task.id, "gitUnavailable");
+});
+
 test("finish blocks unclassified learning candidates and accepts classified candidates", async () => {
   const proposed = await createCheckingTask();
   await coverTask(proposed);
@@ -187,6 +200,103 @@ test("archive retries a durable move whose final archived status write did not c
   expect((await readJson<TaskRecord>(
     join(taskDirectory(fixture.cwd, fixture.task.id, "archive"), "task.json"),
   )).status).toBe("archived");
+});
+
+test("archive treats a missing runtime session directory as an empty binding set", async () => {
+  const fixture = await createCheckingTask();
+  await coverTask(fixture);
+  expect((await finish(fixture.cwd, fixture.task.id)).exitCode).toBe(0);
+  await rm(join(fixture.cwd, ".vinea", ".runtime", "sessions"), { force: true, recursive: true });
+
+  const archived = await runCli(["archive", fixture.task.id, "--confirmed", "--json"], fixture.cwd);
+
+  expect(archived.exitCode).toBe(0);
+  expect((JSON.parse(archived.stdout) as TaskRecord).status).toBe("archived");
+});
+
+test("archive cleanup failure leaves the finished task and all bindings recoverable before transition", async () => {
+  const fixture = await createCheckingTask();
+  await coverTask(fixture);
+  const other = await createTask(fixture.cwd, "Unrelated task", "standard");
+  await bindTask(fixture.cwd, fixture.task.id, "target-cleanup-session");
+  await bindTask(fixture.cwd, other.id, "other-cleanup-session");
+  expect((await finish(fixture.cwd, fixture.task.id)).exitCode).toBe(0);
+  const paths = resolveVineaPaths(fixture.cwd);
+  const archiveWithInjectedFailure = archiveTask as unknown as (
+    paths: ReturnType<typeof resolveVineaPaths>,
+    taskId: string,
+    input: { confirmed: boolean; actor: string },
+    operations: { removeTaskSessionBindings: () => Promise<string[]> },
+  ) => Promise<TaskRecord>;
+
+  await expect(archiveWithInjectedFailure(paths, fixture.task.id, {
+    confirmed: true,
+    actor: "test",
+  }, {
+    removeTaskSessionBindings: async () => {
+      throw new SchemaError("Injected binding cleanup failure");
+    },
+  })).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
+
+  expect((await readTask(paths, fixture.task.id)).status).toBe("finished");
+  const sessionDirectory = join(fixture.cwd, ".vinea", ".runtime", "sessions");
+  const bindingsAfterFailure = await readdir(sessionDirectory);
+  expect(bindingsAfterFailure).toHaveLength(2);
+
+  const archived = await runCli(["archive", fixture.task.id, "--confirmed", "--json"], fixture.cwd);
+  expect(archived.exitCode).toBe(0);
+  const bindingsAfterRetry = await readdir(sessionDirectory);
+  expect(bindingsAfterRetry).toHaveLength(1);
+  expect((await readJson<{ taskId: string }>(join(sessionDirectory, bindingsAfterRetry[0]!))).taskId).toBe(other.id);
+});
+
+test("terminal tasks reject all task-local writers before archive and cannot gain uncovered requirements", async () => {
+  const fixture = await createCheckingTask();
+  await coverTask(fixture);
+  expect((await finish(fixture.cwd, fixture.task.id)).exitCode).toBe(0);
+  const activeDirectory = taskDirectory(fixture.cwd, fixture.task.id, "active");
+  const briefSource = join(fixture.cwd, "terminal-brief.md");
+  const planSource = join(fixture.cwd, "terminal-plan.md");
+  const contextSource = join(fixture.cwd, "terminal-context.ts");
+  await writeFile(briefSource, "# Replacement brief\n", "utf8");
+  await writeFile(planSource, "# Replacement plan\n", "utf8");
+  await writeFile(contextSource, "export const terminal = true;\n", "utf8");
+  const beforeTask = await readFile(join(activeDirectory, "task.json"), "utf8");
+  const beforeJournal = await readFile(join(activeDirectory, "journal.md"), "utf8");
+  const beforeEvidence = await readFile(join(activeDirectory, "evidence.jsonl"), "utf8");
+  const beforeContext = await readFile(join(activeDirectory, "context.jsonl"), "utf8");
+
+  const terminalMutations = [
+    ["task", "require", fixture.task.id, "--id", "R2", "--text", "Must not be added", "--json"],
+    ["task", "accept", fixture.task.id, "--id", "A2", "--text", "Must not be added", "--json"],
+    ["task", "set-brief", fixture.task.id, "--file", briefSource, "--json"],
+    ["task", "set-plan", fixture.task.id, "--file", planSource, "--json"],
+    ["context", "add", fixture.task.id, "--path", "terminal-context.ts", "--purpose", "Must not be added", "--json"],
+    ["evidence", "record", fixture.task.id, "--kind", "manual", "--summary", "Must not be added", "--result", "pass", "--json"],
+  ];
+  for (const args of terminalMutations) {
+    const result = await runCli(args, fixture.cwd);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ error: { code: "VINEA_VALIDATION_INVALID" } });
+  }
+  expect(await readFile(join(activeDirectory, "task.json"), "utf8")).toBe(beforeTask);
+  expect(await readFile(join(activeDirectory, "journal.md"), "utf8")).toBe(beforeJournal);
+  expect(await readFile(join(activeDirectory, "evidence.jsonl"), "utf8")).toBe(beforeEvidence);
+  expect(await readFile(join(activeDirectory, "context.jsonl"), "utf8")).toBe(beforeContext);
+
+  expect((await runCli(["archive", fixture.task.id, "--confirmed", "--json"], fixture.cwd)).exitCode).toBe(0);
+  const archivedMutation = await runCli([
+    "task", "require", fixture.task.id,
+    "--id", "R2",
+    "--text", "Must not be added after archive",
+    "--json",
+  ], fixture.cwd);
+  expect(archivedMutation.exitCode).toBe(1);
+  const archivedTask = await readJson<TaskRecord>(join(
+    taskDirectory(fixture.cwd, fixture.task.id, "archive"),
+    "task.json",
+  ));
+  expect(archivedTask.requirements.map(({ id }) => id)).toEqual(["R1"]);
 });
 
 interface CheckingFixture {
@@ -339,6 +449,17 @@ async function coverTask(fixture: CheckingFixture): Promise<void> {
 
 function finish(cwd: string, taskId: string) {
   return runCli(["finish", taskId, "--confirmed", "--json"], cwd);
+}
+
+async function bindTask(cwd: string, taskId: string, sessionId: string): Promise<void> {
+  const result = await runCli([
+    "continue", taskId,
+    "--host", "codex",
+    "--session-id", sessionId,
+    "--confirmed",
+    "--json",
+  ], cwd);
+  expect(result.exitCode).toBe(0);
 }
 
 async function expectFinishBlocked(cwd: string, taskId: string, message: string): Promise<void> {

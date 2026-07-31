@@ -33,6 +33,12 @@ export interface TaskLocation {
   scope: "active" | "archive";
 }
 
+export function assertTaskMutable(location: TaskLocation): void {
+  if (location.scope === "archive" || location.task.status === "finished" || location.task.status === "archived") {
+    throw new ValidationError(`Task is terminal and cannot be mutated: ${location.task.id}`);
+  }
+}
+
 export type SessionBindingReadResult =
   | { status: "missing" }
   | { status: "valid"; binding: SessionBinding }
@@ -314,6 +320,7 @@ export async function removeTaskSessionBindings(
   try {
     entries = await readdir(paths.sessions, { withFileTypes: true });
   } catch (error) {
+    if (isCode(error, "ENOENT")) return [];
     throw new SchemaError(`Unable to list session bindings in ${paths.sessions}`, error);
   }
   const removed: string[] = [];

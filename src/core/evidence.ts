@@ -7,6 +7,7 @@ import { appendJsonl } from "./json.js";
 import type { VineaPaths } from "./paths.js";
 import {
   appendTaskMutationIntent,
+  assertTaskMutable,
   findTask,
   type TaskLocation,
 } from "./task-store.js";
@@ -57,6 +58,7 @@ export async function recordEvidence(
 ): Promise<EvidenceRecord> {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
+  assertTaskMutable(location);
   const summary = boundedNonempty(input.summary, "Evidence summary", MAX_EVIDENCE_SUMMARY_BYTES);
   const actor = boundedNonempty(input.actor, "Evidence actor", MAX_EVIDENCE_ACTOR_BYTES);
   const command = input.command === undefined

@@ -379,12 +379,16 @@ function declaredRequirementIds(location: TaskLocation): string[] {
 
 function normalizeRepositoryPath(repoRoot: string, path: string): string {
   const trimmed = boundedNonempty(path, "Check path", MAX_TEXT_BYTES);
-  if (trimmed.includes("\0") || isAbsolute(trimmed)) {
+  if (trimmed.includes("\0")
+    || trimmed.includes("\\")
+    || isAbsolute(trimmed)
+    || /^[a-zA-Z]:/.test(trimmed)
+    || trimmed.startsWith("//")) {
     throw new ValidationError(`Check path must be repository-relative: ${path}`);
   }
   const resolved = assertInside(repoRoot, resolve(repoRoot, trimmed));
   const normalized = relative(repoRoot, resolved).split("\\").join("/");
-  if (normalized === "" || normalized === ".") {
+  if (normalized === "" || normalized === "." || normalized !== trimmed) {
     throw new ValidationError(`Check path must identify a repository file or directory: ${path}`);
   }
   return normalized;

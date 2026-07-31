@@ -9,7 +9,7 @@ import { SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl } from "./json.js";
 import type { VineaPaths } from "./paths.js";
 import { assertInside } from "./paths.js";
-import { appendTaskMutationIntent, findTask } from "./task-store.js";
+import { appendTaskMutationIntent, assertTaskMutable, findTask } from "./task-store.js";
 import {
   SCHEMA_VERSION,
   type ContextReference,
@@ -43,6 +43,7 @@ export async function addContextReference(
   assertNonempty(input.purpose, "Context purpose");
   assertBoundedNonempty(input.actor, "Context actor", 200);
   const location = await findTask(paths, taskId);
+  assertTaskMutable(location);
   const normalizedPath = normalizeRepositoryPath(input.path);
   if (Buffer.byteLength(normalizedPath, "utf8") > 4096) {
     throw new ValidationError("Context path exceeds the 4096-byte audit metadata limit.");
