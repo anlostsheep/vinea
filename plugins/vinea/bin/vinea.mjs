@@ -230,8 +230,8 @@ async function readJson(filename, repoRoot) {
   await assertNoSymlink(repoRoot, filename);
   let content;
   try {
-    const { readFile: readFile9 } = await import("node:fs/promises");
-    content = await readFile9(filename, "utf8");
+    const { readFile: readFile10 } = await import("node:fs/promises");
+    content = await readFile10(filename, "utf8");
   } catch (error) {
     if (error instanceof SchemaError) throw error;
     throw new SchemaError(`Unable to read JSON file ${filename}`, error);
@@ -455,7 +455,6 @@ var ARTIFACTS = [
 var TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 var TASK_LOCK_RETRY_MILLISECONDS = 25;
 var TASK_LOCK_TIMEOUT_MILLISECONDS = 5e3;
-var TEST_TASK_LOCK_OBSERVATION = "enabled";
 var taskLockContext = new AsyncLocalStorage();
 function assertTaskMutable(location) {
   if (location.scope === "archive" || location.task.status === "finished" || location.task.status === "archived") {
@@ -822,7 +821,6 @@ async function acquireTaskLock(paths, taskId) {
       if (!isCode(error, "EEXIST")) {
         throw new SchemaError(`Unable to acquire task lock for ${taskId}`, error);
       }
-      await recordTestTaskLockContention(taskId);
       if (Date.now() >= deadline) {
         throw new ValidationError(
           `Task ${taskId} is busy in another Vinea process; wait for it to finish and retry. Vinea will not remove a lock it does not own.`
@@ -852,14 +850,6 @@ async function acquireTaskLock(paths, taskId) {
     }
     return { directory, ownerPath, token };
   }
-}
-async function recordTestTaskLockContention(taskId) {
-  const marker = process.env.VINEA_TEST_TASK_LOCK_CONTENDED_MARKER;
-  if (process.env.NODE_ENV !== "test" || process.env.VINEA_TEST_TASK_LOCK_OBSERVATION !== TEST_TASK_LOCK_OBSERVATION || !marker) {
-    return;
-  }
-  await writeFile3(marker, `${taskId}
-`, { encoding: "utf8", flag: "w" });
 }
 async function releaseTaskLock(paths, lock) {
   await assertNoSymlink(paths.repoRoot, lock.ownerPath);
@@ -2446,6 +2436,12 @@ function renderDoctorReport(report) {
   ];
   if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
   if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
+  for (const lock of report.taskLocks) {
+    lines.push(
+      `task lock: ${lock.path}; task: ${lock.taskId ?? "unknown"}; age milliseconds: ${lock.ageMilliseconds ?? "unknown"}; owner: ${lock.owner.status}`,
+      `task lock guidance: ${lock.recoveryInstruction}`
+    );
+  }
   return `${lines.join("\n")}
 `;
 }
@@ -2477,13 +2473,16 @@ function normalizeError(error) {
 
 // src/core/doctor.ts
 import { execFile as execFile3 } from "node:child_process";
-import { lstat as lstat8, readdir as readdir2 } from "node:fs/promises";
+import { lstat as lstat8, readFile as readFile7, readdir as readdir2 } from "node:fs/promises";
+import { basename as basename3, join as join7, relative as relative4 } from "node:path";
 import { promisify as promisify3 } from "node:util";
 var execFileAsync3 = promisify3(execFile3);
+var TASK_LOCK_FILENAME = /^(t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*)\.lock$/;
 async function diagnoseWorkspace(paths) {
-  const [workspace, runtimeSessions, gitStatus] = await Promise.all([
+  const [workspace, runtimeSessions, taskLocks, gitStatus] = await Promise.all([
     inspectWorkspace(paths),
     inspectRuntimeSessions(paths),
+    inspectTaskLocks(paths),
     inspectGitAvailability(paths.repoRoot)
   ]);
   const missingRequiredDirectories = workspace.missingRequiredDirectories.filter(
@@ -2496,8 +2495,75 @@ async function diagnoseWorkspace(paths) {
     ...workspace,
     missingRequiredDirectories,
     migrationGuidance: runtimeSessions === "invalid" && workspace.migrationGuidance === null ? "Repair or remove malformed local .runtime/sessions state before using session recovery." : workspace.migrationGuidance,
-    healthy: workspace.supportedSchema && missingRequiredDirectories.length === 0,
+    healthy: workspace.supportedSchema && missingRequiredDirectories.length === 0 && taskLocks.length === 0,
+    taskLocks,
     gitStatus
+  };
+}
+async function inspectTaskLocks(paths) {
+  const locksDirectory = join7(paths.runtime, "task-locks");
+  let entries;
+  try {
+    await assertNoSymlink(paths.repoRoot, locksDirectory);
+    const locks = await lstat8(locksDirectory);
+    if (!locks.isDirectory() || locks.isSymbolicLink()) {
+      return [taskLockDiagnostic(paths, locksDirectory, null, null, { status: "unsafe" })];
+    }
+    entries = await readdir2(locksDirectory);
+  } catch (error) {
+    if (isMissing5(error)) return [];
+    return [taskLockDiagnostic(paths, locksDirectory, null, null, { status: "unreadable" })];
+  }
+  const diagnostics = await Promise.all(entries.map(async (entry) => inspectTaskLock(paths, join7(locksDirectory, entry))));
+  return diagnostics.sort((left, right) => left.path.localeCompare(right.path));
+}
+async function inspectTaskLock(paths, directory) {
+  const filename = basename3(directory);
+  const taskId = TASK_LOCK_FILENAME.exec(filename)?.[1] ?? null;
+  let ageMilliseconds = null;
+  try {
+    await assertNoSymlink(paths.repoRoot, directory);
+    const entry = await lstat8(directory);
+    ageMilliseconds = Math.max(0, Date.now() - entry.mtimeMs);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, { status: "unsafe" });
+    }
+  } catch {
+    return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, { status: "unsafe" });
+  }
+  const owner = await inspectTaskLockOwner(paths, join7(directory, "owner.json"));
+  return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, owner);
+}
+async function inspectTaskLockOwner(paths, ownerPath) {
+  try {
+    await assertNoSymlink(paths.repoRoot, ownerPath);
+  } catch (error) {
+    return isMissing5(error) ? { status: "missing" } : { status: "unsafe" };
+  }
+  let contents;
+  try {
+    contents = await readFile7(ownerPath, "utf8");
+  } catch (error) {
+    return isMissing5(error) ? { status: "missing" } : { status: "unreadable" };
+  }
+  try {
+    const owner = JSON.parse(contents);
+    if (!isRecord6(owner) || typeof owner.token !== "string" || owner.token.trim() === "") {
+      return { status: "malformed" };
+    }
+    return { status: "valid", token: owner.token };
+  } catch {
+    return { status: "malformed" };
+  }
+}
+function taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, owner) {
+  const path = displayPath(paths, directory);
+  return {
+    path,
+    taskId,
+    ageMilliseconds,
+    owner,
+    recoveryInstruction: `Confirm no active process, then remove exact lock directory ${path}.`
   };
 }
 async function inspectRuntimeSessions(paths) {
@@ -2529,11 +2595,17 @@ async function inspectGitAvailability(repoRoot) {
 function isMissing5(error) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
+function isRecord6(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function displayPath(paths, filename) {
+  return relative4(paths.repoRoot, filename).split("\\").join("/");
+}
 
 // src/core/learning.ts
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { lstat as lstat9, mkdir as mkdir3, readFile as readFile7, rename as rename3, rmdir as rmdir2, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
-import { basename as basename3, dirname as dirname2, join as join7 } from "node:path";
+import { lstat as lstat9, mkdir as mkdir3, readFile as readFile8, rename as rename3, rmdir as rmdir2, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
+import { basename as basename4, dirname as dirname2, join as join8 } from "node:path";
 var DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 var MAX_DOMAIN_CHARACTERS = 100;
 var MAX_ID_CHARACTERS = 200;
@@ -2607,7 +2679,7 @@ async function acceptLearningWhileLocked(paths, taskId, id, actor, now) {
   const candidates = taskLearningCandidates(location);
   const candidate = requireProposedCandidate(candidates, taskId, id);
   const normalizedRule = normalizeWhitespace(candidate.text);
-  const specPath = join7(paths.specs, `${candidate.domain}.md`);
+  const specPath = join8(paths.specs, `${candidate.domain}.md`);
   const [previousSpec, previousIndex] = await Promise.all([
     readTextIfPresent(paths, specPath),
     readTextIfPresent(paths, paths.specIndex)
@@ -2658,7 +2730,7 @@ async function acceptLearningWhileLocked(paths, taskId, id, actor, now) {
       await writeTextAtomic(paths, paths.specIndex, nextIndex);
       indexWritten = true;
     }
-    await writeJsonAtomic(join7(location.directory, "task.json"), task, paths.repoRoot);
+    await writeJsonAtomic(join8(location.directory, "task.json"), task, paths.repoRoot);
   } catch (error) {
     const rollbackFailures = await rollbackPromotion(
       paths,
@@ -2806,7 +2878,7 @@ function ensureTrailingNewline(contents) {
 `;
 }
 function validateStoredCandidate(value, taskId) {
-  if (!isRecord6(value) || value.schemaVersion !== SCHEMA_VERSION) {
+  if (!isRecord7(value) || value.schemaVersion !== SCHEMA_VERSION) {
     throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
   }
   if (typeof value.id !== "string" || typeof value.domain !== "string" || typeof value.text !== "string" || typeof value.rationale !== "string") {
@@ -2839,7 +2911,7 @@ function validateStoredCandidate(value, taskId) {
 async function readTextIfPresent(paths, filename) {
   await assertNoSymlink(paths.repoRoot, filename);
   try {
-    return await readFile7(filename, "utf8");
+    return await readFile8(filename, "utf8");
   } catch (error) {
     if (isCode2(error, "ENOENT")) return void 0;
     throw new SchemaError(`Unable to read managed learning file ${filename}`, error);
@@ -2847,7 +2919,7 @@ async function readTextIfPresent(paths, filename) {
 }
 async function writeTextAtomic(paths, filename, contents) {
   await assertNoSymlink(paths.repoRoot, filename);
-  const temporary = join7(dirname2(filename), `.${basename3(filename)}.${randomUUID5()}.tmp`);
+  const temporary = join8(dirname2(filename), `.${basename4(filename)}.${randomUUID5()}.tmp`);
   try {
     await writeFile4(temporary, contents, { encoding: "utf8", flag: "wx" });
     await rename3(temporary, filename);
@@ -2909,8 +2981,8 @@ async function withPromotionLock(paths, operation) {
   return result;
 }
 async function acquirePromotionLock(paths) {
-  const directory = join7(paths.runtime, PROMOTION_LOCK_DIRECTORY);
-  const ownerPath = join7(directory, PROMOTION_LOCK_OWNER);
+  const directory = join8(paths.runtime, PROMOTION_LOCK_DIRECTORY);
+  const ownerPath = join8(directory, PROMOTION_LOCK_OWNER);
   const token = randomUUID5();
   const deadline = Date.now() + PROMOTION_LOCK_TIMEOUT_MILLISECONDS;
   await assertNoSymlink(paths.repoRoot, paths.runtime);
@@ -2953,14 +3025,14 @@ async function releasePromotionLock(paths, lock) {
   await assertNoSymlink(paths.repoRoot, lock.ownerPath);
   let owner;
   try {
-    owner = JSON.parse(await readFile7(lock.ownerPath, "utf8"));
+    owner = JSON.parse(await readFile8(lock.ownerPath, "utf8"));
   } catch (error) {
     throw new SchemaError(
       `Unable to verify ownership before releasing learning promotion lock ${lock.directory}; inspect it manually`,
       error
     );
   }
-  if (!isRecord6(owner) || owner.token !== lock.token) {
+  if (!isRecord7(owner) || owner.token !== lock.token) {
     throw new SchemaError(
       `Learning promotion lock ownership changed at ${lock.directory}; refusing unsafe cleanup`
     );
@@ -2987,8 +3059,8 @@ async function describePromotionLock(paths, directory, ownerPath) {
   let ownerDescription = "owner metadata is unavailable";
   try {
     await assertNoSymlink(paths.repoRoot, ownerPath);
-    const owner = JSON.parse(await readFile7(ownerPath, "utf8"));
-    if (isRecord6(owner)) {
+    const owner = JSON.parse(await readFile8(ownerPath, "utf8"));
+    if (isRecord7(owner)) {
       const pid = typeof owner.pid === "number" ? `pid ${owner.pid}` : "unknown pid";
       const acquiredAt = typeof owner.acquiredAt === "string" ? ` since ${owner.acquiredAt}` : "";
       ownerDescription = `${pid}${acquiredAt}`;
@@ -3029,13 +3101,13 @@ function isIsoTimestamp3(value) {
   const parsed = new Date(value);
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
 }
-function isRecord6(value) {
+function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // src/core/validate.ts
-import { lstat as lstat10, readFile as readFile8, readdir as readdir3 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5, join as join8, relative as relative4, resolve as resolve6 } from "node:path";
+import { lstat as lstat10, readFile as readFile9, readdir as readdir3 } from "node:fs/promises";
+import { isAbsolute as isAbsolute5, join as join9, relative as relative5, resolve as resolve6 } from "node:path";
 var REQUIRED_TASK_ARTIFACTS = [
   "brief.md",
   "plan.md",
@@ -3072,7 +3144,7 @@ var MANAGED_SPEC_TARGET = /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
 async function validateWorkspace(paths) {
   const issues = [];
   const add = (code, filename, message) => {
-    issues.push({ code, path: displayPath(paths, filename), message });
+    issues.push({ code, path: displayPath2(paths, filename), message });
   };
   const root = await entryKind(paths.vineaRoot);
   if (root === "missing") {
@@ -3108,7 +3180,7 @@ async function validateWorkspace(paths) {
     if (scopes.size > 1) {
       add(
         "TASK_LOCATION_DUPLICATE",
-        join8(paths.tasks, taskId),
+        join9(paths.tasks, taskId),
         `Task ${taskId} is present in both active and archive storage.`
       );
     }
@@ -3150,7 +3222,7 @@ async function validateManagedSpecs(paths, add) {
       continue;
     }
     seenTargets.add(normalized);
-    const targetPath = join8(paths.specs, normalized);
+    const targetPath = join9(paths.specs, normalized);
     const kind = await entryKind(targetPath);
     if (kind === "missing") {
       add("SPEC_INDEX_TARGET_MISSING", targetPath, `Indexed spec target ${normalized} is missing.`);
@@ -3171,8 +3243,8 @@ async function validateConfig(paths, add) {
   }
   const riskRules = value.riskRules;
   const context = value.context;
-  const validRiskRules = isRecord7(riskRules) && isStringArray(riskRules.medium) && isStringArray(riskRules.high);
-  const validContext = isRecord7(context) && isNonNegativeSafeInteger(context.maxFiles) && isNonNegativeSafeInteger(context.maxEstimatedBytes);
+  const validRiskRules = isRecord8(riskRules) && isStringArray(riskRules.medium) && isStringArray(riskRules.high);
+  const validContext = isRecord8(context) && isNonNegativeSafeInteger(context.maxFiles) && isNonNegativeSafeInteger(context.maxEstimatedBytes);
   if (!validRiskRules || !validContext) {
     add(
       "CONFIG_INVALID",
@@ -3186,13 +3258,13 @@ async function validateConfig(paths, add) {
   } : null;
 }
 async function validateInlineAudit(paths, add) {
-  const filename = join8(paths.vineaRoot, "inline-audit.jsonl");
+  const filename = join9(paths.vineaRoot, "inline-audit.jsonl");
   const contents = await readOptionalRegularFile(filename, "INLINE_AUDIT", add);
   if (contents === null) return;
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "INLINE_AUDIT_JSONL_INVALID", add);
     if (value === null) continue;
-    if (!isRecord7(value)) {
+    if (!isRecord8(value)) {
       add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
       continue;
     }
@@ -3203,7 +3275,7 @@ async function validateInlineAudit(paths, add) {
         `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`
       );
     }
-    if (!isIsoTimestamp4(value.timestamp) || typeof value.requestSummary !== "string" || value.requestSummary.trim() === "" || typeof value.reason !== "string" || value.reason.trim() === "" || !isRecord7(value.proposedRisk) || !["low", "medium", "high"].includes(String(value.proposedRisk.level)) || !isStringArray(value.proposedRisk.reasons)) {
+    if (!isIsoTimestamp4(value.timestamp) || typeof value.requestSummary !== "string" || value.requestSummary.trim() === "" || typeof value.reason !== "string" || value.reason.trim() === "" || !isRecord8(value.proposedRisk) || !["low", "medium", "high"].includes(String(value.proposedRisk.level)) || !isStringArray(value.proposedRisk.reasons)) {
       add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid inline-audit record.`);
     }
   }
@@ -3218,7 +3290,7 @@ async function scanTaskScope(paths, directory, scope, limits, scan, add) {
     return;
   }
   for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
-    const taskDirectory = join8(directory, entry.name);
+    const taskDirectory = join9(directory, entry.name);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
       add("TASK_ENTRY_INVALID", taskDirectory, "Task storage entries must be regular directories.");
       continue;
@@ -3230,7 +3302,7 @@ async function scanTaskScope(paths, directory, scope, limits, scan, add) {
   }
 }
 async function validateTaskDirectory(paths, directory, directoryName, scope, limits, activeTaskIds, add) {
-  const taskFilename = join8(directory, "task.json");
+  const taskFilename = join9(directory, "task.json");
   const task = await readJsonObject(taskFilename, "TASK", add);
   if (task !== null) {
     const taskId = typeof task.id === "string" ? task.id : null;
@@ -3266,7 +3338,7 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
     }
   }
   for (const artifact of REQUIRED_TASK_ARTIFACTS) {
-    const filename = join8(directory, artifact);
+    const filename = join9(directory, artifact);
     const kind = await entryKind(filename);
     if (kind === "missing") {
       add("TASK_ARTIFACT_MISSING", filename, `Required task artifact ${artifact} is missing.`);
@@ -3274,10 +3346,10 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
       add("TASK_ARTIFACT_INVALID", filename, `Required task artifact ${artifact} must be a regular file.`);
     }
   }
-  await validateContextManifest(paths, join8(directory, "context.jsonl"), limits, add);
-  const evidence = await validateEvidenceArtifact(join8(directory, "evidence.jsonl"), add);
-  await validateJournalArtifact(join8(directory, "journal.md"), task, add);
-  await validateCheckArtifact(paths, join8(directory, "check.md"), task, evidence, add);
+  await validateContextManifest(paths, join9(directory, "context.jsonl"), limits, add);
+  const evidence = await validateEvidenceArtifact(join9(directory, "evidence.jsonl"), add);
+  await validateJournalArtifact(join9(directory, "journal.md"), task, add);
+  await validateCheckArtifact(paths, join9(directory, "check.md"), task, evidence, add);
 }
 async function validateContextManifest(paths, filename, limits, add) {
   const contents = await readOptionalRegularFile(filename, "CONTEXT", add);
@@ -3288,7 +3360,7 @@ async function validateContextManifest(paths, filename, limits, add) {
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "CONTEXT_JSONL_INVALID", add);
     if (value === null) continue;
-    if (!isRecord7(value)) {
+    if (!isRecord8(value)) {
       add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
       continue;
     }
@@ -3338,7 +3410,7 @@ async function validateContextPath(paths, manifest, repositoryPath, lineNumber, 
   }
   let current = paths.repoRoot;
   for (const segment of normalized.split("/")) {
-    current = join8(current, segment);
+    current = join9(current, segment);
     const kind = await entryKind(current);
     if (kind === "missing") {
       add("CONTEXT_PATH_MISSING", manifest, `Line ${lineNumber} references missing path ${normalized}.`);
@@ -3361,7 +3433,7 @@ async function validateEvidenceArtifact(filename, add) {
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "EVIDENCE_JSONL_INVALID", add);
     if (value === null) continue;
-    if (isRecord7(value) && value.schemaVersion !== SCHEMA_VERSION) {
+    if (isRecord8(value) && value.schemaVersion !== SCHEMA_VERSION) {
       add(
         "EVIDENCE_SCHEMA_UNSUPPORTED",
         filename,
@@ -3401,7 +3473,7 @@ async function validateJournalArtifact(filename, task, add) {
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
     if (value === null) continue;
-    if (isRecord7(value) && value.schemaVersion !== SCHEMA_VERSION) {
+    if (isRecord8(value) && value.schemaVersion !== SCHEMA_VERSION) {
       add(
         "JOURNAL_SCHEMA_UNSUPPORTED",
         filename,
@@ -3514,7 +3586,7 @@ async function validateSessionBindings(paths, activeTaskIds, add) {
     return;
   }
   for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
-    const filename = join8(paths.sessions, entry.name);
+    const filename = join9(paths.sessions, entry.name);
     const validFilename = isValidSessionBindingFilename(entry.name);
     if (!validFilename) {
       add(
@@ -3560,7 +3632,7 @@ async function readJsonObject(filename, prefix, add) {
     add(`${prefix}_JSON_INVALID`, filename, "File does not contain valid JSON.");
     return null;
   }
-  if (!isRecord7(value)) {
+  if (!isRecord8(value)) {
     add(`${prefix}_INVALID`, filename, "File must contain a JSON object.");
     return null;
   }
@@ -3577,7 +3649,7 @@ async function readRequiredRegularFile(filename, prefix, add) {
     return null;
   }
   try {
-    return await readFile8(filename, "utf8");
+    return await readFile9(filename, "utf8");
   } catch (error) {
     add(`${prefix}_UNREADABLE`, filename, describeError("Unable to read file", error));
     return null;
@@ -3599,7 +3671,7 @@ function jsonlLines(contents) {
   return contents.split("\n").map((line, index) => ({ line, lineNumber: index + 1 })).filter(({ line }) => line.trim() !== "");
 }
 function isTaskRecordShape2(value) {
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN2.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ALL_STATUSES.has(String(value.status)) && isRecord7(value.risk) && ["low", "medium", "high"].includes(String(value.risk.level)) && isStringArray(value.risk.reasons) && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && Array.isArray(value.requirements) && value.requirements.every(isRequirement2) && Array.isArray(value.acceptanceCriteria) && value.acceptanceCriteria.every(isRequirement2) && isLearningCandidates(value.learningCandidates) && isCommitMetadata2(value.commit) && isIsoTimestamp4(value.createdAt) && isIsoTimestamp4(value.updatedAt);
+  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN2.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ALL_STATUSES.has(String(value.status)) && isRecord8(value.risk) && ["low", "medium", "high"].includes(String(value.risk.level)) && isStringArray(value.risk.reasons) && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && Array.isArray(value.requirements) && value.requirements.every(isRequirement2) && Array.isArray(value.acceptanceCriteria) && value.acceptanceCriteria.every(isRequirement2) && isLearningCandidates(value.learningCandidates) && isCommitMetadata2(value.commit) && isIsoTimestamp4(value.createdAt) && isIsoTimestamp4(value.updatedAt);
 }
 function validateTaskRequirementIds(task, filename, add) {
   const seen = /* @__PURE__ */ new Set();
@@ -3612,7 +3684,7 @@ function validateTaskRequirementIds(task, filename, add) {
   }
 }
 function taskRequirementIds(task) {
-  return [task.requirements, task.acceptanceCriteria].flatMap((collection) => Array.isArray(collection) ? collection : []).flatMap((requirement) => isRecord7(requirement) && typeof requirement.id === "string" ? [requirement.id] : []);
+  return [task.requirements, task.acceptanceCriteria].flatMap((collection) => Array.isArray(collection) ? collection : []).flatMap((requirement) => isRecord8(requirement) && typeof requirement.id === "string" ? [requirement.id] : []);
 }
 function isLegalJournalTransition(oldStatus, newStatus) {
   if (oldStatus === newStatus) return false;
@@ -3623,7 +3695,7 @@ function isTaskStatus2(value) {
   return typeof value === "string" && ALL_STATUSES.has(value);
 }
 function isJournalEvent(value) {
-  if (!isRecord7(value) || value.schemaVersion !== SCHEMA_VERSION || !isIsoTimestamp4(value.timestamp) || !isNonemptyString(value.actor) || typeof value.type !== "string") {
+  if (!isRecord8(value) || value.schemaVersion !== SCHEMA_VERSION || !isIsoTimestamp4(value.timestamp) || !isNonemptyString(value.actor) || typeof value.type !== "string") {
     return false;
   }
   if (value.type === "created") {
@@ -3757,14 +3829,14 @@ function isSessionBindingShape(value) {
   return Object.keys(value).every((key) => ["schemaVersion", "taskId", "boundAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.taskId === "string" && TASK_ID_PATTERN2.test(value.taskId) && isIsoTimestamp4(value.boundAt);
 }
 function isRequirement2(value) {
-  return isRecord7(value) && Object.keys(value).every((key) => ["schemaVersion", "id", "text", "createdAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp4(value.createdAt);
+  return isRecord8(value) && Object.keys(value).every((key) => ["schemaVersion", "id", "text", "createdAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp4(value.createdAt);
 }
 function isLearningCandidates(value) {
   if (value === void 0) return true;
   if (!Array.isArray(value)) return false;
   const ids = /* @__PURE__ */ new Set();
   for (const candidate of value) {
-    if (!isRecord7(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp4(candidate.proposedAt)) {
+    if (!isRecord8(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp4(candidate.proposedAt)) {
       return false;
     }
     ids.add(candidate.id);
@@ -3781,7 +3853,7 @@ function isLearningCandidates(value) {
 }
 function isCommitMetadata2(value) {
   if (value === null) return true;
-  return isRecord7(value) && Object.keys(value).every((key) => ["sha", "message"].includes(key)) && typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
+  return isRecord8(value) && Object.keys(value).every((key) => ["sha", "message"].includes(key)) && typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
 }
 function isValidSessionBindingFilename(filename) {
   const match = /^(?:codex|claude)-sid-([0-9a-f]+)\.json$/.exec(filename);
@@ -3822,8 +3894,8 @@ async function entryKind(path) {
     return "other";
   }
 }
-function displayPath(paths, filename) {
-  const value = relative4(paths.repoRoot, filename).split("\\").join("/");
+function displayPath2(paths, filename) {
+  const value = relative5(paths.repoRoot, filename).split("\\").join("/");
   return value === "" ? "." : value;
 }
 function sortIssues(issues) {
@@ -3834,7 +3906,7 @@ function sortIssues(issues) {
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isStringArray(value) {

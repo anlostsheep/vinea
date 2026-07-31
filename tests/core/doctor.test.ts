@@ -1,4 +1,4 @@
-import { readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -27,11 +27,79 @@ test("doctor reports Git availability and treats missing local runtime as recove
     supportedSchema: true,
     migrationGuidance: null,
     healthy: true,
+    taskLocks: [],
     gitStatus: {
       available: true,
       error: null,
     },
   });
+});
+
+test("doctor treats a workspace with no task locks as healthy", async () => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+
+  const result = await runCli(["doctor", "--json"], cwd);
+
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ healthy: true, taskLocks: [] });
+});
+
+test.each([
+  ["ownerless", undefined, "missing"],
+  ["malformed", "{\"token\":42}\n", "malformed"],
+  ["valid", "{\"token\":\"retained-owner\"}\n", "valid"],
+] as const)("doctor reports a retained %s task lock without removing it", async (_kind, owner, ownerStatus) => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+  const taskId = "t-20260731-193000-lock-diagnostic";
+  const lockDirectory = join(cwd, ".vinea", ".runtime", "task-locks", `${taskId}.lock`);
+  await mkdir(lockDirectory, { recursive: true });
+  if (owner !== undefined) await writeFile(join(lockDirectory, "owner.json"), owner, "utf8");
+  const before = await stat(lockDirectory);
+
+  const result = await runCli(["doctor", "--json"], cwd);
+  const report = JSON.parse(result.stdout) as {
+    healthy: boolean;
+    taskLocks: Array<{
+      path: string;
+      taskId: string | null;
+      ageMilliseconds: number;
+      owner: { status: string; token?: string };
+      recoveryInstruction: string;
+    }>;
+  };
+
+  expect(result.exitCode).toBe(1);
+  expect(report.healthy).toBe(false);
+  expect(report.taskLocks).toEqual([{
+    path: `.vinea/.runtime/task-locks/${taskId}.lock`,
+    taskId,
+    ageMilliseconds: expect.any(Number),
+    owner: ownerStatus === "valid" ? { status: "valid", token: "retained-owner" } : { status: ownerStatus },
+    recoveryInstruction: `Confirm no active process, then remove exact lock directory .vinea/.runtime/task-locks/${taskId}.lock.`,
+  }]);
+  expect(report.taskLocks[0]!.ageMilliseconds).toBeGreaterThanOrEqual(0);
+  expect((await stat(lockDirectory)).mtimeMs).toBe(before.mtimeMs);
+  if (owner !== undefined) expect(await readFile(join(lockDirectory, "owner.json"), "utf8")).toBe(owner);
+});
+
+test("doctor reports an unsafe task-lock owner file without following it", async () => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+  const taskId = "t-20260731-193100-unsafe-lock";
+  const lockDirectory = join(cwd, ".vinea", ".runtime", "task-locks", `${taskId}.lock`);
+  const outsideOwner = join(cwd, "outside-owner.json");
+  await mkdir(lockDirectory, { recursive: true });
+  await writeFile(outsideOwner, "{\"token\":\"outside\"}\n", "utf8");
+  await symlink(outsideOwner, join(lockDirectory, "owner.json"));
+
+  const result = await runCli(["doctor", "--json"], cwd);
+  const report = JSON.parse(result.stdout) as { taskLocks: Array<{ owner: { status: string } }> };
+
+  expect(result.exitCode).toBe(1);
+  expect(report.taskLocks[0]!.owner).toEqual({ status: "unsafe" });
+  expect(await readFile(outsideOwner, "utf8")).toBe("{\"token\":\"outside\"}\n");
 });
 
 test("doctor gives upgrade guidance for a future schema without changing it", async () => {

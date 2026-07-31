@@ -9,6 +9,7 @@ import { createTempRepo, git } from "../helpers/fixture.js";
 const execFileAsync = promisify(execFile);
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const publicCli = join(projectRoot, "plugins", "vinea", "bin", "vinea.mjs");
+const contentionPreload = join(projectRoot, "tests", "cli", "task-lock-contention-preload.cjs");
 
 beforeAll(async () => {
   await execFileAsync("npm", ["run", "package:plugin"], { cwd: projectRoot });
@@ -42,15 +43,19 @@ test("public CLI serializes two processes and preserves one retried archive inte
   await waitForFile(join(runtime, "task-locks", `${task.id}.lock`, "owner.json"));
 
   const contentionMarker = join(runtime, "second-process-contended");
+  const taskLockDirectory = join(runtime, "task-locks", `${task.id}.lock`);
   const second = startPublic([
     "task", "require", task.id, "--id", "R1", "--text", "The task remains recoverable", "--json",
   ], cwd, {
-    NODE_ENV: "test",
-    VINEA_TEST_TASK_LOCK_OBSERVATION: "enabled",
-    VINEA_TEST_TASK_LOCK_CONTENDED_MARKER: contentionMarker,
+    preload: contentionPreload,
+    environment: {
+      VINEA_TEST_TASK_LOCK_CONTENDED_MARKER: contentionMarker,
+      VINEA_TEST_TASK_LOCK_DIRECTORY: taskLockDirectory,
+    },
   });
   try {
     await waitForFile(contentionMarker);
+    expect(await readFile(contentionMarker, "utf8")).toBe("contended\n");
     const beforeReleaseEvents = jsonl(await readFile(join(cwd, ".vinea", "tasks", "active", task.id, "journal.md"), "utf8"));
     expect(beforeReleaseEvents.some(({ type }) => type === "requirement_added")).toBe(false);
   } finally {
@@ -90,6 +95,7 @@ test("public CLI serializes two processes and preserves one retried archive inte
   const archiveJournal = jsonl(await readFile(join(cwd, ".vinea", "tasks", "archive", task.id, "journal.md"), "utf8"));
   expect(archiveJournal.filter(({ type, oldStatus }) => type === "transition_intent" && oldStatus === "finished")).toHaveLength(1);
   expect(await runJson(["validate", "--json"], cwd)).toEqual({ issues: [] });
+  expect(await readFile(publicCli, "utf8")).not.toContain("VINEA_TEST_TASK_LOCK");
 });
 
 async function runJson<T>(args: string[], cwd: string): Promise<T> {
@@ -109,16 +115,19 @@ async function runPublic(args: string[], cwd: string, expectSuccess = true): Pro
 function startPublic(
   args: string[],
   cwd: string,
-  environment: NodeJS.ProcessEnv = {},
+  options: { preload?: string; environment?: NodeJS.ProcessEnv } = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return runProcess(process.execPath, [publicCli, ...args], cwd, environment);
+  const nodeArgs = options.preload === undefined
+    ? [publicCli, ...args]
+    : ["--require", options.preload, publicCli, ...args];
+  return runProcess(process.execPath, nodeArgs, cwd, options.environment);
 }
 
 function runProcess(
   command: string,
   args: string[],
   cwd: string,
-  environment: NodeJS.ProcessEnv = {},
+  environment: NodeJS.ProcessEnv | undefined = undefined,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env: { ...process.env, ...environment } });
