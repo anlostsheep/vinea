@@ -10,8 +10,8 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package:plugin": "npm run build",
-    "check:plugin": "npm run build",
+    "package:plugin": "node scripts/package-public-plugin.mjs",
+    "check:plugin": "node scripts/check-public-plugin.mjs",
     "check": "npm run typecheck && npm test && npm run build",
     "test:e2e:manual": "node dist/vinea.mjs --help"
   },

@@ -1,0 +1,35 @@
+{
+  "name": "vinea",
+  "version": "0.1.0",
+  "description": "Shared task state and guided AI-coding workflows for Codex and Claude Code.",
+  "author": {
+    "name": "dengzhen"
+  },
+  "license": "MIT",
+  "keywords": [
+    "ai-coding",
+    "workflow",
+    "tasks",
+    "codex",
+    "claude-code"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Vinea",
+    "shortDescription": "Shared AI-coding task workflows",
+    "longDescription": "Guide Codex and Claude Code through shared, recoverable repository task state with explicit quality and completion gates.",
+    "developerName": "dengzhen",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use Vinea to orient me to the active task.",
+      "Use Vinea to propose a safe task workflow for this change.",
+      "Use Vinea to check this task before it is finished."
+    ],
+    "brandColor": "#2F6F5E"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "vinea",
+  "version": "__VINEA_VERSION__",
+  "description": "Shared task state and guided AI-coding workflows for Codex and Claude Code.",
+  "author": {
+    "name": "dengzhen"
+  },
+  "license": "MIT",
+  "keywords": ["ai-coding", "workflow", "tasks", "codex", "claude-code"],
+  "skills": "./skills/"
+}
