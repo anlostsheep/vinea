@@ -1366,7 +1366,7 @@ async function validateWorkspace(paths) {
   await validateTaskLocks(paths, add);
   return { issues: sortIssues(issues) };
 }
-async function validateTaskStructure(paths, location) {
+async function validateTaskStructure(paths, location, options = {}) {
   const issues = [];
   const add = (code, filename, message) => {
     issues.push({ code, path: displayPath(paths, filename), message });
@@ -1378,7 +1378,8 @@ async function validateTaskStructure(paths, location) {
     location.scope,
     null,
     /* @__PURE__ */ new Set(),
-    add
+    add,
+    options.pendingMutationRecovery
   );
   return { issues: sortIssues(issues) };
 }
@@ -1519,7 +1520,7 @@ async function scanTaskScope(paths, directory, scope, limits, scan, add) {
     await validateTaskDirectory(paths, taskDirectory, entry.name, scope, limits, scan.activeTaskIds, add);
   }
 }
-async function validateTaskDirectory(paths, directory, directoryName, scope, limits, activeTaskIds, add) {
+async function validateTaskDirectory(paths, directory, directoryName, scope, limits, activeTaskIds, add, pendingMutationRecovery) {
   const taskFilename = join6(directory, "task.json");
   const task = await readJsonObject(taskFilename, "TASK", add);
   if (task !== null) {
@@ -1566,7 +1567,15 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
   }
   await validateContextManifest(paths, join6(directory, "context.jsonl"), limits, add);
   const evidence = await validateEvidenceArtifact(join6(directory, "evidence.jsonl"), add);
-  await validateJournalArtifact(paths, join6(directory, "journal.md"), task, directory, scope, add);
+  await validateJournalArtifact(
+    paths,
+    join6(directory, "journal.md"),
+    task,
+    directory,
+    scope,
+    add,
+    pendingMutationRecovery
+  );
   await validateCheckArtifact(paths, join6(directory, "check.md"), task, evidence, add);
 }
 async function validateContextManifest(paths, filename, limits, add) {
@@ -1674,7 +1683,7 @@ async function validateEvidenceArtifact(filename, add) {
   }
   return records;
 }
-async function validateJournalArtifact(paths, filename, task, taskDirectory, scope, add) {
+async function validateJournalArtifact(paths, filename, task, taskDirectory, scope, add, pendingMutationRecovery) {
   const contents = await readOptionalRegularFile(filename, "JOURNAL", add);
   if (contents === null) return;
   if (contents.trim() === "") {
@@ -1801,11 +1810,13 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
   }
   const mutationOwner = mutationTargetOwnerForValidation(taskDirectory, scope, task);
   for (const intent of pendingMutationIntents.values()) {
-    add(
-      "MUTATION_INTENT_UNCOMMITTED",
-      filename,
-      `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`
-    );
+    if (!isExpectedPendingMutationRecovery(intent, pendingMutationRecovery)) {
+      add(
+        "MUTATION_INTENT_UNCOMMITTED",
+        filename,
+        `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`
+      );
+    }
     const expected = intent.expected;
     if (!isMutationTargetSummary(expected) || !mutationTargetsAreOwned(
       paths,
@@ -2306,6 +2317,9 @@ function isJournalEvent(value) {
 function isMutationCompletionEvent(value) {
   return typeof value.type === "string" && (value.type === "check_recorded" || value.type === "check_updated" || TASK_MUTATION_KINDS.has(value.type));
 }
+function isExpectedPendingMutationRecovery(intent, recovery) {
+  return recovery !== void 0 && intent.operationId === recovery.operationId && intent.mutationKind === recovery.mutationKind;
+}
 function isLegacyMutationCompletion(value) {
   return isMutationCompletionEvent(value) && value.mutationProtocolVersion === void 0;
 }
@@ -2637,6 +2651,10 @@ async function executeTaskMutationLocked(paths, location, request, prepare, oper
     if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), pending.mutationKind, pending.expected)) {
       throw new SchemaError(`Pending mutation ${pending.operationId} has targets outside its exact managed ownership.`);
     }
+    await assertTaskMutationStructure(paths, location, {
+      operationId: pending.operationId,
+      mutationKind: pending.mutationKind
+    });
     if (await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
       await appendMutationCompletion(paths, journalPath, pending, operations);
       return pending;
@@ -2828,9 +2846,9 @@ function matchesCompletionForRetry(prepared, pending) {
   delete current.mutationProtocolVersion;
   return matchesCompletion(current, pending);
 }
-async function assertTaskMutationStructure(paths, location) {
+async function assertTaskMutationStructure(paths, location, pendingMutationRecovery) {
   const { validateTaskStructure: validateTaskStructure2 } = await Promise.resolve().then(() => (init_validate(), validate_exports));
-  const report = await validateTaskStructure2(paths, location);
+  const report = await validateTaskStructure2(paths, location, { pendingMutationRecovery });
   if (report.issues.length === 0) return;
   const issue = report.issues[0];
   throw new SchemaError(

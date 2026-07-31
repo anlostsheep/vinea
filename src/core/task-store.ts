@@ -325,6 +325,10 @@ async function executeTaskMutationLocked(
     if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), pending.mutationKind, pending.expected)) {
       throw new SchemaError(`Pending mutation ${pending.operationId} has targets outside its exact managed ownership.`);
     }
+    await assertTaskMutationStructure(paths, location, {
+      operationId: pending.operationId,
+      mutationKind: pending.mutationKind,
+    });
     if (await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
       await appendMutationCompletion(paths, journalPath, pending, operations);
       return pending;
@@ -654,13 +658,18 @@ function matchesCompletionForRetry(
   return matchesCompletion(current as Omit<MutationCompletionEvent, "operationId">, pending);
 }
 
-async function assertTaskMutationStructure(paths: VineaPaths, location: TaskLocation): Promise<void> {
+async function assertTaskMutationStructure(
+  paths: VineaPaths,
+  location: TaskLocation,
+  pendingMutationRecovery?: { operationId: string; mutationKind: MutationKind },
+): Promise<void> {
   // Avoid a static dependency cycle: validate owns the task-artifact rules and
   // already depends on task-store for mutation ownership. This is a read-only
-  // check while the caller's task lock is held; matching pending retries exit
-  // before it so their recovery protocol remains available.
+  // check while the caller's task lock is held. Pending retries use the
+  // validator's narrow, typed recovery allowance for only their own legal
+  // uncommitted intent; every other task-structure issue still blocks them.
   const { validateTaskStructure } = await import("./validate.js");
-  const report = await validateTaskStructure(paths, location);
+  const report = await validateTaskStructure(paths, location, { pendingMutationRecovery });
   if (report.issues.length === 0) return;
   const issue = report.issues[0]!;
   throw new SchemaError(

@@ -7,7 +7,13 @@ import { normalizeSpecTarget, parseSpecIndexTarget } from "./learning.js";
 import type { VineaPaths } from "./paths.js";
 import { mutationTargetsAreOwned, type MutationTargetOwner, type TaskLocation } from "./task-store.js";
 import { inspectTaskLocks } from "./task-locks.js";
-import { SCHEMA_VERSION, type EvidenceRecord, type MutationTargetSummary, type TaskStatus } from "./types.js";
+import {
+  SCHEMA_VERSION,
+  type EvidenceRecord,
+  type MutationKind,
+  type MutationTargetSummary,
+  type TaskStatus,
+} from "./types.js";
 
 const REQUIRED_TASK_ARTIFACTS = [
   "brief.md",
@@ -51,6 +57,15 @@ export interface ValidationIssue {
 
 export interface ValidationReport {
   issues: ValidationIssue[];
+}
+
+export interface PendingMutationRecovery {
+  operationId: string;
+  mutationKind: MutationKind;
+}
+
+export interface TaskStructureValidationOptions {
+  pendingMutationRecovery?: PendingMutationRecovery;
 }
 
 interface ContextLimits {
@@ -123,6 +138,7 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
 export async function validateTaskStructure(
   paths: VineaPaths,
   location: Pick<TaskLocation, "directory" | "scope">,
+  options: TaskStructureValidationOptions = {},
 ): Promise<ValidationReport> {
   const issues: ValidationIssue[] = [];
   const add = (code: string, filename: string, message: string): void => {
@@ -136,6 +152,7 @@ export async function validateTaskStructure(
     null,
     new Set<string>(),
     add,
+    options.pendingMutationRecovery,
   );
   return { issues: sortIssues(issues) };
 }
@@ -316,6 +333,7 @@ async function validateTaskDirectory(
   limits: ContextLimits | null,
   activeTaskIds: Set<string>,
   add: IssueAdder,
+  pendingMutationRecovery?: PendingMutationRecovery,
 ): Promise<void> {
   const taskFilename = join(directory, "task.json");
   const task = await readJsonObject(taskFilename, "TASK", add);
@@ -375,7 +393,15 @@ async function validateTaskDirectory(
 
   await validateContextManifest(paths, join(directory, "context.jsonl"), limits, add);
   const evidence = await validateEvidenceArtifact(join(directory, "evidence.jsonl"), add);
-  await validateJournalArtifact(paths, join(directory, "journal.md"), task, directory, scope, add);
+  await validateJournalArtifact(
+    paths,
+    join(directory, "journal.md"),
+    task,
+    directory,
+    scope,
+    add,
+    pendingMutationRecovery,
+  );
   await validateCheckArtifact(paths, join(directory, "check.md"), task, evidence, add);
 }
 
@@ -515,6 +541,7 @@ async function validateJournalArtifact(
   taskDirectory: string,
   scope: "active" | "archive",
   add: IssueAdder,
+  pendingMutationRecovery?: PendingMutationRecovery,
 ): Promise<void> {
   const contents = await readOptionalRegularFile(filename, "JOURNAL", add);
   if (contents === null) return;
@@ -657,11 +684,13 @@ async function validateJournalArtifact(
   }
   const mutationOwner = mutationTargetOwnerForValidation(taskDirectory, scope, task);
   for (const intent of pendingMutationIntents.values()) {
-    add(
-      "MUTATION_INTENT_UNCOMMITTED",
-      filename,
-      `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`,
-    );
+    if (!isExpectedPendingMutationRecovery(intent, pendingMutationRecovery)) {
+      add(
+        "MUTATION_INTENT_UNCOMMITTED",
+        filename,
+        `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`,
+      );
+    }
     const expected = intent.expected;
     if (!isMutationTargetSummary(expected)
       || !mutationTargetsAreOwned(
@@ -1232,6 +1261,18 @@ function isMutationCompletionEvent(value: Record<string, unknown>): boolean {
     && (value.type === "check_recorded"
     || value.type === "check_updated"
     || TASK_MUTATION_KINDS.has(value.type));
+}
+
+function isExpectedPendingMutationRecovery(
+  intent: Record<string, unknown>,
+  recovery: PendingMutationRecovery | undefined,
+): boolean {
+  // `pendingMutationIntents` contains only journal events already accepted by
+  // isJournalEvent. The caller can therefore waive exactly one valid intent's
+  // expected lack of completion, never a generic class of validation issues.
+  return recovery !== undefined
+    && intent.operationId === recovery.operationId
+    && intent.mutationKind === recovery.mutationKind;
 }
 
 function isLegacyMutationCompletion(value: Record<string, unknown>): boolean {

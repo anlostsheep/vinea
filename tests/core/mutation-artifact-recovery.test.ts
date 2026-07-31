@@ -95,6 +95,64 @@ test("brief and plan retry their exact mutation after target and completion fail
   expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
 
+test("matching mutation recovery refuses duplicate creation and illegal replay without changing its target", async () => {
+  const task = await createMutableTask("Gate malformed mutation recovery");
+  const source = "recovery-brief.md";
+  const contents = "# Brief\n\nRecover only a structurally valid task.\n";
+  await writeFile(join(paths.repoRoot, source), contents, "utf8");
+
+  faults.artifact = "brief.md";
+  await expect(setTaskBrief(paths, task.id, source, "codex", at("2026-07-31T09:05:00.000Z")))
+    .rejects.toThrow("Injected brief.md target failure");
+
+  const journalPath = join(task.directory, "journal.md");
+  await appendJsonl(journalPath, {
+    schemaVersion: 1,
+    type: "created",
+    timestamp: "2026-07-31T09:05:01.000Z",
+    actor: "cli",
+    confirmation: "user",
+    status: "planning",
+  }, paths.repoRoot);
+  await appendJsonl(journalPath, {
+    schemaVersion: 1,
+    type: "transition_intent",
+    operationId: "op-illegal-replay",
+    timestamp: "2026-07-31T09:05:02.000Z",
+    actor: "cli",
+    reason: "Corrupt replay fixture",
+    oldStatus: "planning",
+    newStatus: "checking",
+  }, paths.repoRoot);
+  await appendJsonl(journalPath, {
+    schemaVersion: 1,
+    type: "continued",
+    timestamp: "2026-07-31T09:05:03.000Z",
+    actor: "codex",
+    confirmation: "user",
+    host: "codex",
+    sessionBound: false,
+    started: false,
+    status: "planning",
+  }, paths.repoRoot);
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toEqual(expect.arrayContaining([
+    "JOURNAL_CREATION_DUPLICATE",
+    "JOURNAL_CREATION_NOT_FIRST",
+    "JOURNAL_TRANSITION_INVALID",
+    "MUTATION_INTENT_UNCOMMITTED",
+  ]));
+  const beforeJournal = await readFile(journalPath, "utf8");
+  const beforeBrief = await readFile(join(task.directory, "brief.md"), "utf8");
+
+  await expect(setTaskBrief(paths, task.id, source, "codex", at("2026-07-31T09:05:04.000Z")))
+    .rejects.toMatchObject({
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("JOURNAL_CREATION"),
+    });
+  expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
+  expect(await readFile(join(task.directory, "brief.md"), "utf8")).toBe(beforeBrief);
+});
+
 test("context, evidence, and check mutations recover controlled artifacts without losing prior rows", async () => {
   const task = await createMutableTask("Recover task records");
   const contextSource = join(paths.repoRoot, "context-source.md");
