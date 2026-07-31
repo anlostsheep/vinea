@@ -79,7 +79,8 @@ export async function inspectWorkspace(paths: VineaPaths): Promise<DoctorReport>
     missingRequiredDirectories,
     supportedSchema,
     migrationGuidance,
-    healthy: supportedSchema && missingRequiredDirectories.length === 0,
+    healthy: supportedSchema
+      && missingRequiredDirectories.every((directory) => directory === ".runtime/sessions"),
   };
 }
 

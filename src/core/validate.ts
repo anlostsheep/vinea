@@ -1,0 +1,688 @@
+import { lstat, readFile, readdir } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import type { VineaPaths } from "./paths.js";
+import { SCHEMA_VERSION } from "./types.js";
+
+const REQUIRED_TASK_ARTIFACTS = [
+  "brief.md",
+  "plan.md",
+  "context.jsonl",
+  "evidence.jsonl",
+  "check.md",
+  "journal.md",
+] as const;
+const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const ACTIVE_STATUSES = new Set(["planning", "ready", "in_progress", "checking", "finished", "blocked"]);
+const ALL_STATUSES = new Set([...ACTIVE_STATUSES, "archived"]);
+
+export interface ValidationIssue {
+  code: string;
+  path: string;
+  message: string;
+}
+
+export interface ValidationReport {
+  issues: ValidationIssue[];
+}
+
+interface ContextLimits {
+  maxFiles: number;
+  maxEstimatedBytes: number;
+}
+
+interface TaskScan {
+  activeTaskIds: Set<string>;
+  taskIdsByScope: Map<string, Set<"active" | "archive">>;
+}
+
+export async function validateWorkspace(paths: VineaPaths): Promise<ValidationReport> {
+  const issues: ValidationIssue[] = [];
+  const add = (code: string, filename: string, message: string): void => {
+    issues.push({ code, path: displayPath(paths, filename), message });
+  };
+
+  const root = await entryKind(paths.vineaRoot);
+  if (root === "missing") {
+    add("WORKSPACE_NOT_INITIALIZED", paths.vineaRoot, "Run `vinea init` before validating this repository.");
+    return { issues: sortIssues(issues) };
+  }
+  if (root !== "directory") {
+    add("WORKSPACE_INVALID", paths.vineaRoot, "The Vinea root must be a regular directory and not a symbolic link.");
+    return { issues: sortIssues(issues) };
+  }
+
+  const limits = await validateConfig(paths, add);
+  await validateInlineAudit(paths, add);
+
+  for (const [label, directory] of [
+    ["specs", paths.specs],
+    ["tasks/active", paths.activeTasks],
+    ["tasks/archive", paths.archivedTasks],
+  ] as const) {
+    const kind = await entryKind(directory);
+    if (kind === "missing") {
+      add("DIRECTORY_MISSING", directory, `Required Vinea directory ${label} is missing.`);
+    } else if (kind !== "directory") {
+      add("DIRECTORY_INVALID", directory, `Required Vinea path ${label} must be a regular directory.`);
+    }
+  }
+
+  const taskScan: TaskScan = {
+    activeTaskIds: new Set<string>(),
+    taskIdsByScope: new Map<string, Set<"active" | "archive">>(),
+  };
+  await scanTaskScope(paths, paths.activeTasks, "active", limits, taskScan, add);
+  await scanTaskScope(paths, paths.archivedTasks, "archive", limits, taskScan, add);
+  for (const [taskId, scopes] of taskScan.taskIdsByScope) {
+    if (scopes.size > 1) {
+      add(
+        "TASK_LOCATION_DUPLICATE",
+        join(paths.tasks, taskId),
+        `Task ${taskId} is present in both active and archive storage.`,
+      );
+    }
+  }
+
+  await validateSessionBindings(paths, taskScan.activeTaskIds, add);
+  return { issues: sortIssues(issues) };
+}
+
+async function validateConfig(
+  paths: VineaPaths,
+  add: IssueAdder,
+): Promise<ContextLimits | null> {
+  const value = await readJsonObject(paths.config, "CONFIG", add);
+  if (value === null) return null;
+  if (value.schemaVersion !== SCHEMA_VERSION) {
+    add(
+      "CONFIG_SCHEMA_UNSUPPORTED",
+      paths.config,
+      `Config schema ${String(value.schemaVersion)} is unsupported; this CLI supports ${SCHEMA_VERSION}.`,
+    );
+  }
+  const riskRules = value.riskRules;
+  const context = value.context;
+  const validRiskRules = isRecord(riskRules)
+    && isStringArray(riskRules.medium)
+    && isStringArray(riskRules.high);
+  const validContext = isRecord(context)
+    && isNonNegativeSafeInteger(context.maxFiles)
+    && isNonNegativeSafeInteger(context.maxEstimatedBytes);
+  if (!validRiskRules || !validContext) {
+    add(
+      "CONFIG_INVALID",
+      paths.config,
+      "Config must define string risk-rule arrays and non-negative integer context budgets.",
+    );
+  }
+  return validContext
+    ? {
+        maxFiles: context.maxFiles as number,
+        maxEstimatedBytes: context.maxEstimatedBytes as number,
+      }
+    : null;
+}
+
+async function validateInlineAudit(paths: VineaPaths, add: IssueAdder): Promise<void> {
+  const filename = join(paths.vineaRoot, "inline-audit.jsonl");
+  const contents = await readOptionalRegularFile(filename, "INLINE_AUDIT", add);
+  if (contents === null) return;
+  for (const { line, lineNumber } of jsonlLines(contents)) {
+    const value = parseJsonl(line, lineNumber, filename, "INLINE_AUDIT_JSONL_INVALID", add);
+    if (value === null) continue;
+    if (!isRecord(value)) {
+      add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
+      continue;
+    }
+    if (value.schemaVersion !== SCHEMA_VERSION) {
+      add(
+        "INLINE_AUDIT_SCHEMA_UNSUPPORTED",
+        filename,
+        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`,
+      );
+    }
+    if (
+      !isIsoTimestamp(value.timestamp)
+      || typeof value.requestSummary !== "string"
+      || value.requestSummary.trim() === ""
+      || typeof value.reason !== "string"
+      || value.reason.trim() === ""
+      || !isRecord(value.proposedRisk)
+      || !["low", "medium", "high"].includes(String(value.proposedRisk.level))
+      || !isStringArray(value.proposedRisk.reasons)
+    ) {
+      add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid inline-audit record.`);
+    }
+  }
+}
+
+async function scanTaskScope(
+  paths: VineaPaths,
+  directory: string,
+  scope: "active" | "archive",
+  limits: ContextLimits | null,
+  scan: TaskScan,
+  add: IssueAdder,
+): Promise<void> {
+  if (await entryKind(directory) !== "directory") return;
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    add("DIRECTORY_UNREADABLE", directory, describeError("Unable to list task storage", error));
+    return;
+  }
+  for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
+    const taskDirectory = join(directory, entry.name);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      add("TASK_ENTRY_INVALID", taskDirectory, "Task storage entries must be regular directories.");
+      continue;
+    }
+    const scopes = scan.taskIdsByScope.get(entry.name) ?? new Set<"active" | "archive">();
+    scopes.add(scope);
+    scan.taskIdsByScope.set(entry.name, scopes);
+    await validateTaskDirectory(paths, taskDirectory, entry.name, scope, limits, scan.activeTaskIds, add);
+  }
+}
+
+async function validateTaskDirectory(
+  paths: VineaPaths,
+  directory: string,
+  directoryName: string,
+  scope: "active" | "archive",
+  limits: ContextLimits | null,
+  activeTaskIds: Set<string>,
+  add: IssueAdder,
+): Promise<void> {
+  const taskFilename = join(directory, "task.json");
+  const task = await readJsonObject(taskFilename, "TASK", add);
+  if (task !== null) {
+    const taskId = typeof task.id === "string" ? task.id : null;
+    if (!TASK_ID_PATTERN.test(directoryName)) {
+      add("TASK_ID_INVALID", taskFilename, `Task directory name is invalid: ${directoryName}.`);
+    }
+    if (taskId !== directoryName) {
+      add("TASK_ID_MISMATCH", taskFilename, `Task ID ${String(task.id)} does not match directory ${directoryName}.`);
+    }
+    if (task.schemaVersion !== SCHEMA_VERSION) {
+      add(
+        "TASK_SCHEMA_UNSUPPORTED",
+        taskFilename,
+        `Task schema ${String(task.schemaVersion)} is unsupported; this CLI supports ${SCHEMA_VERSION}.`,
+      );
+    }
+    const status = typeof task.status === "string" ? task.status : "";
+    if (!ALL_STATUSES.has(status)) {
+      add("TASK_STATUS_INVALID", taskFilename, `Unknown task status: ${String(task.status)}.`);
+    } else if (
+      (scope === "active" && status === "archived")
+      || (scope === "archive" && status !== "archived")
+    ) {
+      add(
+        "TASK_STATE_SCOPE_INVALID",
+        taskFilename,
+        `Status ${status} is invalid in ${scope} task storage.`,
+      );
+    }
+    if (!isTaskRecordShape(task)) {
+      add("TASK_RECORD_INVALID", taskFilename, "Task record does not match the supported task structure.");
+    }
+    if (
+      scope === "active"
+      && taskId === directoryName
+      && TASK_ID_PATTERN.test(taskId)
+      && task.schemaVersion === SCHEMA_VERSION
+      && ACTIVE_STATUSES.has(status)
+      && isTaskRecordShape(task)
+    ) {
+      activeTaskIds.add(taskId);
+    }
+  }
+
+  for (const artifact of REQUIRED_TASK_ARTIFACTS) {
+    const filename = join(directory, artifact);
+    const kind = await entryKind(filename);
+    if (kind === "missing") {
+      add("TASK_ARTIFACT_MISSING", filename, `Required task artifact ${artifact} is missing.`);
+    } else if (kind !== "file") {
+      add("TASK_ARTIFACT_INVALID", filename, `Required task artifact ${artifact} must be a regular file.`);
+    }
+  }
+
+  await validateContextManifest(paths, join(directory, "context.jsonl"), limits, add);
+  await validateJsonlSyntax(join(directory, "evidence.jsonl"), "EVIDENCE_JSONL_INVALID", add);
+  await validateJsonlSyntax(join(directory, "journal.md"), "JOURNAL_JSONL_INVALID", add);
+}
+
+async function validateContextManifest(
+  paths: VineaPaths,
+  filename: string,
+  limits: ContextLimits | null,
+  add: IssueAdder,
+): Promise<void> {
+  const contents = await readOptionalRegularFile(filename, "CONTEXT", add);
+  if (contents === null) return;
+  let files = 0;
+  let estimatedBytes = 0;
+  const pathsSeen = new Set<string>();
+  for (const { line, lineNumber } of jsonlLines(contents)) {
+    const value = parseJsonl(line, lineNumber, filename, "CONTEXT_JSONL_INVALID", add);
+    if (value === null) continue;
+    if (!isRecord(value)) {
+      add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
+      continue;
+    }
+    if (value.schemaVersion !== SCHEMA_VERSION) {
+      add(
+        "CONTEXT_SCHEMA_UNSUPPORTED",
+        filename,
+        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`,
+      );
+    }
+    const validBytes = isNonNegativeSafeInteger(value.estimatedBytes);
+    const normalizedPath = typeof value.path === "string"
+      ? normalizeRepositoryPath(value.path)
+      : null;
+    if (
+      typeof value.path !== "string"
+      || normalizedPath === null
+      || normalizedPath !== value.path
+      || typeof value.purpose !== "string"
+      || value.purpose.trim() === ""
+      || !validBytes
+      || !isIsoTimestamp(value.addedAt)
+    ) {
+      add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid context reference.`);
+    }
+    files += 1;
+    if (validBytes) estimatedBytes += value.estimatedBytes as number;
+    if (typeof value.path !== "string") continue;
+    const duplicateKey = normalizedPath ?? value.path;
+    if (pathsSeen.has(duplicateKey)) {
+      add("CONTEXT_DUPLICATE", filename, `Line ${lineNumber} duplicates context path ${duplicateKey}.`);
+    } else {
+      pathsSeen.add(duplicateKey);
+    }
+    await validateContextPath(paths, filename, value.path, lineNumber, add);
+  }
+  if (limits !== null && files > limits.maxFiles) {
+    add(
+      "CONTEXT_FILE_BUDGET_EXCEEDED",
+      filename,
+      `Context manifest has ${files} files; configured maximum is ${limits.maxFiles}.`,
+    );
+  }
+  if (limits !== null && estimatedBytes > limits.maxEstimatedBytes) {
+    add(
+      "CONTEXT_BYTE_BUDGET_EXCEEDED",
+      filename,
+      `Context manifest estimates ${estimatedBytes} bytes; configured maximum is ${limits.maxEstimatedBytes}.`,
+    );
+  }
+}
+
+async function validateContextPath(
+  paths: VineaPaths,
+  manifest: string,
+  repositoryPath: string,
+  lineNumber: number,
+  add: IssueAdder,
+): Promise<void> {
+  const normalized = normalizeRepositoryPath(repositoryPath);
+  if (normalized === null) {
+    add("CONTEXT_PATH_INVALID", manifest, `Line ${lineNumber} has an unsafe context path: ${repositoryPath}.`);
+    return;
+  }
+  let current = paths.repoRoot;
+  for (const segment of normalized.split("/")) {
+    current = join(current, segment);
+    const kind = await entryKind(current);
+    if (kind === "missing") {
+      add("CONTEXT_PATH_MISSING", manifest, `Line ${lineNumber} references missing path ${normalized}.`);
+      return;
+    }
+    if (kind === "symlink") {
+      add("CONTEXT_PATH_UNSAFE", manifest, `Line ${lineNumber} references symbolic link ${normalized}.`);
+      return;
+    }
+  }
+  if (await entryKind(resolve(paths.repoRoot, normalized)) !== "file") {
+    add("CONTEXT_PATH_INVALID", manifest, `Line ${lineNumber} must reference a regular file: ${normalized}.`);
+  }
+}
+
+async function validateJsonlSyntax(filename: string, code: string, add: IssueAdder): Promise<void> {
+  const contents = await readOptionalRegularFile(filename, code.replace("_JSONL_INVALID", ""), add);
+  if (contents === null) return;
+  for (const { line, lineNumber } of jsonlLines(contents)) {
+    parseJsonl(line, lineNumber, filename, code, add);
+  }
+}
+
+async function validateSessionBindings(
+  paths: VineaPaths,
+  activeTaskIds: ReadonlySet<string>,
+  add: IssueAdder,
+): Promise<void> {
+  const runtimeKind = await entryKind(paths.runtime);
+  if (runtimeKind === "missing") return;
+  if (runtimeKind !== "directory") {
+    add("RUNTIME_INVALID", paths.runtime, "Runtime state must be a regular directory.");
+    return;
+  }
+  const sessionsKind = await entryKind(paths.sessions);
+  if (sessionsKind === "missing") return;
+  if (sessionsKind !== "directory") {
+    add("RUNTIME_INVALID", paths.sessions, "Session binding storage must be a regular directory.");
+    return;
+  }
+
+  let entries;
+  try {
+    entries = await readdir(paths.sessions, { withFileTypes: true });
+  } catch (error) {
+    add("RUNTIME_UNREADABLE", paths.sessions, describeError("Unable to list session bindings", error));
+    return;
+  }
+  for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
+    const filename = join(paths.sessions, entry.name);
+    const validFilename = isValidSessionBindingFilename(entry.name);
+    if (!validFilename) {
+      add(
+        "SESSION_FILENAME_INVALID",
+        filename,
+        "Session bindings must use <codex|claude>-sid-<lowercase UTF-8 hex>.json filenames.",
+      );
+    }
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      add("SESSION_BINDING_INVALID", filename, "Session bindings must be regular files.");
+      continue;
+    }
+    if (!validFilename) continue;
+    const value = await readJsonObject(filename, "SESSION_BINDING", add);
+    if (value === null) continue;
+    if (value.schemaVersion !== SCHEMA_VERSION) {
+      add(
+        "SESSION_SCHEMA_UNSUPPORTED",
+        filename,
+        `Session binding schema ${String(value.schemaVersion)} is unsupported.`,
+      );
+    }
+    if (!isSessionBindingShape(value)) {
+      add("SESSION_BINDING_INVALID", filename, "Session binding record is malformed.");
+      continue;
+    }
+    if (!activeTaskIds.has(value.taskId as string)) {
+      add(
+        "SESSION_BINDING_STALE",
+        filename,
+        `Session binding points to non-active task ${String(value.taskId)}.`,
+      );
+    }
+  }
+}
+
+async function readJsonObject(
+  filename: string,
+  prefix: string,
+  add: IssueAdder,
+): Promise<Record<string, unknown> | null> {
+  const contents = await readRequiredRegularFile(filename, prefix, add);
+  if (contents === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(contents) as unknown;
+  } catch {
+    add(`${prefix}_JSON_INVALID`, filename, "File does not contain valid JSON.");
+    return null;
+  }
+  if (!isRecord(value)) {
+    add(`${prefix}_INVALID`, filename, "File must contain a JSON object.");
+    return null;
+  }
+  return value;
+}
+
+async function readRequiredRegularFile(
+  filename: string,
+  prefix: string,
+  add: IssueAdder,
+): Promise<string | null> {
+  const kind = await entryKind(filename);
+  if (kind === "missing") {
+    add(`${prefix}_MISSING`, filename, "Required file is missing.");
+    return null;
+  }
+  if (kind !== "file") {
+    add(`${prefix}_INVALID`, filename, "Expected a regular file and not a symbolic link.");
+    return null;
+  }
+  try {
+    return await readFile(filename, "utf8");
+  } catch (error) {
+    add(`${prefix}_UNREADABLE`, filename, describeError("Unable to read file", error));
+    return null;
+  }
+}
+
+async function readOptionalRegularFile(
+  filename: string,
+  prefix: string,
+  add: IssueAdder,
+): Promise<string | null> {
+  if (await entryKind(filename) === "missing") return null;
+  return readRequiredRegularFile(filename, prefix, add);
+}
+
+function parseJsonl(
+  line: string,
+  lineNumber: number,
+  filename: string,
+  code: string,
+  add: IssueAdder,
+): unknown | null {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch {
+    add(code, filename, `Line ${lineNumber} is not valid JSON.`);
+    return null;
+  }
+}
+
+function jsonlLines(contents: string): Array<{ line: string; lineNumber: number }> {
+  return contents
+    .split("\n")
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => line.trim() !== "");
+}
+
+function isTaskRecordShape(value: Record<string, unknown>): boolean {
+  return value.schemaVersion === SCHEMA_VERSION
+    && typeof value.id === "string"
+    && TASK_ID_PATTERN.test(value.id)
+    && typeof value.title === "string"
+    && value.title.trim() !== ""
+    && ALL_STATUSES.has(String(value.status))
+    && isRecord(value.risk)
+    && ["low", "medium", "high"].includes(String(value.risk.level))
+    && isStringArray(value.risk.reasons)
+    && ["standard", "tdd"].includes(String(value.qualityMode))
+    && ["single-agent", "delegated"].includes(String(value.executionMode))
+    && Array.isArray(value.requirements)
+    && value.requirements.every(isRequirement)
+    && Array.isArray(value.acceptanceCriteria)
+    && value.acceptanceCriteria.every(isRequirement)
+    && isLearningCandidates(value.learningCandidates)
+    && isCommitMetadata(value.commit)
+    && isIsoTimestamp(value.createdAt)
+    && isIsoTimestamp(value.updatedAt);
+}
+
+function isSessionBindingShape(value: Record<string, unknown>): boolean {
+  return Object.keys(value).every((key) => ["schemaVersion", "taskId", "boundAt"].includes(key))
+    && value.schemaVersion === SCHEMA_VERSION
+    && typeof value.taskId === "string"
+    && TASK_ID_PATTERN.test(value.taskId)
+    && isIsoTimestamp(value.boundAt);
+}
+
+function isRequirement(value: unknown): boolean {
+  return isRecord(value)
+    && Object.keys(value).every((key) => ["schemaVersion", "id", "text", "createdAt"].includes(key))
+    && value.schemaVersion === SCHEMA_VERSION
+    && typeof value.id === "string"
+    && value.id.trim() !== ""
+    && typeof value.text === "string"
+    && value.text.trim() !== ""
+    && isIsoTimestamp(value.createdAt);
+}
+
+function isLearningCandidates(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  const ids = new Set<string>();
+  for (const candidate of value) {
+    if (
+      !isRecord(candidate)
+      || candidate.schemaVersion !== SCHEMA_VERSION
+      || typeof candidate.id !== "string"
+      || candidate.id.trim() === ""
+      || ids.has(candidate.id)
+      || typeof candidate.domain !== "string"
+      || candidate.domain.trim() === ""
+      || typeof candidate.text !== "string"
+      || candidate.text.trim() === ""
+      || typeof candidate.rationale !== "string"
+      || candidate.rationale.trim() === ""
+      || !isIsoTimestamp(candidate.proposedAt)
+    ) {
+      return false;
+    }
+    ids.add(candidate.id);
+    if (candidate.status === "proposed") continue;
+    if (
+      candidate.status === "accepted"
+      && candidate.confirmedBy === "user"
+      && isIsoTimestamp(candidate.acceptedAt)
+    ) {
+      continue;
+    }
+    if (
+      candidate.status === "archived"
+      && typeof candidate.archiveReason === "string"
+      && candidate.archiveReason.trim() !== ""
+      && isIsoTimestamp(candidate.archivedAt)
+    ) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+function isCommitMetadata(value: unknown): boolean {
+  if (value === null) return true;
+  return isRecord(value)
+    && Object.keys(value).every((key) => ["sha", "message"].includes(key))
+    && typeof value.sha === "string"
+    && value.sha.trim() !== ""
+    && (value.message === undefined || typeof value.message === "string");
+}
+
+function isValidSessionBindingFilename(filename: string): boolean {
+  const match = /^(?:codex|claude)-sid-([0-9a-f]+)\.json$/.exec(filename);
+  if (match === null) return false;
+  const hex = match[1]!;
+  if (hex.length === 0 || hex.length % 2 !== 0 || hex.length > 238) return false;
+  const bytes = Buffer.from(hex, "hex");
+  let sessionId: string;
+  try {
+    sessionId = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  return sessionId !== ""
+    && sessionId !== "."
+    && sessionId !== ".."
+    && !sessionId.includes("/")
+    && !sessionId.includes("\\")
+    && !sessionId.includes("\0")
+    && Buffer.from(sessionId, "utf8").toString("hex") === hex;
+}
+
+function normalizeRepositoryPath(input: string): string | null {
+  const value = input.trim();
+  if (value === "" || isAbsolute(value) || /^[a-zA-Z]:[/\\]/.test(value) || value.startsWith("\\")) {
+    return null;
+  }
+  const segments = value.split(/[/\\]/);
+  if (segments.includes("..")) return null;
+  const normalized = segments.filter((segment) => segment !== "" && segment !== ".").join("/");
+  if (
+    normalized === ""
+    || normalized === ".vinea/.runtime"
+    || normalized.startsWith(".vinea/.runtime/")
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+async function entryKind(path: string): Promise<"missing" | "file" | "directory" | "symlink" | "other"> {
+  try {
+    const entry = await lstat(path);
+    if (entry.isSymbolicLink()) return "symlink";
+    if (entry.isFile()) return "file";
+    if (entry.isDirectory()) return "directory";
+    return "other";
+  } catch (error) {
+    if (isErrorCode(error, "ENOENT")) return "missing";
+    return "other";
+  }
+}
+
+function displayPath(paths: VineaPaths, filename: string): string {
+  const value = relative(paths.repoRoot, filename).split("\\").join("/");
+  return value === "" ? "." : value;
+}
+
+function sortIssues(issues: ValidationIssue[]): ValidationIssue[] {
+  return issues.sort(
+    (left, right) =>
+      compareText(left.path, right.path)
+      || compareText(left.code, right.code)
+      || compareText(left.message, right.message),
+  );
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+function isErrorCode(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function describeError(prefix: string, error: unknown): string {
+  return `${prefix}: ${error instanceof Error ? error.message : "unknown error"}.`;
+}
+
+type IssueAdder = (code: string, filename: string, message: string) => void;

@@ -12,13 +12,14 @@ import {
 } from "./core/context.js";
 import { recordEvidence } from "./core/evidence.js";
 import { VineaError } from "./core/errors.js";
+import { diagnoseWorkspace } from "./core/doctor.js";
 import {
   acceptLearning,
   archiveLearning,
   proposeLearning,
 } from "./core/learning.js";
 import { resolveVineaPaths } from "./core/paths.js";
-import { inspectWorkspace } from "./core/schema.js";
+import { validateWorkspace, type ValidationReport } from "./core/validate.js";
 import {
   appendInlineAudit,
   addAcceptanceCriterion,
@@ -109,13 +110,24 @@ export async function main(args: string[]): Promise<number> {
       }
       return 2;
     }
-    const report = await inspectWorkspace(resolveVineaPaths(process.cwd()));
+    const report = await diagnoseWorkspace(resolveVineaPaths(process.cwd()));
     if (json) {
       process.stdout.write(`${JSON.stringify(report)}\n`);
     } else {
       process.stdout.write(renderDoctorReport(report));
     }
     return report.healthy ? 0 : 1;
+  }
+
+  if (command === "validate") {
+    try {
+      const options = parseOptions(args.slice(1), new Set(), new Set(["--json"]));
+      const report = await validateWorkspace(resolveVineaPaths(process.cwd()));
+      writeOutput(report, options.has("--json"), renderValidationReport(report));
+      return report.issues.length === 0 ? 0 : 1;
+    } catch (error) {
+      return reportError(error, json);
+    }
   }
 
   if (command === "propose") {
@@ -753,16 +765,25 @@ function renderOrient(summary: OrientSummary): string {
   return `${lines.join("\n")}\n`;
 }
 
-function renderDoctorReport(report: Awaited<ReturnType<typeof inspectWorkspace>>): string {
+function renderDoctorReport(report: Awaited<ReturnType<typeof diagnoseWorkspace>>): string {
   const lines = [
     `initialized: ${report.initialized}`,
     `config schema: ${report.configSchemaVersion ?? "missing"}`,
     `supported schema: ${report.supportedSchema}`,
     `missing directories: ${report.missingRequiredDirectories.length ? report.missingRequiredDirectories.join(", ") : "none"}`,
+    `git available: ${report.gitStatus.available}`,
     `healthy: ${report.healthy}`,
   ];
   if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
+  if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
   return `${lines.join("\n")}\n`;
+}
+
+function renderValidationReport(report: ValidationReport): string {
+  if (report.issues.length === 0) return "Vinea state is valid.\n";
+  return `${report.issues.map(
+    (issue) => `[${issue.code}] ${issue.path}: ${issue.message}`,
+  ).join("\n")}\n`;
 }
 
 void main(process.argv.slice(2)).then((exitCode) => {
