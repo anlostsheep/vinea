@@ -16,3 +16,5 @@ Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the ta
 Run `doctor --json` read-only and report initialization state, supported schema, missing directories, migration guidance, and Git diagnostics. When it is healthy but task state remains questionable, run `validate --json` for aggregated file and lifecycle issues.
 
 Explain the exact next safe action: initialize only an uninitialized target repository, follow stated migration guidance for an unsupported schema, repair the named repository condition, or return to `vinea:orient` after diagnostics pass. Do not modify task files to hide a diagnostic.
+
+Lock diagnostics, including `.runtime/learning-promotion.lock`, are inventory only: do not infer liveness or delete them automatically. Inspect the reported owner and path, confirm no Vinea process is active, then remove only the exact reported lock directory if manual recovery is necessary.

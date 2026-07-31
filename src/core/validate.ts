@@ -120,21 +120,24 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
 async function validateTaskLocks(paths: VineaPaths, add: IssueAdder): Promise<void> {
   const locks = await inspectTaskLocks(paths);
   for (const lock of locks) {
-    const association = lock.taskId === null ? "unknown task" : `task ${lock.taskId}`;
+    const promotionLock = lock.path === ".vinea/.runtime/learning-promotion.lock";
+    const label = promotionLock ? "learning promotion lock" : "task lock";
+    const prefix = promotionLock ? "LEARNING_PROMOTION_LOCK" : "TASK_LOCK";
+    const association = promotionLock ? label : lock.taskId === null ? "unknown task" : `task ${lock.taskId}`;
     const age = lock.ageMilliseconds === null ? "unknown age" : `age ${lock.ageMilliseconds}ms`;
     const message = `${association}; ${age}. ${lock.recoveryInstruction}`;
     if (lock.status === "directory_invalid") {
-      add("TASK_LOCK_DIRECTORY_INVALID", join(paths.repoRoot, lock.path), message);
+      add(`${prefix}_DIRECTORY_INVALID`, join(paths.repoRoot, lock.path), message);
     } else if (lock.status === "retained") {
-      add("TASK_LOCK_RETAINED", join(paths.repoRoot, lock.path), message);
+      add(`${prefix}_RETAINED`, join(paths.repoRoot, lock.path), message);
     } else if (lock.status === "owner_missing") {
-      add("TASK_LOCK_OWNER_MISSING", join(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_MISSING`, join(paths.repoRoot, lock.path), message);
     } else if (lock.status === "owner_malformed") {
-      add("TASK_LOCK_OWNER_MALFORMED", join(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_MALFORMED`, join(paths.repoRoot, lock.path), message);
     } else if (lock.status === "owner_unreadable") {
-      add("TASK_LOCK_OWNER_UNREADABLE", join(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_UNREADABLE`, join(paths.repoRoot, lock.path), message);
     } else {
-      add("TASK_LOCK_OWNER_UNSAFE", join(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_UNSAFE`, join(paths.repoRoot, lock.path), message);
     }
   }
 }
@@ -666,7 +669,9 @@ async function validateJournalArtifact(
     if (!isMutationTargetSummary(expected)) continue;
     for (const target of expected.files as Array<Record<string, unknown>>) {
       const path = target.path as string;
-      if (!path.endsWith("/task.json")) latestIntentByFile.set(path, intent);
+      if (!path.endsWith("/task.json") && intent.mutationKind !== "learning_accepted") {
+        latestIntentByFile.set(path, intent);
+      }
     }
   }
   for (const intent of latestIntentBySemanticIdentity.values()) {
@@ -676,6 +681,13 @@ async function validateJournalArtifact(
         "MUTATION_TARGET_MISMATCH",
         filename,
         `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its expected managed target identity.`,
+      );
+    } else if (intent.mutationKind === "learning_accepted"
+      && !await acceptedLearningTargetsMatch(paths, task, mutationOwner, intent)) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Completed learning acceptance ${String(intent.operationId)} no longer matches its candidate-domain spec or index target.`,
       );
     }
   }
@@ -810,6 +822,67 @@ function hasLearningCandidate(task: Record<string, unknown>, identity: Record<st
     && item.id === identity.learningCandidateId
     && item.status === status);
   return candidate !== undefined && mutationIdentityValueMatches(candidate, identity);
+}
+
+async function acceptedLearningTargetsMatch(
+  paths: VineaPaths,
+  task: Record<string, unknown> | null,
+  owner: MutationTargetOwner,
+  intent: Record<string, unknown>,
+): Promise<boolean> {
+  const expected = intent.expected;
+  if (task === null
+    || !isMutationTargetSummary(expected)
+    || !mutationTargetsAreOwned(
+      paths,
+      owner,
+      "learning_accepted",
+      expected as unknown as MutationTargetSummary,
+    )) {
+    return false;
+  }
+  const identity = expected.identity as Record<string, unknown>;
+  const candidate = acceptedLearningCandidate(task, identity);
+  if (candidate === null) return false;
+  const normalizedRule = candidate.text.trim().replace(/\s+/gu, " ");
+  const rule = `- ${candidate.acceptedAt.slice(0, 10)}: ${normalizedRule}`;
+  const specPath = join(paths.specs, `${candidate.domain}.md`);
+  if (await entryKind(specPath) !== "file" || await entryKind(paths.specIndex) !== "file") return false;
+  let spec: string;
+  let index: string;
+  try {
+    [spec, index] = await Promise.all([
+      readFile(specPath, "utf8"),
+      readFile(paths.specIndex, "utf8"),
+    ]);
+  } catch {
+    return false;
+  }
+  if (!spec.split(/\r?\n/u).some((line) => line === rule)) return false;
+  return index.split(/\r?\n/u).some((line) => {
+    const target = parseSpecIndexTarget(line);
+    return target !== undefined && normalizeSpecTarget(target) === `${candidate.domain}.md`;
+  });
+}
+
+function acceptedLearningCandidate(
+  task: Record<string, unknown>,
+  identity: Record<string, unknown>,
+): { domain: string; text: string; acceptedAt: string } | null {
+  if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return null;
+  const candidate = task.learningCandidates.find((item) => isRecord(item)
+    && item.id === identity.learningCandidateId
+    && item.status === "accepted"
+    && item.confirmedBy === "user"
+    && typeof item.domain === "string"
+    && typeof item.text === "string"
+    && isIsoTimestamp(item.acceptedAt));
+  if (candidate === undefined || !mutationIdentityValueMatches(candidate, identity)) return null;
+  const domain = candidate.domain as string;
+  const text = candidate.text as string;
+  const acceptedAt = candidate.acceptedAt as string;
+  if (text.trim() === "" || !MANAGED_SPEC_TARGET.test(`${domain}.md`)) return null;
+  return { domain, text, acceptedAt };
 }
 
 function mutationIdentityValueMatches(value: unknown, identity: Record<string, unknown>): boolean {

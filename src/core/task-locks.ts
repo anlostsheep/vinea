@@ -21,6 +21,7 @@ export interface TaskLockDiagnostic {
 }
 
 const TASK_LOCK_FILENAME = /^(t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*)\.lock$/;
+const PROMOTION_LOCK_DIRECTORY = "learning-promotion.lock";
 
 // This is intentionally diagnostic only: it does not claim, remove, or infer
 // the liveness of any lock. Both doctor and validate use this same safe scan.
@@ -31,16 +32,36 @@ export async function inspectTaskLocks(paths: VineaPaths): Promise<TaskLockDiagn
     await assertNoSymlink(paths.repoRoot, locksDirectory);
     const locks = await lstat(locksDirectory);
     if (!locks.isDirectory() || locks.isSymbolicLink()) {
-      return [taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" })];
+      return [
+        taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
+        ...await inspectNamedRuntimeLock(paths, join(paths.runtime, PROMOTION_LOCK_DIRECTORY)),
+      ].sort((left, right) => left.path.localeCompare(right.path));
     }
     entries = await readdir(locksDirectory);
   } catch (error) {
-    if (isMissing(error)) return [];
-    return [taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" })];
+    if (isMissing(error)) {
+      return inspectNamedRuntimeLock(paths, join(paths.runtime, PROMOTION_LOCK_DIRECTORY));
+    }
+    return [
+      taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
+      ...await inspectNamedRuntimeLock(paths, join(paths.runtime, PROMOTION_LOCK_DIRECTORY)),
+    ].sort((left, right) => left.path.localeCompare(right.path));
   }
 
   const diagnostics = await Promise.all(entries.map(async (entry) => inspectTaskLock(paths, join(locksDirectory, entry))));
-  return diagnostics.sort((left, right) => left.path.localeCompare(right.path));
+  const promotionLock = await inspectNamedRuntimeLock(paths, join(paths.runtime, PROMOTION_LOCK_DIRECTORY));
+  return [...diagnostics, ...promotionLock].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function inspectNamedRuntimeLock(paths: VineaPaths, directory: string): Promise<TaskLockDiagnostic[]> {
+  try {
+    await assertNoSymlink(paths.repoRoot, directory);
+    await lstat(directory);
+  } catch (error) {
+    if (isMissing(error)) return [];
+    return [taskLockDiagnostic(paths, directory, null, null, "directory_invalid", { status: "unsafe" })];
+  }
+  return [await inspectTaskLock(paths, directory)];
 }
 
 async function inspectTaskLock(paths: VineaPaths, directory: string): Promise<TaskLockDiagnostic> {

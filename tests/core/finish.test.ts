@@ -308,8 +308,8 @@ test("terminal tasks reject all task-local writers before archive and cannot gai
   const terminalMutations = [
     ["task", "require", fixture.task.id, "--id", "R2", "--text", "Must not be added", "--json"],
     ["task", "accept", fixture.task.id, "--id", "A2", "--text", "Must not be added", "--json"],
-    ["task", "set-brief", fixture.task.id, "--file", briefSource, "--json"],
-    ["task", "set-plan", fixture.task.id, "--file", planSource, "--json"],
+    ["task", "set-brief", fixture.task.id, "--file", "terminal-brief.md", "--json"],
+    ["task", "set-plan", fixture.task.id, "--file", "terminal-plan.md", "--json"],
     ["context", "add", fixture.task.id, "--path", "terminal-context.ts", "--purpose", "Must not be added", "--json"],
     ["evidence", "record", fixture.task.id, "--kind", "manual", "--summary", "Must not be added", "--result", "pass", "--json"],
   ];
@@ -364,18 +364,18 @@ async function createCheckingTask(
     "--text", "Completion gates reject unsafe finish",
     "--json",
   ], cwd)).exitCode).toBe(0);
-  const briefSource = join(cwd, "brief-source.md");
-  const planSource = join(cwd, "plan-source.md");
-  await writeFile(briefSource, "# Brief\n\nVerify completion.\n", "utf8");
-  await writeFile(planSource, "# Plan\n\n1. Exercise completion gates.\n", "utf8");
+  const briefSource = "brief-source.md";
+  const planSource = "plan-source.md";
+  await writeFile(join(cwd, briefSource), "# Brief\n\nVerify completion.\n", "utf8");
+  await writeFile(join(cwd, planSource), "# Plan\n\n1. Exercise completion gates.\n", "utf8");
   expect((await runCli([
     "task", "set-brief", task.id, "--file", briefSource, "--json",
   ], cwd)).exitCode).toBe(0);
   expect((await runCli([
     "task", "set-plan", task.id, "--file", planSource, "--json",
   ], cwd)).exitCode).toBe(0);
-  await unlink(briefSource);
-  await unlink(planSource);
+  await unlink(join(cwd, briefSource));
+  await unlink(join(cwd, planSource));
   expect((await transition(cwd, task.id, "ready")).exitCode).toBe(0);
   expect((await transition(cwd, task.id, "in_progress")).exitCode).toBe(0);
 

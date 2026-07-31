@@ -196,9 +196,10 @@ export function renderDoctorReport(report: DoctorReport): string {
   if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
   if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
   for (const lock of report.taskLocks) {
+    const label = lock.path === ".vinea/.runtime/learning-promotion.lock" ? "learning promotion lock" : "task lock";
     lines.push(
-      `task lock: ${lock.path}; task: ${lock.taskId ?? "unknown"}; age milliseconds: ${lock.ageMilliseconds ?? "unknown"}; owner: ${lock.owner.status}`,
-      `task lock guidance: ${lock.recoveryInstruction}`,
+      `${label}: ${lock.path}; task: ${lock.taskId ?? "unknown"}; age milliseconds: ${lock.ageMilliseconds ?? "unknown"}; owner: ${lock.owner.status}`,
+      `${label} guidance: ${lock.recoveryInstruction}`,
     );
   }
   return `${lines.join("\n")}\n`;

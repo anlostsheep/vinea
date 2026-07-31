@@ -29,7 +29,7 @@ import {
   withTaskLock,
   type TaskLocation,
 } from "./task-store.js";
-import { assertNoSymlink, type VineaPaths } from "./paths.js";
+import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
 import { inspectWorkspace } from "./schema.js";
 import {
   SCHEMA_VERSION,
@@ -664,22 +664,7 @@ async function setTaskDocumentLocked(
   assertBoundedNonempty(actor, "Task document actor", 200);
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
-  const filename = isAbsolute(sourceFile) ? sourceFile : resolve(paths.repoRoot, sourceFile);
-  let entry;
-  try {
-    entry = await lstat(filename);
-  } catch (error) {
-    throw new ValidationError(`Unable to inspect task document source ${sourceFile}`, error);
-  }
-  if (!entry.isFile() || entry.isSymbolicLink()) {
-    throw new ValidationError(`Task document source must be a regular non-symlink file: ${sourceFile}`);
-  }
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(filename);
-  } catch (error) {
-    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
-  }
+  const { bytes } = await readTaskDocumentSource(paths, sourceFile);
   let contents: string;
   try {
     contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -718,6 +703,47 @@ async function setTaskDocumentLocked(
     apply: () => writeManagedMutationTarget(paths, location, join(location.directory, artifact), contents),
   }));
   return { taskId, artifact, estimatedBytes: bytes.byteLength };
+}
+
+async function readTaskDocumentSource(paths: VineaPaths, sourceFile: string): Promise<{ bytes: Buffer }> {
+  const source = sourceFile.trim();
+  if (
+    isAbsolute(source)
+    || /^\\/u.test(source)
+    || /^[a-z]:[\\/]/iu.test(source)
+    || source.includes("\0")
+  ) {
+    throw new ValidationError(`Task document source must be repository-relative: ${sourceFile}`);
+  }
+  const segments = source.split(/[\\/]/u);
+  if (segments.includes("..")) {
+    throw new ValidationError(`Task document source must not contain parent traversal: ${sourceFile}`);
+  }
+  const relativeSource = segments.filter((segment) => segment !== "" && segment !== ".").join("/");
+  if (relativeSource === "") {
+    throw new ValidationError(`Task document source must name a repository-relative file: ${sourceFile}`);
+  }
+  let filename: string;
+  try {
+    filename = assertInside(paths.repoRoot, resolve(paths.repoRoot, relativeSource));
+    await assertNoSymlink(paths.repoRoot, filename);
+  } catch (error) {
+    throw new ValidationError(`Task document source must not contain symbolic links: ${sourceFile}`, error);
+  }
+  let entry;
+  try {
+    entry = await lstat(filename);
+  } catch (error) {
+    throw new ValidationError(`Unable to inspect task document source ${sourceFile}`, error);
+  }
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw new ValidationError(`Task document source must be a regular non-symlink file: ${sourceFile}`);
+  }
+  try {
+    return { bytes: await readFile(filename) };
+  } catch (error) {
+    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
+  }
 }
 
 async function assertReadyPrerequisites(paths: VineaPaths, location: TaskLocation): Promise<void> {

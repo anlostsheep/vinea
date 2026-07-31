@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
@@ -19,6 +19,8 @@ import {
   createTask,
   addRequirement,
   readTask,
+  setTaskBrief,
+  setTaskPlan,
   suggestRisk,
   transitionTask,
 } from "../../src/core/workflow.js";
@@ -171,6 +173,57 @@ test("task lookup rejects an invalid task ID before resolving a filesystem path"
     code: "VINEA_VALIDATION_INVALID",
     message: "Invalid task ID: ../tasks",
   });
+});
+
+test("task brief and plan sources must be safe repository-relative regular files", async () => {
+  const created = await createTask(
+    paths,
+    {
+      title: "Constrain task document sources",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    fixedNow,
+  );
+  const sources = join(cwd, "task-sources");
+  await mkdir(sources);
+  await writeFile(join(sources, "brief.md"), "# Brief\n\nUse a safe source.\n", "utf8");
+  await writeFile(join(sources, "plan.md"), "# Plan\n\n1. Use a safe source.\n", "utf8");
+
+  await expect(setTaskBrief(paths, created.task.id, "task-sources/brief.md", "codex", fixedNow)).resolves.toMatchObject({
+    artifact: "brief.md",
+  });
+  await expect(setTaskPlan(paths, created.task.id, "task-sources/plan.md", "codex", fixedNow)).resolves.toMatchObject({
+    artifact: "plan.md",
+  });
+  const persistedBrief = await readFile(join(created.directory, "brief.md"), "utf8");
+  const persistedPlan = await readFile(join(created.directory, "plan.md"), "utf8");
+
+  const outsideDirectory = join(cwd, "outside-documents");
+  await mkdir(outsideDirectory);
+  await writeFile(join(outsideDirectory, "brief.md"), "outside", "utf8");
+  await symlink(outsideDirectory, join(cwd, "linked-documents"));
+  await symlink(join(sources, "brief.md"), join(cwd, "linked-brief.md"));
+  await expect(setTaskBrief(paths, created.task.id, join(sources, "brief.md"), "codex", fixedNow)).rejects.toMatchObject({
+    code: "VINEA_VALIDATION_INVALID",
+    message: expect.stringContaining("repository-relative"),
+  });
+  await expect(setTaskBrief(paths, created.task.id, "../outside-brief.md", "codex", fixedNow)).rejects.toMatchObject({
+    code: "VINEA_VALIDATION_INVALID",
+    message: expect.stringContaining("parent traversal"),
+  });
+  await expect(setTaskBrief(paths, created.task.id, "linked-documents/brief.md", "codex", fixedNow)).rejects.toMatchObject({
+    code: "VINEA_VALIDATION_INVALID",
+    message: expect.stringContaining("symbolic links"),
+  });
+  await expect(setTaskBrief(paths, created.task.id, "linked-brief.md", "codex", fixedNow)).rejects.toMatchObject({
+    code: "VINEA_VALIDATION_INVALID",
+    message: expect.stringContaining("symbolic links"),
+  });
+  expect(await readFile(join(created.directory, "brief.md"), "utf8")).toBe(persistedBrief);
+  expect(await readFile(join(created.directory, "plan.md"), "utf8")).toBe(persistedPlan);
 });
 
 test("ready transition requires meaningful brief and plan content plus a requirement or acceptance criterion", async () => {

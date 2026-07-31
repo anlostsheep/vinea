@@ -2443,22 +2443,7 @@ async function setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor,
   assertBoundedNonempty2(actor, "Task document actor", 200);
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
-  const filename = isAbsolute4(sourceFile) ? sourceFile : resolve6(paths.repoRoot, sourceFile);
-  let entry;
-  try {
-    entry = await lstat7(filename);
-  } catch (error) {
-    throw new ValidationError(`Unable to inspect task document source ${sourceFile}`, error);
-  }
-  if (!entry.isFile() || entry.isSymbolicLink()) {
-    throw new ValidationError(`Task document source must be a regular non-symlink file: ${sourceFile}`);
-  }
-  let bytes;
-  try {
-    bytes = await readFile6(filename);
-  } catch (error) {
-    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
-  }
+  const { bytes } = await readTaskDocumentSource(paths, sourceFile);
   let contents;
   try {
     contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -2497,6 +2482,41 @@ async function setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor,
     apply: () => writeManagedMutationTarget(paths, location, join6(location.directory, artifact), contents)
   }));
   return { taskId, artifact, estimatedBytes: bytes.byteLength };
+}
+async function readTaskDocumentSource(paths, sourceFile) {
+  const source = sourceFile.trim();
+  if (isAbsolute4(source) || /^\\/u.test(source) || /^[a-z]:[\\/]/iu.test(source) || source.includes("\0")) {
+    throw new ValidationError(`Task document source must be repository-relative: ${sourceFile}`);
+  }
+  const segments = source.split(/[\\/]/u);
+  if (segments.includes("..")) {
+    throw new ValidationError(`Task document source must not contain parent traversal: ${sourceFile}`);
+  }
+  const relativeSource = segments.filter((segment) => segment !== "" && segment !== ".").join("/");
+  if (relativeSource === "") {
+    throw new ValidationError(`Task document source must name a repository-relative file: ${sourceFile}`);
+  }
+  let filename;
+  try {
+    filename = assertInside(paths.repoRoot, resolve6(paths.repoRoot, relativeSource));
+    await assertNoSymlink(paths.repoRoot, filename);
+  } catch (error) {
+    throw new ValidationError(`Task document source must not contain symbolic links: ${sourceFile}`, error);
+  }
+  let entry;
+  try {
+    entry = await lstat7(filename);
+  } catch (error) {
+    throw new ValidationError(`Unable to inspect task document source ${sourceFile}`, error);
+  }
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw new ValidationError(`Task document source must be a regular non-symlink file: ${sourceFile}`);
+  }
+  try {
+    return { bytes: await readFile6(filename) };
+  } catch (error) {
+    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
+  }
 }
 async function assertReadyPrerequisites(paths, location) {
   const briefPath = join6(location.directory, "brief.md");
@@ -2767,9 +2787,10 @@ function renderDoctorReport(report) {
   if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
   if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
   for (const lock of report.taskLocks) {
+    const label = lock.path === ".vinea/.runtime/learning-promotion.lock" ? "learning promotion lock" : "task lock";
     lines.push(
-      `task lock: ${lock.path}; task: ${lock.taskId ?? "unknown"}; age milliseconds: ${lock.ageMilliseconds ?? "unknown"}; owner: ${lock.owner.status}`,
-      `task lock guidance: ${lock.recoveryInstruction}`
+      `${label}: ${lock.path}; task: ${lock.taskId ?? "unknown"}; age milliseconds: ${lock.ageMilliseconds ?? "unknown"}; owner: ${lock.owner.status}`,
+      `${label} guidance: ${lock.recoveryInstruction}`
     );
   }
   return `${lines.join("\n")}
@@ -2810,6 +2831,7 @@ import { promisify as promisify3 } from "node:util";
 import { lstat as lstat8, readFile as readFile7, readdir as readdir2 } from "node:fs/promises";
 import { basename as basename3, join as join7, relative as relative5 } from "node:path";
 var TASK_LOCK_FILENAME = /^(t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*)\.lock$/;
+var PROMOTION_LOCK_DIRECTORY = "learning-promotion.lock";
 async function inspectTaskLocks(paths) {
   const locksDirectory = join7(paths.runtime, "task-locks");
   let entries;
@@ -2817,15 +2839,34 @@ async function inspectTaskLocks(paths) {
     await assertNoSymlink(paths.repoRoot, locksDirectory);
     const locks = await lstat8(locksDirectory);
     if (!locks.isDirectory() || locks.isSymbolicLink()) {
-      return [taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" })];
+      return [
+        taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
+        ...await inspectNamedRuntimeLock(paths, join7(paths.runtime, PROMOTION_LOCK_DIRECTORY))
+      ].sort((left, right) => left.path.localeCompare(right.path));
     }
     entries = await readdir2(locksDirectory);
   } catch (error) {
-    if (isMissing5(error)) return [];
-    return [taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" })];
+    if (isMissing5(error)) {
+      return inspectNamedRuntimeLock(paths, join7(paths.runtime, PROMOTION_LOCK_DIRECTORY));
+    }
+    return [
+      taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
+      ...await inspectNamedRuntimeLock(paths, join7(paths.runtime, PROMOTION_LOCK_DIRECTORY))
+    ].sort((left, right) => left.path.localeCompare(right.path));
   }
   const diagnostics = await Promise.all(entries.map(async (entry) => inspectTaskLock(paths, join7(locksDirectory, entry))));
-  return diagnostics.sort((left, right) => left.path.localeCompare(right.path));
+  const promotionLock = await inspectNamedRuntimeLock(paths, join7(paths.runtime, PROMOTION_LOCK_DIRECTORY));
+  return [...diagnostics, ...promotionLock].sort((left, right) => left.path.localeCompare(right.path));
+}
+async function inspectNamedRuntimeLock(paths, directory) {
+  try {
+    await assertNoSymlink(paths.repoRoot, directory);
+    await lstat8(directory);
+  } catch (error) {
+    if (isMissing5(error)) return [];
+    return [taskLockDiagnostic(paths, directory, null, null, "directory_invalid", { status: "unsafe" })];
+  }
+  return [await inspectTaskLock(paths, directory)];
 }
 async function inspectTaskLock(paths, directory) {
   const taskId = TASK_LOCK_FILENAME.exec(basename3(directory))?.[1] ?? null;
@@ -2949,7 +2990,7 @@ var MAX_RULE_CHARACTERS = 500;
 var MAX_RATIONALE_CHARACTERS = 1e3;
 var MAX_REASON_CHARACTERS = 1e3;
 var MAX_ACTOR_CHARACTERS = 200;
-var PROMOTION_LOCK_DIRECTORY = "learning-promotion.lock";
+var PROMOTION_LOCK_DIRECTORY2 = "learning-promotion.lock";
 var PROMOTION_LOCK_OWNER = "owner.json";
 var PROMOTION_LOCK_RETRY_MILLISECONDS = 25;
 var PROMOTION_LOCK_TIMEOUT_MILLISECONDS = 5e3;
@@ -3363,7 +3404,7 @@ async function withPromotionLock(paths, operation) {
   return result;
 }
 async function acquirePromotionLock(paths) {
-  const directory = join8(paths.runtime, PROMOTION_LOCK_DIRECTORY);
+  const directory = join8(paths.runtime, PROMOTION_LOCK_DIRECTORY2);
   const ownerPath = join8(directory, PROMOTION_LOCK_OWNER);
   const token = randomUUID4();
   const deadline = Date.now() + PROMOTION_LOCK_TIMEOUT_MILLISECONDS;
@@ -3575,21 +3616,24 @@ async function validateWorkspace(paths) {
 async function validateTaskLocks(paths, add) {
   const locks = await inspectTaskLocks(paths);
   for (const lock of locks) {
-    const association = lock.taskId === null ? "unknown task" : `task ${lock.taskId}`;
+    const promotionLock = lock.path === ".vinea/.runtime/learning-promotion.lock";
+    const label = promotionLock ? "learning promotion lock" : "task lock";
+    const prefix = promotionLock ? "LEARNING_PROMOTION_LOCK" : "TASK_LOCK";
+    const association = promotionLock ? label : lock.taskId === null ? "unknown task" : `task ${lock.taskId}`;
     const age = lock.ageMilliseconds === null ? "unknown age" : `age ${lock.ageMilliseconds}ms`;
     const message = `${association}; ${age}. ${lock.recoveryInstruction}`;
     if (lock.status === "directory_invalid") {
-      add("TASK_LOCK_DIRECTORY_INVALID", join9(paths.repoRoot, lock.path), message);
+      add(`${prefix}_DIRECTORY_INVALID`, join9(paths.repoRoot, lock.path), message);
     } else if (lock.status === "retained") {
-      add("TASK_LOCK_RETAINED", join9(paths.repoRoot, lock.path), message);
+      add(`${prefix}_RETAINED`, join9(paths.repoRoot, lock.path), message);
     } else if (lock.status === "owner_missing") {
-      add("TASK_LOCK_OWNER_MISSING", join9(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_MISSING`, join9(paths.repoRoot, lock.path), message);
     } else if (lock.status === "owner_malformed") {
-      add("TASK_LOCK_OWNER_MALFORMED", join9(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_MALFORMED`, join9(paths.repoRoot, lock.path), message);
     } else if (lock.status === "owner_unreadable") {
-      add("TASK_LOCK_OWNER_UNREADABLE", join9(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_UNREADABLE`, join9(paths.repoRoot, lock.path), message);
     } else {
-      add("TASK_LOCK_OWNER_UNSAFE", join9(paths.repoRoot, lock.path), message);
+      add(`${prefix}_OWNER_UNSAFE`, join9(paths.repoRoot, lock.path), message);
     }
   }
 }
@@ -4021,7 +4065,9 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
     if (!isMutationTargetSummary2(expected)) continue;
     for (const target of expected.files) {
       const path = target.path;
-      if (!path.endsWith("/task.json")) latestIntentByFile.set(path, intent);
+      if (!path.endsWith("/task.json") && intent.mutationKind !== "learning_accepted") {
+        latestIntentByFile.set(path, intent);
+      }
     }
   }
   for (const intent of latestIntentBySemanticIdentity.values()) {
@@ -4031,6 +4077,12 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
         "MUTATION_TARGET_MISMATCH",
         filename,
         `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its expected managed target identity.`
+      );
+    } else if (intent.mutationKind === "learning_accepted" && !await acceptedLearningTargetsMatch(paths, task, mutationOwner, intent)) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Completed learning acceptance ${String(intent.operationId)} no longer matches its candidate-domain spec or index target.`
       );
     }
   }
@@ -4138,6 +4190,49 @@ function hasLearningCandidate(task, identity, status) {
   if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return false;
   const candidate = task.learningCandidates.find((item) => isRecord8(item) && item.id === identity.learningCandidateId && item.status === status);
   return candidate !== void 0 && mutationIdentityValueMatches(candidate, identity);
+}
+async function acceptedLearningTargetsMatch(paths, task, owner, intent) {
+  const expected = intent.expected;
+  if (task === null || !isMutationTargetSummary2(expected) || !mutationTargetsAreOwned(
+    paths,
+    owner,
+    "learning_accepted",
+    expected
+  )) {
+    return false;
+  }
+  const identity = expected.identity;
+  const candidate = acceptedLearningCandidate(task, identity);
+  if (candidate === null) return false;
+  const normalizedRule = candidate.text.trim().replace(/\s+/gu, " ");
+  const rule = `- ${candidate.acceptedAt.slice(0, 10)}: ${normalizedRule}`;
+  const specPath = join9(paths.specs, `${candidate.domain}.md`);
+  if (await entryKind(specPath) !== "file" || await entryKind(paths.specIndex) !== "file") return false;
+  let spec;
+  let index;
+  try {
+    [spec, index] = await Promise.all([
+      readFile9(specPath, "utf8"),
+      readFile9(paths.specIndex, "utf8")
+    ]);
+  } catch {
+    return false;
+  }
+  if (!spec.split(/\r?\n/u).some((line) => line === rule)) return false;
+  return index.split(/\r?\n/u).some((line) => {
+    const target = parseSpecIndexTarget(line);
+    return target !== void 0 && normalizeSpecTarget(target) === `${candidate.domain}.md`;
+  });
+}
+function acceptedLearningCandidate(task, identity) {
+  if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return null;
+  const candidate = task.learningCandidates.find((item) => isRecord8(item) && item.id === identity.learningCandidateId && item.status === "accepted" && item.confirmedBy === "user" && typeof item.domain === "string" && typeof item.text === "string" && isIsoTimestamp4(item.acceptedAt));
+  if (candidate === void 0 || !mutationIdentityValueMatches(candidate, identity)) return null;
+  const domain = candidate.domain;
+  const text = candidate.text;
+  const acceptedAt = candidate.acceptedAt;
+  if (text.trim() === "" || !MANAGED_SPEC_TARGET.test(`${domain}.md`)) return null;
+  return { domain, text, acceptedAt };
 }
 function mutationIdentityValueMatches(value, identity) {
   if (identity.valueSha256 === void 0) return true;

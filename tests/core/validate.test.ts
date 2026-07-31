@@ -112,6 +112,30 @@ test.each(["file", "symbolic link"] as const)(
   },
 );
 
+test("validate reports a retained learning promotion lock without removing it", async () => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+  const lockDirectory = join(cwd, ".vinea", ".runtime", "learning-promotion.lock");
+  await mkdir(lockDirectory);
+  await writeFile(join(lockDirectory, "owner.json"), "{\"token\":\"promotion-owner\"}\n", "utf8");
+  const before = await stat(lockDirectory);
+
+  const result = await runCli(["validate", "--json"], cwd);
+  const issues = (JSON.parse(result.stdout) as { issues: Array<{ code: string; path: string; message: string }> }).issues;
+
+  expect(result.exitCode).toBe(1);
+  expect(issues).toEqual([expect.objectContaining({
+    code: "LEARNING_PROMOTION_LOCK_RETAINED",
+    path: ".vinea/.runtime/learning-promotion.lock",
+    message: expect.stringContaining("learning promotion lock"),
+  })]);
+  expect(issues[0]!.message).toContain(
+    "Confirm no active process, then remove exact lock directory .vinea/.runtime/learning-promotion.lock.",
+  );
+  expect((await stat(lockDirectory)).mtimeMs).toBe(before.mtimeMs);
+  expect(await readFile(join(lockDirectory, "owner.json"), "utf8")).toBe("{\"token\":\"promotion-owner\"}\n");
+});
+
 test("validate verifies managed spec files, index targets, and the runtime ignore contract", async () => {
   const cwd = await createTempRepo();
   expect((await runCli(["init"], cwd)).exitCode).toBe(0);

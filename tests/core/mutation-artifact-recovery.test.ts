@@ -65,10 +65,10 @@ beforeEach(async () => {
 
 test("brief and plan retry their exact mutation after target and completion failures", async () => {
   const task = await createMutableTask("Recover task documents");
-  const briefSource = join(paths.repoRoot, "brief-source.md");
-  const planSource = join(paths.repoRoot, "plan-source.md");
-  await writeFile(briefSource, "# Brief\n\nRecover the brief.\n", "utf8");
-  await writeFile(planSource, "# Plan\n\n1. Recover the plan.\n", "utf8");
+  const briefSource = "brief-source.md";
+  const planSource = "plan-source.md";
+  await writeFile(join(paths.repoRoot, briefSource), "# Brief\n\nRecover the brief.\n", "utf8");
+  await writeFile(join(paths.repoRoot, planSource), "# Plan\n\n1. Recover the plan.\n", "utf8");
 
   faults.artifact = "brief.md";
   await expect(setTaskBrief(paths, task.id, briefSource, "codex", at("2026-07-31T09:00:00.000Z"))).rejects.toThrow(
@@ -86,11 +86,11 @@ test("brief and plan retry their exact mutation after target and completion fail
     "Injected plan_set completion failure",
   );
   expect(await readFile(join(task.directory, "plan.md"), "utf8")).toBe("# Plan\n\n1. Recover the plan.\n");
-  await writeFile(planSource, "# Plan\n\n1. A different request.\n", "utf8");
+  await writeFile(join(paths.repoRoot, planSource), "# Plan\n\n1. A different request.\n", "utf8");
   await expect(setTaskPlan(paths, task.id, planSource, "codex", at("2026-07-31T09:03:00.000Z"))).rejects.toMatchObject({
     code: "VINEA_TRANSITION_INVALID",
   });
-  await writeFile(planSource, "# Plan\n\n1. Recover the plan.\n", "utf8");
+  await writeFile(join(paths.repoRoot, planSource), "# Plan\n\n1. Recover the plan.\n", "utf8");
   await setTaskPlan(paths, task.id, planSource, "codex", at("2026-07-31T09:04:00.000Z"));
   expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
@@ -297,10 +297,10 @@ test("context and brief recovery reject forged but otherwise valid spec targets"
   ]));
 
   const briefTask = await createMutableTask("Reject forged brief target");
-  const briefSource = join(paths.repoRoot, "forged-brief.md");
+  const briefSource = "forged-brief.md";
   const briefContents = "# Brief\n\nReject target substitution.\n";
   const briefTimestamp = "2026-07-31T09:32:00.000Z";
-  await writeFile(briefSource, briefContents, "utf8");
+  await writeFile(join(paths.repoRoot, briefSource), briefContents, "utf8");
   await appendJsonl(join(briefTask.directory, "journal.md"), {
     schemaVersion: 1,
     type: "mutation_intent",

@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
 import type { EvidenceRecord, LearningCandidate, TaskRecord } from "../../src/core/types.js";
+import { resolveVineaPaths } from "../../src/core/paths.js";
+import { validateWorkspace } from "../../src/core/validate.js";
 import { createTempRepo, readJson, runCli, writeJson } from "../helpers/fixture.js";
 
 const execFileAsync = promisify(execFile);
@@ -189,6 +191,76 @@ test("learning accept requires literal user confirmation and promotes one normal
   expect(await readFile(join(taskDirectory, "journal.md"), "utf8")).toBe(beforeDuplicateJournal);
   expect(await readFile(specPath, "utf8")).toBe(beforeDuplicateSpec);
   expect(await readFile(indexPath, "utf8")).toBe(beforeDuplicateIndex);
+});
+
+test("validate checks completed shared learning promotions semantically across later task promotions", async () => {
+  const cwd = await initializedRepo();
+  const paths = resolveVineaPaths(cwd);
+  const taskA = await createTask(cwd, "Accept the initial shared rule");
+  const taskB = await createTask(cwd, "Accept later shared rules");
+  const sharedDomain = "testing-practice";
+  const differentDomain = "review-practice";
+
+  for (const [task, candidate] of [
+    [taskA, {
+      id: "L1",
+      domain: sharedDomain,
+      text: "Keep the first shared learning rule.",
+      rationale: "This rule applies across tasks.",
+    }],
+    [taskB, {
+      id: "L1",
+      domain: differentDomain,
+      text: "Keep a rule in a different domain.",
+      rationale: "The domain must remain independently indexed.",
+    }],
+    [taskB, {
+      id: "L2",
+      domain: sharedDomain,
+      text: "Keep a later rule in the original domain.",
+      rationale: "Shared specs can gain rules from later tasks.",
+    }],
+  ] as const) {
+    expect((await proposeLearning(cwd, task.id, candidate)).exitCode).toBe(0);
+    expect((await runCli([
+      "learning", "accept", task.id,
+      "--id", candidate.id,
+      "--confirmed-by", "user",
+      "--json",
+    ], cwd)).exitCode).toBe(0);
+  }
+
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+
+  const taskADirectory = activeTaskDirectory(cwd, taskA.id);
+  const taskARecord = await readJson<TaskRecord>(join(taskADirectory, "task.json"));
+  const accepted = taskARecord.learningCandidates?.find(({ id }) => id === "L1");
+  expect(accepted?.acceptedAt).toEqual(expect.any(String));
+  const firstRule = `- ${accepted!.acceptedAt!.slice(0, 10)}: Keep the first shared learning rule.`;
+  const specPath = join(paths.specs, `${sharedDomain}.md`);
+  const indexPath = paths.specIndex;
+  const originalSpec = await readFile(specPath, "utf8");
+  const originalIndex = await readFile(indexPath, "utf8");
+  const originalJournal = await readFile(join(taskADirectory, "journal.md"), "utf8");
+
+  await writeFile(specPath, originalSpec.replace(`${firstRule}\n`, ""), "utf8");
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toContain("MUTATION_TARGET_MISMATCH");
+  await writeFile(specPath, originalSpec, "utf8");
+
+  const journal = parseJsonl(originalJournal);
+  const intent = journal.find((event) => event.type === "mutation_intent" && event.mutationKind === "learning_accepted");
+  const expected = intent?.expected as { files: Array<{ path: string }> };
+  const target = expected.files.find(({ path }) => path === `.vinea/specs/${sharedDomain}.md`);
+  expect(target).toBeDefined();
+  target!.path = `.vinea/specs/${differentDomain}.md`;
+  await writeFile(join(taskADirectory, "journal.md"), `${journal.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toContain("MUTATION_TARGET_MISMATCH");
+  await writeFile(join(taskADirectory, "journal.md"), originalJournal, "utf8");
+
+  await writeFile(indexPath, originalIndex.replace(`- [${sharedDomain}](${sharedDomain}.md)\n`, ""), "utf8");
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toContain("MUTATION_TARGET_MISMATCH");
+  await writeFile(indexPath, originalIndex, "utf8");
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
 
 test("concurrent confirmed accepts are repository-serialized without losing either candidate or rule", async () => {
