@@ -93,3 +93,18 @@ test("brainstorming is selective and preserves user approval", async () => {
   expect(source).toMatch(/approval/i);
   expect(source).toMatch(/must not .*reusable learning/i);
 });
+
+test("Codex session binding is explicit and Claude has no invented environment fallback", async () => {
+  const inventory = await readSkillInventory();
+  const orient = inventory.skills.find(({ directory }) => directory === "orient")?.source;
+  const continueSkill = inventory.skills.find(({ directory }) => directory === "continue")?.source;
+
+  expect(orient).toContain("CODEX_THREAD_ID");
+  expect(orient).toContain('--session-id "$CODEX_THREAD_ID"');
+  expect(orient).toMatch(/nonempty/i);
+  expect(orient).toMatch(/do not invent a session ID/i);
+  expect(continueSkill).toContain("CODEX_THREAD_ID");
+  expect(continueSkill).toContain('--session-id "$CODEX_THREAD_ID"');
+  expect(continueSkill).toMatch(/otherwise omit it/i);
+  expect(`${orient}\n${continueSkill}`).not.toContain("CLAUDE_SESSION_ID");
+});

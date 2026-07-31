@@ -30,6 +30,10 @@ test("Codex helper packages Vinea and writes the documented personal marketplace
   expect(source).toContain('path: "./.codex/plugins/vinea"');
   expect(source).toContain("codex plugin marketplace add");
   expect(source).toContain("codex plugin add");
+  expect(source).toContain("command -v codex");
+  expect(source).toContain("Codex CLI is unavailable; plugin activation was not performed.");
+  expect(source).toContain("When Codex is available, run:");
+  expect(source).toContain("codex plugin add vinea@");
 });
 
 test("Claude Code helper packages Vinea and uses the documented marketplace lifecycle", async () => {
@@ -43,5 +47,9 @@ test("Claude Code helper packages Vinea and uses the documented marketplace life
   expect(source).toContain("claude plugin validate");
   expect(source).toContain("claude plugin marketplace add");
   expect(source).toContain("claude plugin marketplace update vinea-local");
+  expect(source).toContain("claude plugin install vinea@vinea-local --scope user");
+  expect(source).toContain("command -v claude");
+  expect(source).toContain("Claude Code CLI is unavailable; plugin activation was not performed.");
+  expect(source).toContain("When Claude Code is available, run:");
   expect(source).toContain("claude plugin install vinea@vinea-local --scope user");
 });

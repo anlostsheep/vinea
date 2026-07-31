@@ -39,9 +39,12 @@ Vinea installation path.
 
 Start every new or uncertain session with `vinea:orient`. First-release
 recovery is intentionally explicit: there is no hook that attaches a task in
-the background. Codex stores a session binding when the host supplies
-`CODEX_THREAD_ID`; when Claude Code has no host session ID, `vinea:orient`
-presents active candidates and requires the user to confirm one.
+the background. Only when Codex actually supplies a nonempty
+`CODEX_THREAD_ID` does the skill pass it as `--session-id` and create a session
+binding. Without that value, Codex uses the same explicit candidate
+confirmation flow as Claude Code. Claude has no Vinea session-ID environment
+variable fallback in this release; `vinea:orient` presents active candidates
+and requires the user to confirm one.
 
 A concise medium-risk lifecycle looks like this:
 
