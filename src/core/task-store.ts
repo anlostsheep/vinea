@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AmbiguousTaskError, SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
@@ -33,6 +33,16 @@ export interface TransitionPersistenceOperations {
   appendJournal(filename: string, value: unknown, repoRoot: string): Promise<void>;
   moveDirectory(source: string, destination: string): Promise<void>;
   writeTask(filename: string, value: unknown, repoRoot: string): Promise<void>;
+}
+
+export interface TaskMutationJournalEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "requirement_added" | "acceptance_criterion_added";
+  operationId: string;
+  timestamp: string;
+  actor: string;
+  requirementId: string;
+  text: string;
 }
 
 const DEFAULT_TRANSITION_OPERATIONS: TransitionPersistenceOperations = {
@@ -154,6 +164,56 @@ export async function persistTaskTransition(
     throw new SchemaError(`Unable to commit task transition for ${task.id}; transition intent remains pending for retry`, error);
   }
   return { task, directory: targetDirectory, scope: targetScope };
+}
+
+export async function persistTaskMutation(
+  paths: VineaPaths,
+  location: TaskLocation,
+  task: TaskRecord,
+  event: Omit<TaskMutationJournalEvent, "operationId">,
+  operationOverrides: Partial<TransitionPersistenceOperations> = {},
+): Promise<TaskLocation> {
+  const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
+  const journalPath = join(location.directory, "journal.md");
+  await assertNoSymlink(paths.repoRoot, journalPath);
+  const intent: TaskMutationJournalEvent = {
+    ...event,
+    operationId: operations.createOperationId(),
+  };
+  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  try {
+    await operations.writeTask(join(location.directory, "task.json"), task, paths.repoRoot);
+  } catch (error) {
+    throw new SchemaError(
+      `Unable to commit task mutation for ${task.id}; journal intent remains pending for retry`,
+      error,
+    );
+  }
+  return { ...location, task };
+}
+
+export async function writeTaskArtifact(
+  paths: VineaPaths,
+  location: TaskLocation,
+  artifact: "brief.md" | "plan.md",
+  contents: string,
+): Promise<void> {
+  const filename = join(location.directory, artifact);
+  await assertNoSymlink(paths.repoRoot, filename);
+  const temporary = join(location.directory, `.${artifact}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx" });
+    await rename(temporary, filename);
+  } catch (error) {
+    try {
+      await unlink(temporary);
+    } catch (cleanupError) {
+      if (!isCode(cleanupError, "ENOENT")) {
+        throw new SchemaError(`Unable to clean temporary task artifact ${temporary}`, cleanupError);
+      }
+    }
+    throw new SchemaError(`Unable to write task artifact ${filename}`, error);
+  }
 }
 
 async function findInScope(

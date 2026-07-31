@@ -1,12 +1,15 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readFile } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import { DEFAULT_CONFIG, readConfig } from "./config.js";
 import { TransitionError, ValidationError } from "./errors.js";
+import { assertTddReadyForCheck } from "./evidence.js";
 import {
   createTaskArtifacts,
   findTask,
   listStoredTasks,
+  persistTaskMutation,
   persistTaskTransition,
+  writeTaskArtifact,
   type TaskLocation,
 } from "./task-store.js";
 import type { VineaPaths } from "./paths.js";
@@ -52,6 +55,18 @@ export interface InlineAuditInput {
   description: string;
   proposedRisk: RiskSuggestion;
   reason: string;
+}
+
+export interface RequirementInput {
+  id: string;
+  text: string;
+  actor: string;
+}
+
+export interface TaskDocumentResult {
+  taskId: string;
+  artifact: "brief.md" | "plan.md";
+  estimatedBytes: number;
 }
 
 const FORWARD_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus>> = {
@@ -160,6 +175,7 @@ export async function transitionTask(
   const oldStatus = location.task.status;
   assertTransitionAllowed(oldStatus, newStatus, options.unblock === true);
   if (newStatus === "ready") await assertReadyPrerequisites(location);
+  if (newStatus === "checking") await assertTddReadyForCheck(location);
 
   const timestamp = (options.now ?? (() => new Date()))().toISOString();
   const task: TaskRecord = { ...location.task, status: newStatus, updatedAt: timestamp };
@@ -172,6 +188,47 @@ export async function transitionTask(
     newStatus,
   };
   return (await persistTaskTransition(paths, location, task, transition)).task;
+}
+
+export async function addRequirement(
+  paths: VineaPaths,
+  taskId: string,
+  input: RequirementInput,
+  now: Clock = () => new Date(),
+): Promise<TaskRecord> {
+  return addRequirementLike(paths, taskId, input, "requirements", "requirement_added", now);
+}
+
+export async function addAcceptanceCriterion(
+  paths: VineaPaths,
+  taskId: string,
+  input: RequirementInput,
+  now: Clock = () => new Date(),
+): Promise<TaskRecord> {
+  return addRequirementLike(
+    paths,
+    taskId,
+    input,
+    "acceptanceCriteria",
+    "acceptance_criterion_added",
+    now,
+  );
+}
+
+export async function setTaskBrief(
+  paths: VineaPaths,
+  taskId: string,
+  sourceFile: string,
+): Promise<TaskDocumentResult> {
+  return setTaskDocument(paths, taskId, sourceFile, "brief.md");
+}
+
+export async function setTaskPlan(
+  paths: VineaPaths,
+  taskId: string,
+  sourceFile: string,
+): Promise<TaskDocumentResult> {
+  return setTaskDocument(paths, taskId, sourceFile, "plan.md");
 }
 
 export function nextGate(task: TaskRecord): string {
@@ -195,6 +252,80 @@ function assertTransitionAllowed(oldStatus: TaskStatus, newStatus: TaskStatus, u
   if (BLOCKABLE.has(oldStatus) && newStatus === "blocked") return;
   if (FORWARD_TRANSITIONS[oldStatus] === newStatus) return;
   throw new TransitionError(`Cannot transition task from ${oldStatus} to ${newStatus}.`);
+}
+
+async function addRequirementLike(
+  paths: VineaPaths,
+  taskId: string,
+  input: RequirementInput,
+  collection: "requirements" | "acceptanceCriteria",
+  eventType: "requirement_added" | "acceptance_criterion_added",
+  now: Clock,
+): Promise<TaskRecord> {
+  await readConfig(paths);
+  assertNonempty(input.id, "Requirement ID");
+  assertNonempty(input.text, "Requirement text");
+  assertNonempty(input.actor, "Requirement actor");
+  const location = await findTask(paths, taskId);
+  const id = input.id.trim();
+  const allRequirements = [...location.task.requirements, ...location.task.acceptanceCriteria];
+  if (allRequirements.some((requirement) => requirement.id === id)) {
+    throw new ValidationError(`Requirement ID already exists in task ${taskId}: ${id}`);
+  }
+  const timestamp = now().toISOString();
+  const requirement = {
+    schemaVersion: SCHEMA_VERSION,
+    id,
+    text: input.text.trim(),
+    createdAt: timestamp,
+  };
+  const task: TaskRecord = {
+    ...location.task,
+    [collection]: [...location.task[collection], requirement],
+    updatedAt: timestamp,
+  };
+  return (await persistTaskMutation(paths, location, task, {
+    schemaVersion: SCHEMA_VERSION,
+    type: eventType,
+    timestamp,
+    actor: input.actor.trim(),
+    requirementId: id,
+    text: requirement.text,
+  })).task;
+}
+
+async function setTaskDocument(
+  paths: VineaPaths,
+  taskId: string,
+  sourceFile: string,
+  artifact: "brief.md" | "plan.md",
+): Promise<TaskDocumentResult> {
+  await readConfig(paths);
+  assertNonempty(sourceFile, "Source file");
+  const location = await findTask(paths, taskId);
+  const filename = isAbsolute(sourceFile) ? sourceFile : resolve(paths.repoRoot, sourceFile);
+  let entry;
+  let bytes: Buffer;
+  try {
+    entry = await lstat(filename);
+    bytes = await readFile(filename);
+  } catch (error) {
+    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
+  }
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw new ValidationError(`Task document source must be a regular non-symlink file: ${sourceFile}`);
+  }
+  let contents: string;
+  try {
+    contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new ValidationError(`Task document source must contain valid UTF-8: ${sourceFile}`, error);
+  }
+  if (contents.trim() === "") {
+    throw new ValidationError(`Task document source must not be empty: ${sourceFile}`);
+  }
+  await writeTaskArtifact(paths, location, artifact, contents);
+  return { taskId, artifact, estimatedBytes: bytes.byteLength };
 }
 
 async function assertReadyPrerequisites(location: TaskLocation): Promise<void> {

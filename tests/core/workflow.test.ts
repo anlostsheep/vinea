@@ -2,6 +2,7 @@ import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/prom
 import { join } from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
+import { recordEvidence } from "../../src/core/evidence.js";
 import { SchemaError } from "../../src/core/errors.js";
 import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
 import { findTask, persistTaskTransition } from "../../src/core/task-store.js";
@@ -435,6 +436,22 @@ async function createFinishedTask() {
     reason: "Start work",
     now: () => new Date("2026-07-31T08:11:00.000Z"),
   });
+  await recordEvidence(paths, created.task.id, {
+    kind: "tdd-red",
+    summary: "Lifecycle test failed before implementation",
+    command: "npm test -- lifecycle",
+    exitCode: 1,
+    result: "fail",
+    actor: "codex",
+  }, () => new Date("2026-07-31T08:11:20.000Z"));
+  await recordEvidence(paths, created.task.id, {
+    kind: "tdd-green",
+    summary: "Lifecycle test passed after implementation",
+    command: "npm test -- lifecycle",
+    exitCode: 0,
+    result: "pass",
+    actor: "codex",
+  }, () => new Date("2026-07-31T08:11:40.000Z"));
   await transitionTask(paths, created.task.id, "checking", {
     actor: "codex",
     reason: "Check work",

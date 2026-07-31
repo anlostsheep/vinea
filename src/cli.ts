@@ -1,19 +1,30 @@
 import packageJson from "../package.json" with { type: "json" };
 import { initializeWorkspace, readConfig } from "./core/config.js";
+import {
+  addContextReference,
+  listContextReferences,
+  type ContextManifest,
+} from "./core/context.js";
+import { recordEvidence } from "./core/evidence.js";
 import { VineaError } from "./core/errors.js";
 import { resolveVineaPaths } from "./core/paths.js";
 import { inspectWorkspace } from "./core/schema.js";
 import {
   appendInlineAudit,
+  addAcceptanceCriterion,
+  addRequirement,
   createTask,
   incompleteRequirements,
   listTasks,
   nextGate,
   readTask,
+  setTaskBrief,
+  setTaskPlan,
   suggestRisk,
   transitionTask,
 } from "./core/workflow.js";
 import type {
+  EvidenceRecord,
   ExecutionMode,
   QualityMode,
   RiskLevel,
@@ -35,6 +46,13 @@ Commands:
   task show
   task transition
   task unblock
+  task require
+  task accept
+  task set-plan
+  task set-brief
+  context add
+  context list
+  evidence record
 `;
 
 class UsageError extends Error {
@@ -92,6 +110,22 @@ export async function main(args: string[]): Promise<number> {
   if (command === "task") {
     try {
       return await handleTask(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "context") {
+    try {
+      return await handleContext(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "evidence") {
+    try {
+      return await handleEvidence(args.slice(1));
     } catch (error) {
       return reportError(error, json);
     }
@@ -206,7 +240,96 @@ async function handleTask(args: string[]): Promise<number> {
     return 0;
   }
 
+  if (subcommand === "require" || subcommand === "accept") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), new Set(["--id", "--text"]), new Set(["--json"]));
+    const input = {
+      id: requiredOption(options, "--id"),
+      text: requiredOption(options, "--text"),
+      actor: "cli",
+    };
+    const task = subcommand === "require"
+      ? await addRequirement(paths, taskId, input)
+      : await addAcceptanceCriterion(paths, taskId, input);
+    writeOutput(task, options.has("--json"), renderTask(task));
+    return 0;
+  }
+
+  if (subcommand === "set-plan" || subcommand === "set-brief") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), new Set(["--file"]), new Set(["--json"]));
+    const result = subcommand === "set-plan"
+      ? await setTaskPlan(paths, taskId, requiredOption(options, "--file"))
+      : await setTaskBrief(paths, taskId, requiredOption(options, "--file"));
+    writeOutput(
+      result,
+      options.has("--json"),
+      `Updated ${result.artifact} for ${result.taskId} (${result.estimatedBytes} bytes).\n`,
+    );
+    return 0;
+  }
+
   throw new UsageError(`Unknown task command: ${subcommand ?? "(none)"}`);
+}
+
+async function handleContext(args: string[]): Promise<number> {
+  const subcommand = args[0];
+  const taskId = requiredTaskId(args[1]);
+  const paths = resolveVineaPaths(process.cwd());
+  if (subcommand === "add") {
+    const options = parseOptions(args.slice(2), new Set(["--path", "--purpose"]), new Set(["--json"]));
+    const reference = await addContextReference(paths, taskId, {
+      path: requiredOption(options, "--path"),
+      purpose: requiredOption(options, "--purpose"),
+    });
+    writeOutput(
+      reference,
+      options.has("--json"),
+      `Added context ${reference.path} (${reference.estimatedBytes} bytes).\n`,
+    );
+    return 0;
+  }
+  if (subcommand === "list") {
+    const options = parseOptions(args.slice(2), new Set(), new Set(["--json"]));
+    const manifest = await listContextReferences(paths, taskId);
+    writeOutput(manifest, options.has("--json"), renderContextManifest(manifest));
+    return 0;
+  }
+  throw new UsageError(`Unknown context command: ${subcommand ?? "(none)"}`);
+}
+
+async function handleEvidence(args: string[]): Promise<number> {
+  const subcommand = args[0];
+  if (subcommand !== "record") {
+    throw new UsageError(`Unknown evidence command: ${subcommand ?? "(none)"}`);
+  }
+  const taskId = requiredTaskId(args[1]);
+  const options = parseOptions(
+    args.slice(2),
+    new Set(["--kind", "--summary", "--command", "--exit-code", "--result"]),
+    new Set(["--json"]),
+  );
+  const kind = oneOf(
+    requiredOption(options, "--kind"),
+    ["command", "manual", "tdd-red", "tdd-green"] as const,
+    "--kind",
+  );
+  const resultValue = optionalValue(options, "--result");
+  const result = resultValue === undefined
+    ? undefined
+    : oneOf(resultValue, ["pass", "fail"] as const, "--result");
+  const exitCodeValue = optionalValue(options, "--exit-code");
+  const exitCode = exitCodeValue === undefined ? undefined : parseExitCode(exitCodeValue);
+  const evidence = await recordEvidence(resolveVineaPaths(process.cwd()), taskId, {
+    kind,
+    summary: requiredOption(options, "--summary"),
+    command: optionalValue(options, "--command"),
+    exitCode,
+    result,
+    actor: "cli",
+  });
+  writeOutput(evidence, options.has("--json"), renderEvidence(evidence));
+  return 0;
 }
 
 function reportError(error: unknown, json: boolean): number {
@@ -275,6 +398,17 @@ function oneOf<const T extends readonly string[]>(value: string, allowed: T, opt
   return value as T[number];
 }
 
+function parseExitCode(value: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
+  }
+  return parsed;
+}
+
 function writeOutput(value: unknown, json: boolean, human: string): void {
   process.stdout.write(json ? `${JSON.stringify(value)}\n` : human);
 }
@@ -319,6 +453,29 @@ function renderTask(task: TaskRecord): string {
     `risk reasons: ${task.risk.reasons.length ? task.risk.reasons.join(", ") : "none"}`,
     `incomplete requirements: ${incomplete.length ? incomplete.join(", ") : "none"}`,
     `next gate: ${nextGate(task)}`,
+    "",
+  ].join("\n");
+}
+
+function renderContextManifest(manifest: ContextManifest): string {
+  if (manifest.references.length === 0) {
+    return `No context references. Budget: 0/${manifest.limits.maxFiles} files, 0/${manifest.limits.maxEstimatedBytes} bytes.\n`;
+  }
+  return [
+    ...manifest.references.map(
+      (reference) => `${reference.path} (${reference.estimatedBytes} bytes): ${reference.purpose}`,
+    ),
+    `Budget: ${manifest.totals.files}/${manifest.limits.maxFiles} files, ${manifest.totals.estimatedBytes}/${manifest.limits.maxEstimatedBytes} bytes.`,
+    "",
+  ].join("\n");
+}
+
+function renderEvidence(evidence: EvidenceRecord): string {
+  return [
+    `Evidence: ${evidence.id}`,
+    `kind: ${evidence.kind}`,
+    `result: ${evidence.result}`,
+    `summary: ${evidence.summary}`,
     "",
   ].join("\n");
 }
