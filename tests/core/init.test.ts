@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -32,10 +32,16 @@ test("init creates the versioned Vinea workspace without touching root guidance"
   });
   expect(await readFile(join(cwd, ".vinea", ".gitignore"), "utf8")).toBe(".runtime/\n");
   expect(await readFile(join(cwd, ".vinea", "specs", "index.md"), "utf8")).toContain("Indexed specs");
-  await Promise.all([
-    stat(join(cwd, ".vinea", "tasks", "active")),
-    stat(join(cwd, ".vinea", "tasks", "archive")),
-    stat(join(cwd, ".vinea", ".runtime", "sessions")),
+  expect(await listTree(join(cwd, ".vinea"))).toEqual([
+    ".gitignore",
+    ".runtime/",
+    ".runtime/sessions/",
+    "config.json",
+    "specs/",
+    "specs/index.md",
+    "tasks/",
+    "tasks/active/",
+    "tasks/archive/",
   ]);
   expect(await readFile(join(cwd, ".gitignore"), "utf8")).toBe("node_modules/\n");
   expect(await readFile(join(cwd, "AGENTS.md"), "utf8")).toBe("keep agents\n");
@@ -59,6 +65,22 @@ test("init is idempotent and rejects malformed existing configuration", async ()
   await expect(access(configPath)).resolves.toBeUndefined();
 });
 
+test("init rejects future schemas with safe migration guidance and preserves configuration", async () => {
+  const cwd = await createTempRepo();
+  const configPath = join(cwd, ".vinea", "config.json");
+  await mkdir(join(cwd, ".vinea"), { recursive: true });
+  const contents = JSON.stringify({ schemaVersion: 2 });
+  await writeFile(configPath, contents, "utf8");
+
+  const result = await runCli(["init"], cwd);
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("VINEA_SCHEMA_INVALID");
+  expect(result.stderr).toContain("Upgrade Vinea before modifying the workspace");
+  expect(result.stderr).toContain("do not recreate or overwrite it");
+  expect(await readFile(configPath, "utf8")).toBe(contents);
+});
+
 test("init rejects a managed file that is a symbolic link", async () => {
   const cwd = await createTempRepo();
   const specs = join(cwd, ".vinea", "specs");
@@ -80,3 +102,13 @@ test("path checks reject a repository root reached through a symbolic link", asy
     code: "VINEA_SCHEMA_INVALID",
   });
 });
+
+async function listTree(root: string, relativePath = ""): Promise<string[]> {
+  const entries = await readdir(join(root, relativePath), { withFileTypes: true });
+  const children = await Promise.all(entries.map(async (entry) => {
+    const child = join(relativePath, entry.name);
+    if (!entry.isDirectory()) return [child];
+    return [`${child}/`, ...(await listTree(root, child))];
+  }));
+  return children.flat().sort();
+}

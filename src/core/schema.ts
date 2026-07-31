@@ -18,6 +18,11 @@ export function assertSupportedSchema(value: unknown, filename: string): asserts
     throw new SchemaError(`Invalid Vinea config in ${filename}: expected an object.`);
   }
   if (value.schemaVersion !== SCHEMA_VERSION) {
+    if (typeof value.schemaVersion === "number" && value.schemaVersion > SCHEMA_VERSION) {
+      throw new SchemaError(
+        `Vinea schema version ${value.schemaVersion} in ${filename} is newer than this CLI. Upgrade Vinea before modifying the workspace; do not recreate or overwrite it.`,
+      );
+    }
     throw new SchemaError(
       `Unsupported Vinea schema version ${String(value.schemaVersion)} in ${filename}; supported version is ${SCHEMA_VERSION}.`,
     );
