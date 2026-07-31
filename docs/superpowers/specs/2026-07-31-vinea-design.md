@@ -91,6 +91,8 @@ CLI 不生成业务代码，不代替 agent 进行语义判断，也不执行未
 
 发行方式沿用 Grokodex 已验证的双宿主模式：根 package version 是唯一版本来源；打包得到一份预构建公共插件树，其中同时包含 Codex 与 Claude Code manifest、预构建 CLI 和 skills；发布检查确保版本一致且不含机器绝对路径。
 
+插件不要求用户先全局安装 npm binary，也不以 MCP 承载 CLI。公共插件树内含 `bin/vinea.mjs`：Claude Code skills 通过 `${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs` 调用；Codex skills 从宿主显示的绝对 `skills/<skill>/SKILL.md` 路径反推出插件根目录后，调用同一文件。两端再将当前 Git 工作目录作为 CLI 的项目根解析起点。这使 CLI 的实际版本随插件安装版本固定，并避免相对路径被误解为会话工作目录。
+
 ## 5. 受管仓库的数据模型
 
     .vinea/
