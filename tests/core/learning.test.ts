@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
@@ -189,6 +189,129 @@ test("learning accept requires literal user confirmation and promotes one normal
   expect(await readFile(join(taskDirectory, "journal.md"), "utf8")).toBe(beforeDuplicateJournal);
   expect(await readFile(specPath, "utf8")).toBe(beforeDuplicateSpec);
   expect(await readFile(indexPath, "utf8")).toBe(beforeDuplicateIndex);
+});
+
+test("concurrent confirmed accepts are repository-serialized without losing either candidate or rule", async () => {
+  const cwd = await initializedRepo();
+  const task = await createTask(cwd, "Serialize concurrent learning");
+  for (const candidate of [
+    {
+      id: "L1",
+      domain: "testing-practice",
+      text: "Keep the first concurrent rule.",
+      rationale: "The first rule is reusable.",
+    },
+    {
+      id: "L2",
+      domain: "testing-practice",
+      text: "Keep the second concurrent rule.",
+      rationale: "The second rule is reusable.",
+    },
+  ]) {
+    expect((await proposeLearning(cwd, task.id, candidate)).exitCode).toBe(0);
+  }
+
+  const lockPath = join(cwd, ".vinea", ".runtime", "learning-promotion.lock");
+  await mkdir(lockPath);
+  const accepts = ["L1", "L2"].map((id) => runCli([
+    "learning", "accept", task.id,
+    "--id", id,
+    "--confirmed-by", "user",
+    "--json",
+  ], cwd));
+  try {
+    const state = await Promise.race([
+      Promise.all(accepts).then(() => "settled"),
+      delay(250).then(() => "waiting"),
+    ]);
+    expect(state).toBe("waiting");
+  } finally {
+    await rmdir(lockPath);
+  }
+
+  const results = await Promise.all(accepts);
+  expect(results.map(({ exitCode }) => exitCode)).toEqual([0, 0]);
+  const stored = await readJson<TaskRecord>(join(activeTaskDirectory(cwd, task.id), "task.json"));
+  expect(stored.learningCandidates?.map(({ id, status }) => ({ id, status }))).toEqual([
+    { id: "L1", status: "accepted" },
+    { id: "L2", status: "accepted" },
+  ]);
+  const spec = await readFile(join(cwd, ".vinea", "specs", "testing-practice.md"), "utf8");
+  expect(spec).toContain("Keep the first concurrent rule.");
+  expect(spec).toContain("Keep the second concurrent rule.");
+  const index = await readFile(join(cwd, ".vinea", "specs", "index.md"), "utf8");
+  expect(index.match(/\]\(testing-practice\.md\)/gu)).toHaveLength(1);
+});
+
+test("spec index membership ignores display labels and pre-existing duplicate targets fail before mutation", async () => {
+  const cwd = await initializedRepo();
+  const task = await createTask(cwd, "Normalize spec index identity");
+  const taskDirectory = activeTaskDirectory(cwd, task.id);
+  const indexPath = join(cwd, ".vinea", "specs", "index.md");
+  const specPath = join(cwd, ".vinea", "specs", "testing-practice.md");
+  await writeFile(
+    indexPath,
+    "# Vinea Specs\n\n## Indexed specs\n\n- [Testing practice](testing-practice.md)\n",
+    "utf8",
+  );
+  expect((await proposeLearning(cwd, task.id, {
+    id: "L1",
+    domain: "testing-practice",
+    text: "Treat the spec target as its identity.",
+    rationale: "Display labels may be customized by maintainers.",
+  })).exitCode).toBe(0);
+
+  const accepted = await runCli([
+    "learning", "accept", task.id,
+    "--id", "L1",
+    "--confirmed-by", "user",
+    "--json",
+  ], cwd);
+  expect(accepted.exitCode).toBe(0);
+  expect(await readFile(indexPath, "utf8")).toBe(
+    "# Vinea Specs\n\n## Indexed specs\n\n- [Testing practice](testing-practice.md)\n",
+  );
+
+  expect((await proposeLearning(cwd, task.id, {
+    id: "L2",
+    domain: "testing-practice",
+    text: "Reject an ambiguous duplicate index target.",
+    rationale: "Promotion must not guess which duplicate entry is authoritative.",
+  })).exitCode).toBe(0);
+  await writeFile(
+    indexPath,
+    [
+      "# Vinea Specs",
+      "",
+      "## Indexed specs",
+      "",
+      "- [Testing practice](testing-practice.md)",
+      "- [Duplicate label](./testing-practice.md)",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const beforeTask = await readFile(join(taskDirectory, "task.json"), "utf8");
+  const beforeJournal = await readFile(join(taskDirectory, "journal.md"), "utf8");
+  const beforeSpec = await readFile(specPath, "utf8");
+  const beforeIndex = await readFile(indexPath, "utf8");
+  const duplicateTarget = await runCli([
+    "learning", "accept", task.id,
+    "--id", "L2",
+    "--confirmed-by", "user",
+    "--json",
+  ], cwd);
+  expect(duplicateTarget.exitCode).toBe(1);
+  expect(JSON.parse(duplicateTarget.stdout)).toMatchObject({
+    error: {
+      code: "VINEA_VALIDATION_INVALID",
+      message: expect.stringContaining("duplicate"),
+    },
+  });
+  expect(await readFile(join(taskDirectory, "task.json"), "utf8")).toBe(beforeTask);
+  expect(await readFile(join(taskDirectory, "journal.md"), "utf8")).toBe(beforeJournal);
+  expect(await readFile(specPath, "utf8")).toBe(beforeSpec);
+  expect(await readFile(indexPath, "utf8")).toBe(beforeIndex);
 });
 
 test("learning archive classifies the candidate locally with a reason and never modifies specs", async () => {
@@ -391,4 +514,10 @@ function activeTaskDirectory(cwd: string, taskId: string): string {
 
 function parseJsonl(contents: string): Array<Record<string, unknown>> {
   return contents.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
@@ -27,6 +27,11 @@ const MAX_RULE_CHARACTERS = 500;
 const MAX_RATIONALE_CHARACTERS = 1000;
 const MAX_REASON_CHARACTERS = 1000;
 const MAX_ACTOR_CHARACTERS = 200;
+const PROMOTION_LOCK_DIRECTORY = "learning-promotion.lock";
+const PROMOTION_LOCK_OWNER = "owner.json";
+const PROMOTION_LOCK_RETRY_MILLISECONDS = 25;
+const PROMOTION_LOCK_TIMEOUT_MILLISECONDS = 5000;
+const PROMOTION_LOCK_STALE_MILLISECONDS = 5 * 60 * 1000;
 
 export interface ProposeLearningInput {
   id: string;
@@ -101,13 +106,26 @@ export async function acceptLearning(
   now: Clock = () => new Date(),
 ): Promise<TaskRecord> {
   await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
   const id = boundedNonempty(input.id, "Learning candidate ID", MAX_ID_CHARACTERS);
   const actor = boundedNonempty(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
   if (input.confirmedBy !== "user") {
     throw new ValidationError("Learning acceptance requires literal --confirmed-by user.");
   }
+  return withPromotionLock(
+    paths,
+    () => acceptLearningWhileLocked(paths, taskId, id, actor, now),
+  );
+}
+
+async function acceptLearningWhileLocked(
+  paths: VineaPaths,
+  taskId: string,
+  id: string,
+  actor: string,
+  now: Clock,
+): Promise<TaskRecord> {
+  const location = await findTask(paths, taskId);
+  assertTaskMutable(location);
   const candidates = taskLearningCandidates(location);
   const candidate = requireProposedCandidate(candidates, taskId, id);
   const normalizedRule = normalizeWhitespace(candidate.text);
@@ -122,6 +140,12 @@ export async function acceptLearning(
   if (containsNormalizedRule(previousSpec ?? "", normalizedRule)) {
     throw new ValidationError(
       `Learning rule already exists in ${candidate.domain} spec: ${normalizedRule}`,
+    );
+  }
+  const domainIndexEntries = countDomainIndexTargets(previousIndex, candidate.domain);
+  if (domainIndexEntries > 1) {
+    throw new ValidationError(
+      `Spec index contains duplicate targets for learning domain ${candidate.domain}; resolve them before promotion.`,
     );
   }
 
@@ -139,7 +163,7 @@ export async function acceptLearning(
   };
   const nextSpec = appendRule(previousSpec, candidate.domain, timestamp.slice(0, 10), normalizedRule);
   const indexEntry = `- [${candidate.domain}](${candidate.domain}.md)`;
-  const nextIndex = containsDomainIndex(previousIndex, candidate.domain)
+  const nextIndex = domainIndexEntries === 1
     ? previousIndex
     : appendLine(previousIndex, indexEntry);
 
@@ -292,11 +316,19 @@ function containsNormalizedRule(contents: string, normalizedRule: string): boole
   });
 }
 
-function containsDomainIndex(contents: string, domain: string): boolean {
-  return contents.split(/\r?\n/u).some((line) => {
-    const match = line.match(/^\s*-\s*\[([^\]]+)\]\(([^)]+)\)\s*$/u);
-    return match !== null && match[1] === domain && match[2] === `${domain}.md`;
-  });
+function countDomainIndexTargets(contents: string, domain: string): number {
+  return contents.split(/\r?\n/u).filter((line) => {
+    const match = line.match(/^\s*-\s*\[[^\]]+\]\(\s*([^)]+?)\s*\)\s*$/u);
+    return match !== null && normalizeSpecTarget(match[1]!) === `${domain}.md`;
+  }).length;
+}
+
+function normalizeSpecTarget(value: string): string {
+  let target = value.trim();
+  if (target.startsWith("<") && target.endsWith(">")) {
+    target = target.slice(1, -1).trim();
+  }
+  return target.replace(/\\/gu, "/").replace(/^(?:\.\/)+/u, "");
 }
 
 function appendRule(
@@ -412,6 +444,167 @@ async function restoreText(
       throw new SchemaError(`Unable to remove rolled-back learning file ${filename}`, error);
     }
   }
+}
+
+interface PromotionLock {
+  directory: string;
+  ownerPath: string;
+  token: string;
+}
+
+async function withPromotionLock<T>(
+  paths: VineaPaths,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lock = await acquirePromotionLock(paths);
+  let result: T | undefined;
+  let operationFailed = false;
+  let operationError: unknown;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+  try {
+    await releasePromotionLock(paths, lock);
+  } catch (releaseError) {
+    if (operationFailed) {
+      throw new SchemaError(
+        `Learning promotion failed and its repository lock could not be released safely: ${errorMessage(operationError)}`,
+        { operationError, releaseError },
+      );
+    }
+    throw releaseError;
+  }
+  if (operationFailed) throw operationError;
+  return result as T;
+}
+
+async function acquirePromotionLock(paths: VineaPaths): Promise<PromotionLock> {
+  const directory = join(paths.runtime, PROMOTION_LOCK_DIRECTORY);
+  const ownerPath = join(directory, PROMOTION_LOCK_OWNER);
+  const token = randomUUID();
+  const deadline = Date.now() + PROMOTION_LOCK_TIMEOUT_MILLISECONDS;
+  await assertNoSymlink(paths.repoRoot, paths.runtime);
+  for (;;) {
+    await assertNoSymlink(paths.repoRoot, directory);
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      if (!isCode(error, "EEXIST")) {
+        throw new SchemaError(`Unable to acquire learning promotion lock ${directory}`, error);
+      }
+      if (Date.now() >= deadline) {
+        throw new ValidationError(await describePromotionLock(paths, directory, ownerPath));
+      }
+      await delay(PROMOTION_LOCK_RETRY_MILLISECONDS);
+      continue;
+    }
+
+    const owner = {
+      token,
+      pid: process.pid,
+      acquiredAt: new Date().toISOString(),
+    };
+    try {
+      await writeFile(ownerPath, `${JSON.stringify(owner)}\n`, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      const cleanupFailures = await cleanupOwnedLock(directory, ownerPath);
+      if (cleanupFailures.length > 0) {
+        throw new SchemaError(
+          `Unable to initialize learning promotion lock ${directory}; cleanup failed for ${cleanupFailures.join(", ")}`,
+          error,
+        );
+      }
+      throw new SchemaError(`Unable to initialize learning promotion lock ${directory}`, error);
+    }
+    return { directory, ownerPath, token };
+  }
+}
+
+async function releasePromotionLock(paths: VineaPaths, lock: PromotionLock): Promise<void> {
+  await assertNoSymlink(paths.repoRoot, lock.ownerPath);
+  let owner: unknown;
+  try {
+    owner = JSON.parse(await readFile(lock.ownerPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new SchemaError(
+      `Unable to verify ownership before releasing learning promotion lock ${lock.directory}; inspect it manually`,
+      error,
+    );
+  }
+  if (!isRecord(owner) || owner.token !== lock.token) {
+    throw new SchemaError(
+      `Learning promotion lock ownership changed at ${lock.directory}; refusing unsafe cleanup`,
+    );
+  }
+  try {
+    await unlink(lock.ownerPath);
+    await rmdir(lock.directory);
+  } catch (error) {
+    throw new SchemaError(
+      `Unable to release learning promotion lock ${lock.directory}; inspect and remove it only after confirming no promotion is active`,
+      error,
+    );
+  }
+}
+
+async function describePromotionLock(
+  paths: VineaPaths,
+  directory: string,
+  ownerPath: string,
+): Promise<string> {
+  let ageMilliseconds: number | undefined;
+  try {
+    ageMilliseconds = Math.max(0, Date.now() - (await lstat(directory)).mtimeMs);
+  } catch (error) {
+    if (!isCode(error, "ENOENT")) {
+      return `Learning promotion lock is busy at ${directory}; retry after the active promotion completes.`;
+    }
+  }
+  let ownerDescription = "owner metadata is unavailable";
+  try {
+    await assertNoSymlink(paths.repoRoot, ownerPath);
+    const owner = JSON.parse(await readFile(ownerPath, "utf8")) as unknown;
+    if (isRecord(owner)) {
+      const pid = typeof owner.pid === "number" ? `pid ${owner.pid}` : "unknown pid";
+      const acquiredAt = typeof owner.acquiredAt === "string" ? ` since ${owner.acquiredAt}` : "";
+      ownerDescription = `${pid}${acquiredAt}`;
+    }
+  } catch {
+    // The directory can briefly exist before its owner record is written.
+  }
+  const stale = ageMilliseconds !== undefined && ageMilliseconds >= PROMOTION_LOCK_STALE_MILLISECONDS;
+  const guidance = stale
+    ? "The lock appears stale; verify no Vinea promotion process is active, then remove this lock directory and retry."
+    : "Wait for the active promotion to finish, then retry.";
+  return `Learning promotion lock is busy at ${directory} (${ownerDescription}). ${guidance}`;
+}
+
+async function cleanupOwnedLock(directory: string, ownerPath: string): Promise<string[]> {
+  const failures: string[] = [];
+  try {
+    await unlink(ownerPath);
+  } catch (error) {
+    if (!isCode(error, "ENOENT")) failures.push(ownerPath);
+  }
+  try {
+    await rmdir(directory);
+  } catch (error) {
+    if (!isCode(error, "ENOENT")) failures.push(directory);
+  }
+  return failures;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isCode(error: unknown, code: string): error is NodeJS.ErrnoException {
