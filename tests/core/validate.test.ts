@@ -1,13 +1,16 @@
 import {
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -36,6 +39,40 @@ test("validate emits one deterministic JSON object and accepts a missing local r
   expect(result.stderr).toBe("");
   expect(result.stdout.trim().split("\n")).toHaveLength(1);
   expect(JSON.parse(result.stdout)).toEqual({ issues: [] });
+});
+
+test("validate rejects an intermediate managed tasks symlink without scanning its external tree", async () => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+  const paths = resolveVineaPaths(cwd);
+  await createTask(paths, {
+    title: "Plausible task outside managed storage",
+    risk: { level: "low", reasons: [] },
+    qualityMode: "standard",
+    executionMode: "single-agent",
+    confirmation: "user",
+  });
+  expect((await runCli(["validate", "--json"], cwd)).exitCode).toBe(0);
+
+  const externalTasks = await mkdtemp(join(tmpdir(), "vinea-external-tasks-"));
+  try {
+    await rename(paths.activeTasks, join(externalTasks, "active"));
+    await rename(paths.archivedTasks, join(externalTasks, "archive"));
+    await rm(paths.tasks, { recursive: true });
+    await symlink(externalTasks, paths.tasks);
+
+    const result = await runCli(["validate", "--json"], cwd);
+    const issues = (JSON.parse(result.stdout) as { issues: Array<{ code: string; path: string; message: string }> }).issues;
+
+    expect(result.exitCode).toBe(1);
+    expect(issues).toEqual([{
+      code: "MANAGED_PATH_UNSAFE",
+      path: ".vinea/tasks",
+      message: "Vinea managed paths must remain inside the repository and must not traverse symbolic links.",
+    }]);
+  } finally {
+    await rm(externalTasks, { recursive: true, force: true });
+  }
 });
 
 test("validate reports retained task lock owner states in sorted JSON without modifying them", async () => {

@@ -4,7 +4,7 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parseCheckDocument } from "./check.js";
 import { validateEvidenceRecord } from "./evidence.js";
 import { normalizeSpecTarget, parseSpecIndexTarget } from "./learning.js";
-import type { VineaPaths } from "./paths.js";
+import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import { mutationTargetsAreOwned, type MutationTargetOwner, type TaskLocation } from "./task-store.js";
 import { inspectTaskLocks } from "./task-locks.js";
 import {
@@ -78,12 +78,28 @@ interface TaskScan {
   taskIdsByScope: Map<string, Set<"active" | "archive">>;
 }
 
+interface ManagedPathSafety {
+  config: boolean;
+  gitignore: boolean;
+  specs: boolean;
+  specIndex: boolean;
+  tasks: boolean;
+  activeTasks: boolean;
+  archivedTasks: boolean;
+  runtime: boolean;
+  sessions: boolean;
+  inlineAudit: boolean;
+}
+
 export async function validateWorkspace(paths: VineaPaths): Promise<ValidationReport> {
   const issues: ValidationIssue[] = [];
   const add = (code: string, filename: string, message: string): void => {
     issues.push({ code, path: displayPath(paths, filename), message });
   };
 
+  if (!await validateManagedPathSafety(paths, paths.vineaRoot, add)) {
+    return { issues: sortIssues(issues) };
+  }
   const root = await entryKind(paths.vineaRoot);
   if (root === "missing") {
     add("WORKSPACE_NOT_INITIALIZED", paths.vineaRoot, "Run `vinea init` before validating this repository.");
@@ -94,15 +110,17 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
     return { issues: sortIssues(issues) };
   }
 
-  const limits = await validateConfig(paths, add);
-  await validateManagedSpecs(paths, add);
-  await validateInlineAudit(paths, add);
+  const managed = await inspectManagedPathSafety(paths, add);
+  const limits = managed.config ? await validateConfig(paths, add) : null;
+  await validateManagedSpecs(paths, add, managed);
+  if (managed.inlineAudit) await validateInlineAudit(paths, add);
 
-  for (const [label, directory] of [
-    ["specs", paths.specs],
-    ["tasks/active", paths.activeTasks],
-    ["tasks/archive", paths.archivedTasks],
+  for (const [label, directory, safe] of [
+    ["specs", paths.specs, managed.specs],
+    ["tasks/active", paths.activeTasks, managed.activeTasks],
+    ["tasks/archive", paths.archivedTasks, managed.archivedTasks],
   ] as const) {
+    if (!safe) continue;
     const kind = await entryKind(directory);
     if (kind === "missing") {
       add("DIRECTORY_MISSING", directory, `Required Vinea directory ${label} is missing.`);
@@ -115,8 +133,8 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
     activeTaskIds: new Set<string>(),
     taskIdsByScope: new Map<string, Set<"active" | "archive">>(),
   };
-  await scanTaskScope(paths, paths.activeTasks, "active", limits, taskScan, add);
-  await scanTaskScope(paths, paths.archivedTasks, "archive", limits, taskScan, add);
+  if (managed.activeTasks) await scanTaskScope(paths, paths.activeTasks, "active", limits, taskScan, add);
+  if (managed.archivedTasks) await scanTaskScope(paths, paths.archivedTasks, "archive", limits, taskScan, add);
   for (const [taskId, scopes] of taskScan.taskIdsByScope) {
     if (scopes.size > 1) {
       add(
@@ -127,8 +145,10 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
     }
   }
 
-  await validateSessionBindings(paths, taskScan.activeTaskIds, add);
-  await validateTaskLocks(paths, add);
+  if (managed.runtime && managed.sessions) {
+    await validateSessionBindings(paths, taskScan.activeTaskIds, add);
+  }
+  if (managed.runtime) await validateTaskLocks(paths, add);
   return { issues: sortIssues(issues) };
 }
 
@@ -144,6 +164,9 @@ export async function validateTaskStructure(
   const add = (code: string, filename: string, message: string): void => {
     issues.push({ code, path: displayPath(paths, filename), message });
   };
+  if (!await validateManagedPathSafety(paths, location.directory, add)) {
+    return { issues: sortIssues(issues) };
+  }
   await validateTaskDirectory(
     paths,
     location.directory,
@@ -182,17 +205,65 @@ async function validateTaskLocks(paths: VineaPaths, add: IssueAdder): Promise<vo
   }
 }
 
-async function validateManagedSpecs(paths: VineaPaths, add: IssueAdder): Promise<void> {
-  const gitignore = await readRequiredRegularFile(paths.gitignore, "VINEA_GITIGNORE", add);
-  if (gitignore !== null && gitignore !== RUNTIME_IGNORE) {
+async function inspectManagedPathSafety(paths: VineaPaths, add: IssueAdder): Promise<ManagedPathSafety> {
+  const config = await validateManagedPathSafety(paths, paths.config, add);
+  const gitignore = await validateManagedPathSafety(paths, paths.gitignore, add);
+  const specs = await validateManagedPathSafety(paths, paths.specs, add);
+  const specIndex = specs && await validateManagedPathSafety(paths, paths.specIndex, add);
+  const tasks = await validateManagedPathSafety(paths, paths.tasks, add);
+  const activeTasks = tasks && await validateManagedPathSafety(paths, paths.activeTasks, add);
+  const archivedTasks = tasks && await validateManagedPathSafety(paths, paths.archivedTasks, add);
+  const runtime = await validateManagedPathSafety(paths, paths.runtime, add);
+  const sessions = runtime && await validateManagedPathSafety(paths, paths.sessions, add);
+  const inlineAudit = await validateManagedPathSafety(paths, join(paths.vineaRoot, "inline-audit.jsonl"), add);
+  return {
+    config,
+    gitignore,
+    specs,
+    specIndex,
+    tasks,
+    activeTasks,
+    archivedTasks,
+    runtime,
+    sessions,
+    inlineAudit,
+  };
+}
+
+async function validateManagedPathSafety(paths: VineaPaths, filename: string, add: IssueAdder): Promise<boolean> {
+  try {
+    await assertNoSymlink(paths.repoRoot, filename);
+    return true;
+  } catch (error) {
+    // ENOTDIR cannot traverse to another location and remains eligible for the
+    // existing missing/invalid-path diagnostics from entryKind.
+    if (isErrorCode(error, "ENOTDIR")) return true;
     add(
-      "VINEA_GITIGNORE_INVALID",
-      paths.gitignore,
-      "Managed .vinea/.gitignore must contain exactly .runtime/.",
+      "MANAGED_PATH_UNSAFE",
+      filename,
+      "Vinea managed paths must remain inside the repository and must not traverse symbolic links.",
     );
+    return false;
+  }
+}
+
+async function validateManagedSpecs(
+  paths: VineaPaths,
+  add: IssueAdder,
+  managed: Pick<ManagedPathSafety, "gitignore" | "specs" | "specIndex">,
+): Promise<void> {
+  if (managed.gitignore) {
+    const gitignore = await readRequiredRegularFile(paths.gitignore, "VINEA_GITIGNORE", add);
+    if (gitignore !== null && gitignore !== RUNTIME_IGNORE) {
+      add(
+        "VINEA_GITIGNORE_INVALID",
+        paths.gitignore,
+        "Managed .vinea/.gitignore must contain exactly .runtime/.",
+      );
+    }
   }
 
-  if (await entryKind(paths.specs) !== "directory") return;
+  if (!managed.specs || !managed.specIndex || await entryKind(paths.specs) !== "directory") return;
   const index = await readRequiredRegularFile(paths.specIndex, "SPEC_INDEX", add);
   if (index === null) return;
   const seenTargets = new Set<string>();
