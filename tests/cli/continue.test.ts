@@ -104,9 +104,18 @@ test("continue without a session ID journals confirmation without creating a bin
   const cwd = await initializedRepo();
   const task = await createReadyTask(cwd, "Continue without binding");
   const taskDirectory = join(cwd, ".vinea", "tasks", "active", task.id);
-  const stored = await readJson<TaskRecord>(join(taskDirectory, "task.json"));
-  stored.status = "checking";
-  await writeJson(join(taskDirectory, "task.json"), stored);
+  expect((await runCli([
+    "task", "transition", task.id,
+    "--to", "in_progress",
+    "--reason", "Begin continuation fixture",
+    "--json",
+  ], cwd)).exitCode).toBe(0);
+  expect((await runCli([
+    "task", "transition", task.id,
+    "--to", "checking",
+    "--reason", "Reach continuation fixture checking state",
+    "--json",
+  ], cwd)).exitCode).toBe(0);
   const sessions = join(cwd, ".vinea", ".runtime", "sessions");
   const beforeEntries = await readdir(sessions);
 

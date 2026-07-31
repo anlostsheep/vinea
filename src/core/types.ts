@@ -109,6 +109,7 @@ export interface TaskMutationJournalEvent {
   schemaVersion: typeof SCHEMA_VERSION;
   type: TaskMutationKind;
   mutationKind: TaskMutationKind;
+  mutationProtocolVersion?: 1;
   operationId: string;
   timestamp: IsoTimestamp;
   actor: string;
@@ -135,6 +136,7 @@ export interface JournalCheckMutationEvent {
   schemaVersion: typeof SCHEMA_VERSION;
   type: "check_recorded" | "check_updated";
   mutationKind: "check_recorded" | "check_updated";
+  mutationProtocolVersion?: 1;
   operationId: string;
   timestamp: IsoTimestamp;
   actor: string;

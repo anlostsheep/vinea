@@ -18,6 +18,8 @@ import { validateWorkspace } from "../../src/core/validate.js";
 import {
   createTask,
   addRequirement,
+  continueTask,
+  finishTask,
   readTask,
   setTaskBrief,
   setTaskPlan,
@@ -173,6 +175,77 @@ test("task lookup rejects an invalid task ID before resolving a filesystem path"
     code: "VINEA_VALIDATION_INVALID",
     message: "Invalid task ID: ../tasks",
   });
+});
+
+test("invalid task journals block finish, transitions, and continuations without changing status", async () => {
+  const created = await createTask(
+    paths,
+    {
+      title: "Gate lifecycle on journal integrity",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    fixedNow,
+  );
+  await addRequirement(paths, created.task.id, {
+    id: "R1",
+    text: "The lifecycle must stop on malformed journals.",
+    actor: "codex",
+  }, fixedNow);
+  await writeFile(join(created.directory, "brief.md"), "# Brief\n\nGate lifecycle changes.\n", "utf8");
+  await writeFile(join(created.directory, "plan.md"), "# Plan\n\n1. Validate journal integrity.\n", "utf8");
+  await transitionTask(paths, created.task.id, "ready", { actor: "codex", reason: "Ready", now: fixedNow });
+  await transitionTask(paths, created.task.id, "in_progress", { actor: "codex", reason: "Start", now: fixedNow });
+  await transitionTask(paths, created.task.id, "checking", { actor: "codex", reason: "Check", now: fixedNow });
+
+  const journalPath = join(created.directory, "journal.md");
+  await appendJsonl(journalPath, {
+    schemaVersion: 1,
+    type: "created",
+    timestamp: "2026-07-31T08:10:00.000Z",
+    actor: "cli",
+    confirmation: "user",
+    status: "planning",
+  }, paths.repoRoot);
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toEqual(expect.arrayContaining([
+    "JOURNAL_CREATION_NOT_FIRST",
+    "JOURNAL_CREATION_DUPLICATE",
+  ]));
+  const beforeJournal = await readFile(journalPath, "utf8");
+
+  await expect(finishTask(paths, created.task.id, { confirmed: true, actor: "codex", now: fixedNow }))
+    .rejects.toMatchObject({
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("JOURNAL_CREATION"),
+    });
+  await expect(transitionTask(paths, created.task.id, "blocked", {
+    actor: "codex",
+    reason: "Would mutate a malformed journal",
+    now: fixedNow,
+  })).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("JOURNAL_CREATION"),
+  });
+  await expect(continueTask(paths, created.task.id, {
+    host: "codex",
+    confirmed: true,
+    now: fixedNow,
+  })).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("JOURNAL_CREATION"),
+  });
+  await expect(addRequirement(paths, created.task.id, {
+    id: "R2",
+    text: "Would mutate a malformed journal.",
+    actor: "codex",
+  }, fixedNow)).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("JOURNAL_CREATION"),
+  });
+  expect((await readTask(paths, created.task.id)).status).toBe("checking");
+  expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
 });
 
 test("task brief and plan sources must be safe repository-relative regular files", async () => {

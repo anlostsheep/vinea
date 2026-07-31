@@ -242,6 +242,7 @@ async function persistTaskMutationLocked(
   const completion: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind"> & { mutationKind: TaskMutationJournalEvent["mutationKind"] } = {
     ...event,
     mutationKind: event.type,
+    mutationProtocolVersion: 1,
   };
   await executeTaskMutationLocked(
     paths,
@@ -329,7 +330,8 @@ async function executeTaskMutationLocked(
       return pending;
     }
     const prepared = await prepare(pending.timestamp, true, pending);
-    if (stableJson(prepared.expected) !== stableJson(pending.expected) || !matchesCompletion(prepared.completion, pending.completion)) {
+    if (stableJson(prepared.expected) !== stableJson(pending.expected)
+      || !matchesCompletionForRetry(prepared.completion, pending.completion)) {
       throw new SchemaError(`Pending mutation ${pending.operationId} no longer matches the requested target; inspect it before retrying.`);
     }
     await prepared.apply();
@@ -339,6 +341,8 @@ async function executeTaskMutationLocked(
     await appendMutationCompletion(paths, journalPath, pending, operations);
     return pending;
   }
+
+  await assertTaskMutationStructure(paths, location);
 
   const prepared = await prepare(request.timestamp, false, null);
   if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), request.mutationKind, prepared.expected)) {
@@ -639,6 +643,31 @@ function matchesCompletion(
   return stableJson(left) === stableJson(right);
 }
 
+function matchesCompletionForRetry(
+  prepared: Omit<MutationCompletionEvent, "operationId">,
+  pending: Omit<MutationCompletionEvent, "operationId">,
+): boolean {
+  if (matchesCompletion(prepared, pending)) return true;
+  if ("mutationProtocolVersion" in pending && pending.mutationProtocolVersion !== undefined) return false;
+  const current = { ...prepared };
+  delete current.mutationProtocolVersion;
+  return matchesCompletion(current as Omit<MutationCompletionEvent, "operationId">, pending);
+}
+
+async function assertTaskMutationStructure(paths: VineaPaths, location: TaskLocation): Promise<void> {
+  // Avoid a static dependency cycle: validate owns the task-artifact rules and
+  // already depends on task-store for mutation ownership. This is a read-only
+  // check while the caller's task lock is held; matching pending retries exit
+  // before it so their recovery protocol remains available.
+  const { validateTaskStructure } = await import("./validate.js");
+  const report = await validateTaskStructure(paths, location);
+  if (report.issues.length === 0) return;
+  const issue = report.issues[0]!;
+  throw new SchemaError(
+    `Task ${location.task.id} mutation is blocked by ${issue.code} at ${issue.path}: ${issue.message}. Run \`vinea validate\` to inspect all task-structure issues.`,
+  );
+}
+
 function recordWithoutOperationId(value: Record<string, unknown>): Omit<MutationCompletionEvent, "operationId"> {
   const result = { ...value };
   delete result.operationId;
@@ -667,6 +696,20 @@ export async function assertNoPendingTaskTransition(
       `Task ${location.task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before recording task changes.`,
     );
   }
+}
+
+export async function hasMatchingPendingTaskTransition(
+  paths: VineaPaths,
+  location: TaskLocation,
+  oldStatus: TaskRecord["status"],
+  newStatus: TaskRecord["status"],
+): Promise<boolean> {
+  const pending = await readPendingTransitionIntent(
+    paths,
+    join(location.directory, "journal.md"),
+    location.task.status,
+  );
+  return pending?.oldStatus === oldStatus && pending.newStatus === newStatus;
 }
 
 export async function assertNoPendingTaskMutation(

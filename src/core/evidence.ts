@@ -128,6 +128,7 @@ async function recordEvidenceLocked(
         schemaVersion: SCHEMA_VERSION,
         type: "evidence_recorded",
         mutationKind: "evidence_recorded",
+        mutationProtocolVersion: 1,
         timestamp,
         actor,
         evidenceId,

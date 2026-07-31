@@ -120,6 +120,7 @@ async function addContextReferenceLocked(
         schemaVersion: SCHEMA_VERSION,
         type: "context_added",
         mutationKind: "context_added",
+        mutationProtocolVersion: 1,
         timestamp,
         actor,
         path: normalizedPath,

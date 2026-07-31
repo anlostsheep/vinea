@@ -168,6 +168,7 @@ async function upsertCheckLocked(
         schemaVersion: SCHEMA_VERSION,
         type: eventType,
         mutationKind: eventType,
+        mutationProtocolVersion: 1,
         timestamp,
         actor,
         requirementId,

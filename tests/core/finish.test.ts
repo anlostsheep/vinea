@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
 import { SchemaError } from "../../src/core/errors.js";
+import { appendJsonl } from "../../src/core/json.js";
 import { resolveVineaPaths } from "../../src/core/paths.js";
 import type { EvidenceRecord, LearningCandidate, TaskRecord } from "../../src/core/types.js";
 import { archiveTask, readTask } from "../../src/core/workflow.js";
@@ -75,7 +76,14 @@ test("finish blocks a TDD task whose evidence no longer has red before green", a
     "utf8",
   );
 
-  await expectFinishBlocked(fixture.cwd, fixture.task.id, "tdd-red");
+  const result = await finish(fixture.cwd, fixture.task.id);
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    error: {
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("MUTATION_TARGET_MISMATCH"),
+    },
+  });
 });
 
 test("finish blocks business-dirty files but permits .vinea-only changes", async () => {
@@ -188,8 +196,19 @@ test("archive retries a durable move whose final archived status write did not c
   const fixture = await createCheckingTask();
   await coverTask(fixture);
   expect((await finish(fixture.cwd, fixture.task.id)).exitCode).toBe(0);
+  const activeDirectory = taskDirectory(fixture.cwd, fixture.task.id, "active");
+  await appendJsonl(join(activeDirectory, "journal.md"), {
+    schemaVersion: 1,
+    type: "transition_intent",
+    operationId: "op-archive-retry",
+    timestamp: "2026-07-31T14:00:00.000Z",
+    actor: "cli",
+    reason: "Recover final archive status write",
+    oldStatus: "finished",
+    newStatus: "archived",
+  }, fixture.cwd);
   await rename(
-    taskDirectory(fixture.cwd, fixture.task.id, "active"),
+    activeDirectory,
     taskDirectory(fixture.cwd, fixture.task.id, "archive"),
   );
 

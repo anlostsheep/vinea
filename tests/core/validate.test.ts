@@ -14,7 +14,8 @@ import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
 import { resolveVineaPaths } from "../../src/core/paths.js";
-import { createTask } from "../../src/core/workflow.js";
+import { validateWorkspace } from "../../src/core/validate.js";
+import { addRequirement, createTask } from "../../src/core/workflow.js";
 import { createTempRepo, readJson, runCli, writeJson } from "../helpers/fixture.js";
 import type { TaskRecord } from "../../src/core/types.js";
 
@@ -630,6 +631,112 @@ test("validate distinguishes uncommitted mutation intents from committed events 
     "MUTATION_INTENT_UNCOMMITTED",
     "MUTATION_TARGET_MISMATCH",
   ]));
+});
+
+test("validate rejects current orphan mutation completions while preserving the pre-protocol event shape", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const current = await createTask(paths, {
+    title: "Reject orphan mutation completions",
+    risk: { level: "low", reasons: [] },
+    qualityMode: "standard",
+    executionMode: "single-agent",
+    confirmation: "user",
+  }, () => new Date("2026-07-31T20:12:00.000Z"));
+  const currentJournal = join(current.directory, "journal.md");
+  const timestamp = "2026-07-31T20:12:01.000Z";
+  await addRequirement(paths, current.task.id, {
+    id: "R0",
+    text: "Prove current completions carry the protocol marker.",
+    actor: "cli",
+  }, () => new Date(timestamp));
+  const currentEvents = (await readFile(currentJournal, "utf8"))
+    .trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(currentEvents.find((event) => event.type === "requirement_added"))
+    .toMatchObject({ mutationProtocolVersion: 1 });
+  await writeFile(currentJournal, [
+    (await readFile(currentJournal, "utf8")).trimEnd(),
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "requirement_added",
+      mutationKind: "requirement_added",
+      mutationProtocolVersion: 1,
+      operationId: "op-orphan-requirement",
+      timestamp,
+      actor: "cli",
+      requirementId: "R1",
+    }),
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "learning_accepted",
+      mutationKind: "learning_accepted",
+      mutationProtocolVersion: 1,
+      operationId: "op-orphan-learning",
+      timestamp,
+      actor: "cli",
+      learningCandidateId: "L1",
+      confirmedBy: "user",
+    }),
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "check_recorded",
+      mutationKind: "check_recorded",
+      mutationProtocolVersion: 1,
+      operationId: "op-orphan-check",
+      timestamp,
+      actor: "cli",
+      requirementId: "R1",
+      result: "uncovered",
+    }),
+    "",
+  ].join("\n"), "utf8");
+
+  const currentReport = await validateWorkspace(paths);
+  const orphanIssues = currentReport.issues.filter(({ code }) => code === "MUTATION_COMPLETION_ORPHAN");
+  expect(orphanIssues).toHaveLength(3);
+  expect(orphanIssues.map(({ message }) => message)).toEqual(expect.arrayContaining([
+    expect.stringContaining("op-orphan-requirement"),
+    expect.stringContaining("op-orphan-learning"),
+    expect.stringContaining("op-orphan-check"),
+  ]));
+  expect(orphanIssues.every(({ message }) => message.includes("Line"))).toBe(true);
+
+  const legacy = await createTask(paths, {
+    title: "Recognize pre protocol completion",
+    risk: { level: "low", reasons: [] },
+    qualityMode: "standard",
+    executionMode: "single-agent",
+    confirmation: "user",
+  }, () => new Date("2026-07-31T20:13:00.000Z"));
+  const legacyTask = await readJson<TaskRecord>(join(legacy.directory, "task.json"));
+  await writeJson(join(legacy.directory, "task.json"), {
+    ...legacyTask,
+    requirements: [{
+      schemaVersion: 1,
+      id: "R1",
+      text: "Recorded before the mutation-intent protocol.",
+      createdAt: timestamp,
+    }],
+    updatedAt: timestamp,
+  });
+  const legacyJournal = join(legacy.directory, "journal.md");
+  await writeFile(legacyJournal, [
+    (await readFile(legacyJournal, "utf8")).trimEnd(),
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "requirement_added",
+      operationId: "op-legacy-requirement",
+      timestamp,
+      actor: "cli",
+      requirementId: "R1",
+    }),
+    "",
+  ].join("\n"), "utf8");
+
+  const legacyReport = await validateWorkspace(paths);
+  expect(legacyReport.issues.filter(({ path }) => path.includes(legacy.task.id))).toEqual([]);
+  expect(legacyReport.issues.filter(({ code }) => code === "MUTATION_COMPLETION_ORPHAN")).toHaveLength(3);
 });
 
 test("validate detects a completed task mutation whose identified value was changed later", async () => {

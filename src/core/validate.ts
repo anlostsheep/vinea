@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parseCheckDocument } from "./check.js";
 import { validateEvidenceRecord } from "./evidence.js";
 import { normalizeSpecTarget, parseSpecIndexTarget } from "./learning.js";
 import type { VineaPaths } from "./paths.js";
-import { mutationTargetsAreOwned, type MutationTargetOwner } from "./task-store.js";
+import { mutationTargetsAreOwned, type MutationTargetOwner, type TaskLocation } from "./task-store.js";
 import { inspectTaskLocks } from "./task-locks.js";
 import { SCHEMA_VERSION, type EvidenceRecord, type MutationTargetSummary, type TaskStatus } from "./types.js";
 
@@ -114,6 +114,29 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
 
   await validateSessionBindings(paths, taskScan.activeTaskIds, add);
   await validateTaskLocks(paths, add);
+  return { issues: sortIssues(issues) };
+}
+
+// This intentionally excludes workspace-level configuration, shared specs,
+// session bindings, and runtime locks. Writers use it while holding their task
+// lock so a malformed task artifact or journal cannot be extended further.
+export async function validateTaskStructure(
+  paths: VineaPaths,
+  location: Pick<TaskLocation, "directory" | "scope">,
+): Promise<ValidationReport> {
+  const issues: ValidationIssue[] = [];
+  const add = (code: string, filename: string, message: string): void => {
+    issues.push({ code, path: displayPath(paths, filename), message });
+  };
+  await validateTaskDirectory(
+    paths,
+    location.directory,
+    basename(location.directory),
+    location.scope,
+    null,
+    new Set<string>(),
+    add,
+  );
   return { issues: sortIssues(issues) };
 }
 
@@ -535,16 +558,22 @@ async function validateJournalArtifact(
     } else if (isMutationCompletionEvent(value)) {
       const operationId = value.operationId as string;
       const intent = pendingMutationIntents.get(operationId);
-      if (intent !== undefined) {
-        if (!matchesMutationCompletion(intent, value)) {
-          add("MUTATION_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match mutation intent ${operationId}.`);
-        } else {
-          pendingMutationIntents.delete(operationId);
-          committedMutationIntents.push(intent);
+      if (intent === undefined) {
+        if (!isLegacyMutationCompletion(value)) {
+          add(
+            "MUTATION_COMPLETION_ORPHAN",
+            filename,
+            `Line ${lineNumber} completion ${value.type} with operation ID ${operationId} has no matching mutation intent.`,
+          );
         }
-      }
-      if (String(value.type).startsWith("learning_") && typeof value.learningCandidateId === "string") {
-        latestLearningMutationOperation.set(value.learningCandidateId, operationId);
+      } else if (!matchesMutationCompletion(intent, value)) {
+        add("MUTATION_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match mutation intent ${operationId}.`);
+      } else {
+        pendingMutationIntents.delete(operationId);
+        committedMutationIntents.push(intent);
+        if (String(value.type).startsWith("learning_") && typeof value.learningCandidateId === "string") {
+          latestLearningMutationOperation.set(value.learningCandidateId, operationId);
+        }
       }
     }
     if (value.type === "created") {
@@ -1148,51 +1177,53 @@ function isJournalEvent(value: unknown): value is Record<string, unknown> & { ty
   }
   if (value.type === "check_recorded" || value.type === "check_updated") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "requirementId", "result",
+      "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "requirementId", "result",
     ])
       && isNonemptyString(value.operationId)
       && (value.mutationKind === undefined || value.mutationKind === value.type)
+      && (value.mutationProtocolVersion === undefined || value.mutationProtocolVersion === 1)
       && isNonemptyString(value.requirementId)
       && ["pass", "fail", "uncovered"].includes(String(value.result));
   }
   if (!TASK_MUTATION_KINDS.has(value.type)) return false;
-  if (value.mutationKind !== value.type
+  if ((value.mutationKind !== undefined && value.mutationKind !== value.type)
+    || (value.mutationProtocolVersion !== undefined && value.mutationProtocolVersion !== 1)
     || !isNonemptyString(value.operationId)) {
     return false;
   }
   if (value.type === "requirement_added" || value.type === "acceptance_criterion_added") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "requirementId",
+      "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "requirementId",
     ]) && isNonemptyString(value.requirementId);
   }
   if (value.type === "brief_set") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "artifact",
+      "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "artifact",
     ]) && value.artifact === "brief.md";
   }
   if (value.type === "plan_set") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "artifact",
+      "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "artifact",
     ]) && value.artifact === "plan.md";
   }
   if (value.type === "context_added") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "path",
+      "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "path",
     ]) && isNonemptyString(value.path);
   }
   if (value.type === "evidence_recorded") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "evidenceId", "evidenceKind",
+      "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "evidenceId", "evidenceKind",
     ]) && isNonemptyString(value.evidenceId)
       && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.evidenceKind));
   }
   if (value.type === "learning_accepted") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "learningCandidateId", "confirmedBy",
+      "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "learningCandidateId", "confirmedBy",
     ]) && isNonemptyString(value.learningCandidateId) && value.confirmedBy === "user";
   }
   return hasOnlyKeys(value, [
-    "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "learningCandidateId",
+    "schemaVersion", "type", "mutationKind", "mutationProtocolVersion", "operationId", "timestamp", "actor", "learningCandidateId",
   ]) && isNonemptyString(value.learningCandidateId);
 }
 
@@ -1201,6 +1232,13 @@ function isMutationCompletionEvent(value: Record<string, unknown>): boolean {
     && (value.type === "check_recorded"
     || value.type === "check_updated"
     || TASK_MUTATION_KINDS.has(value.type));
+}
+
+function isLegacyMutationCompletion(value: Record<string, unknown>): boolean {
+  // Pre-protocol semantic events had no marker. Current writers set this
+  // explicit boundary on every completion, so an unmarked historical event is
+  // compatible while a newly produced orphan is never silently waived.
+  return isMutationCompletionEvent(value) && value.mutationProtocolVersion === undefined;
 }
 
 function isMutationKind(value: unknown): boolean {

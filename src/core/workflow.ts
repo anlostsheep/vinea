@@ -14,6 +14,7 @@ import {
   createTaskArtifacts,
   executeTaskMutation,
   findTask,
+  hasMatchingPendingTaskTransition,
   listStoredTasks,
   mutationFingerprint,
   mutationTargetSummary,
@@ -31,6 +32,7 @@ import {
 } from "./task-store.js";
 import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
 import { inspectWorkspace } from "./schema.js";
+import { validateTaskStructure } from "./validate.js";
 import {
   SCHEMA_VERSION,
   type ContinuationResult,
@@ -320,6 +322,7 @@ async function continueTaskLocked(
       `Only a ready task can be started during continuation; ${taskId} is ${location.task.status}.`,
     );
   }
+  await assertTaskLifecycleStructure(paths, location);
 
   const timestamp = (input.now ?? (() => new Date()))().toISOString();
   let task = location.task;
@@ -376,9 +379,11 @@ async function transitionTaskLocked(
   assertNonempty(options.reason, "Transition reason");
   const location = await findTask(paths, taskId);
   const oldStatus = location.task.status;
+  const matchingPendingRetry = await hasMatchingPendingTaskTransition(paths, location, oldStatus, newStatus);
   assertTransitionAllowed(oldStatus, newStatus, options.unblock === true);
   if (newStatus === "ready") await assertReadyPrerequisites(paths, location);
   if (newStatus === "checking") await assertTddReadyForCheck(paths, location);
+  await assertTaskLifecycleStructure(paths, location, matchingPendingRetry);
 
   const timestamp = (options.now ?? (() => new Date()))().toISOString();
   const task: TaskRecord = { ...location.task, status: newStatus, updatedAt: timestamp };
@@ -415,6 +420,7 @@ async function finishTaskLocked(
       `Finish requires task ${taskId} to be active with status checking; found ${location.task.status}.`,
     );
   }
+  await assertTaskLifecycleStructure(paths, location);
 
   const { summary, evidence } = await readCheckForLocation(paths, location);
   const declaredIds = [
@@ -494,6 +500,11 @@ async function archiveTaskLocked(
       `Archive requires task ${taskId} to have status finished; found ${location.task.status}.`,
     );
   }
+  await assertTaskLifecycleStructure(
+    paths,
+    location,
+    await hasMatchingPendingTaskTransition(paths, location, "finished", "archived"),
+  );
   const operations = { ...DEFAULT_ARCHIVE_OPERATIONS, ...operationOverrides };
   await operations.removeTaskSessionBindings(paths, taskId);
   return transitionTask(paths, taskId, "archived", {
@@ -630,6 +641,7 @@ async function addRequirementLike(
         schemaVersion: SCHEMA_VERSION,
         type: eventType,
         mutationKind: eventType,
+        mutationProtocolVersion: 1,
         timestamp,
         actor,
         requirementId: id,
@@ -696,6 +708,7 @@ async function setTaskDocumentLocked(
       schemaVersion: SCHEMA_VERSION,
       type,
       mutationKind: type,
+      mutationProtocolVersion: 1,
       timestamp,
       actor: normalizedActor,
       artifact,
@@ -703,6 +716,22 @@ async function setTaskDocumentLocked(
     apply: () => writeManagedMutationTarget(paths, location, join(location.directory, artifact), contents),
   }));
   return { taskId, artifact, estimatedBytes: bytes.byteLength };
+}
+
+async function assertTaskLifecycleStructure(
+  paths: VineaPaths,
+  location: TaskLocation,
+  matchingPendingTransition = false,
+): Promise<void> {
+  const report = await validateTaskStructure(paths, location);
+  const issues = matchingPendingTransition
+    ? report.issues.filter(({ code }) => code !== "TASK_STATE_SCOPE_INVALID")
+    : report.issues;
+  if (issues.length === 0) return;
+  const issue = issues[0]!;
+  throw new SchemaError(
+    `Task ${location.task.id} lifecycle is blocked by ${issue.code} at ${issue.path}: ${issue.message}. Run \`vinea validate\` to inspect all task-structure issues.`,
+  );
 }
 
 async function readTaskDocumentSource(paths: VineaPaths, sourceFile: string): Promise<{ bytes: Buffer }> {
