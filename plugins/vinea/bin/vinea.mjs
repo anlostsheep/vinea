@@ -142,7 +142,7 @@ var FinishGateError = class extends VineaError {
 // src/core/workflow.ts
 import { execFile as execFile2 } from "node:child_process";
 import { lstat as lstat7, readFile as readFile6 } from "node:fs/promises";
-import { isAbsolute as isAbsolute4, join as join6, resolve as resolve5 } from "node:path";
+import { isAbsolute as isAbsolute4, join as join6, resolve as resolve6 } from "node:path";
 import { promisify as promisify2 } from "node:util";
 
 // src/core/config.ts
@@ -437,13 +437,13 @@ function isMissing3(error) {
 // src/core/check.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { readFile as readFile3 } from "node:fs/promises";
-import { isAbsolute as isAbsolute2, join as join4, relative as relative2, resolve as resolve2 } from "node:path";
+import { isAbsolute as isAbsolute2, join as join4, relative as relative3, resolve as resolve3 } from "node:path";
 
 // src/core/task-store.ts
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { lstat as lstat5, mkdir as mkdir2, readFile as readFile2, readdir, rename as rename2, rmdir, rm, unlink, writeFile as writeFile3 } from "node:fs/promises";
-import { basename as basename2, join as join3 } from "node:path";
+import { basename as basename2, join as join3, relative as relative2, resolve as resolve2 } from "node:path";
 var ARTIFACTS = [
   "brief.md",
   "plan.md",
@@ -452,6 +452,14 @@ var ARTIFACTS = [
   "check.md",
   "journal.md"
 ];
+var MUTATION_TASK_ARTIFACTS = /* @__PURE__ */ new Set([
+  "task.json",
+  "brief.md",
+  "plan.md",
+  "context.jsonl",
+  "evidence.jsonl",
+  "check.md"
+]);
 var TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 var TASK_LOCK_RETRY_MILLISECONDS = 25;
 var TASK_LOCK_TIMEOUT_MILLISECONDS = 5e3;
@@ -538,6 +546,7 @@ async function persistTaskTransitionLocked(paths, location, task, transition, op
   const destination = shouldMoveToArchive ? join3(paths.archivedTasks, task.id) : void 0;
   await assertNoSymlink(paths.repoRoot, journalPath);
   if (destination !== void 0) await assertNoSymlink(paths.repoRoot, destination);
+  await assertNoPendingTaskMutation(paths, location);
   const pending = await readPendingTransitionIntent(paths, journalPath, location.task.status);
   let intent;
   if (pending !== null) {
@@ -574,21 +583,144 @@ async function persistTaskTransitionLocked(paths, location, task, transition, op
   }
   return { task: committedTask, directory: targetDirectory, scope: targetScope };
 }
-async function persistTaskMutation(paths, location, task, event, operationOverrides = {}) {
-  return withTaskLock(paths, task.id, () => persistTaskMutationLocked(paths, location, task, event, operationOverrides));
+async function executeTaskMutation(paths, location, request, prepare, operationOverrides = {}) {
+  return withTaskLock(paths, location.task.id, () => executeTaskMutationLocked(
+    paths,
+    location,
+    request,
+    prepare,
+    { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides }
+  ));
 }
-async function persistTaskMutationLocked(paths, location, task, event, operationOverrides) {
-  const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
-  await appendTaskMutationIntent(paths, location, event, operations);
-  try {
-    await operations.writeTask(join3(location.directory, "task.json"), task, paths.repoRoot);
-  } catch (error) {
-    throw new SchemaError(
-      `Unable to commit task mutation for ${task.id}; journal intent remains pending for retry`,
-      error
-    );
+async function executeTaskMutationLocked(paths, location, request, prepare, operations) {
+  await assertNoPendingTaskTransition(paths, location);
+  const journalPath = join3(location.directory, "journal.md");
+  const pending = await readPendingTaskMutationIntent(paths, journalPath);
+  if (pending !== null) {
+    if (pending.mutationKind !== request.mutationKind || pending.fingerprint !== request.fingerprint) {
+      throw new TransitionError(
+        `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`
+      );
+    }
+    if (await mutationTargetsMatch(paths, location, pending.expected)) {
+      await appendMutationCompletion(paths, journalPath, pending, operations);
+      return pending;
+    }
+    const prepared2 = await prepare(pending.timestamp, true);
+    if (stableJson(prepared2.expected) !== stableJson(pending.expected) || !matchesCompletion(prepared2.completion, pending.completion)) {
+      throw new SchemaError(`Pending mutation ${pending.operationId} no longer matches the requested target; inspect it before retrying.`);
+    }
+    await prepared2.apply();
+    if (!await mutationTargetsMatch(paths, location, pending.expected)) {
+      throw new SchemaError(`Mutation ${pending.operationId} did not produce its expected managed targets; journal intent remains pending.`);
+    }
+    await appendMutationCompletion(paths, journalPath, pending, operations);
+    return pending;
   }
-  return { ...location, task };
+  const prepared = await prepare(request.timestamp, false);
+  const intent = {
+    schemaVersion: SCHEMA_VERSION,
+    type: "mutation_intent",
+    operationId: operations.createOperationId(),
+    timestamp: request.timestamp,
+    actor: request.actor,
+    mutationKind: request.mutationKind,
+    fingerprint: request.fingerprint,
+    expected: prepared.expected,
+    completion: prepared.completion
+  };
+  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  await prepared.apply();
+  if (!await mutationTargetsMatch(paths, location, intent.expected)) {
+    throw new SchemaError(`Mutation ${intent.operationId} did not produce its expected managed targets; journal intent remains pending.`);
+  }
+  await appendMutationCompletion(paths, journalPath, intent, operations);
+  return intent;
+}
+function mutationFingerprint(value) {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+function mutationTargetSummary(paths, targets, identity) {
+  return {
+    identity,
+    files: targets.map(({ filename, contents }) => ({
+      path: relative2(paths.repoRoot, filename).split("\\").join("/"),
+      sha256: createHash("sha256").update(contents).digest("hex")
+    })).sort((left, right) => left.path.localeCompare(right.path))
+  };
+}
+async function readPendingTaskMutationIntent(paths, journalPath) {
+  const records = await readJsonlRecords(paths.repoRoot, journalPath);
+  let pending = null;
+  for (const record of records) {
+    if (!isRecord2(record) || typeof record.type !== "string") continue;
+    if (record.type === "mutation_intent") {
+      if (!isMutationIntent(record)) throw new SchemaError(`Invalid mutation intent in ${journalPath}`);
+      if (pending !== null) {
+        throw new SchemaError(`Task journal ${journalPath} has more than one uncommitted mutation intent.`);
+      }
+      pending = record;
+      continue;
+    }
+    if (pending !== null && record.operationId === pending.operationId) {
+      if (record.type !== pending.mutationKind || !matchesCompletion(recordWithoutOperationId(record), pending.completion)) {
+        throw new SchemaError(`Mutation completion ${pending.operationId} does not match its journal intent.`);
+      }
+      pending = null;
+    }
+  }
+  return pending;
+}
+async function mutationTargetsMatch(paths, location, expected) {
+  for (const target of expected.files) {
+    if (!isManagedMutationTarget(paths, location, target.path)) return false;
+    const filename = assertInside(paths.repoRoot, resolve2(paths.repoRoot, target.path));
+    try {
+      await assertNoSymlink(paths.repoRoot, filename);
+      const contents = await readFile2(filename);
+      if (createHash("sha256").update(contents).digest("hex") !== target.sha256) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+function isManagedMutationTarget(paths, location, target) {
+  const taskDirectory = relative2(paths.repoRoot, location.directory).split("\\").join("/");
+  const taskArtifact = target.startsWith(`${taskDirectory}/`) ? target.slice(taskDirectory.length + 1) : "";
+  if (MUTATION_TASK_ARTIFACTS.has(taskArtifact)) return true;
+  return target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
+}
+async function appendMutationCompletion(paths, journalPath, intent, operations) {
+  await operations.appendJournal(journalPath, { ...intent.completion, operationId: intent.operationId }, paths.repoRoot);
+}
+function mutationValueIdentity(identity, value) {
+  if (value === void 0) return identity;
+  return {
+    ...identity,
+    valueSha256: createHash("sha256").update(stableJson(value)).digest("hex")
+  };
+}
+function isMutationIntent(value) {
+  return value.schemaVersion === SCHEMA_VERSION && value.type === "mutation_intent" && typeof value.operationId === "string" && value.operationId !== "" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.mutationKind === "string" && typeof value.fingerprint === "string" && /^[a-f0-9]{64}$/u.test(value.fingerprint) && isMutationTargetSummary(value.expected) && isRecord2(value.completion);
+}
+function isMutationTargetSummary(value) {
+  return isRecord2(value) && isRecord2(value.identity) && Object.values(value.identity).every((entry) => typeof entry === "string" && entry !== "") && Array.isArray(value.files) && value.files.length > 0 && value.files.every((entry) => isRecord2(entry) && typeof entry.path === "string" && typeof entry.sha256 === "string" && /^[a-f0-9]{64}$/u.test(entry.sha256));
+}
+function matchesCompletion(left, right) {
+  return stableJson(left) === stableJson(right);
+}
+function recordWithoutOperationId(value) {
+  const result = { ...value };
+  delete result.operationId;
+  return result;
+}
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord2(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 async function assertNoPendingTaskTransition(paths, location) {
   const pending = await readPendingTransitionIntent(
@@ -599,6 +731,14 @@ async function assertNoPendingTaskTransition(paths, location) {
   if (pending !== null) {
     throw new TransitionError(
       `Task ${location.task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before recording task changes.`
+    );
+  }
+}
+async function assertNoPendingTaskMutation(paths, location) {
+  const pending = await readPendingTaskMutationIntent(paths, join3(location.directory, "journal.md"));
+  if (pending !== null) {
+    throw new TransitionError(
+      `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`
     );
   }
 }
@@ -623,6 +763,7 @@ async function appendTaskContinuation(paths, location, event) {
 }
 async function appendTaskContinuationLocked(paths, location, event) {
   await assertNoPendingTaskTransition(paths, location);
+  await assertNoPendingTaskMutation(paths, location);
   const journalPath = join3(location.directory, "journal.md");
   await assertNoSymlink(paths.repoRoot, journalPath);
   await appendJsonl(journalPath, event, paths.repoRoot);
@@ -876,7 +1017,7 @@ async function removeOwnedTaskLock(directory, ownerPath, token) {
   }
 }
 async function delay(milliseconds) {
-  await new Promise((resolve7) => setTimeout(resolve7, milliseconds));
+  await new Promise((resolve8) => setTimeout(resolve8, milliseconds));
 }
 function isCode(error, code) {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
@@ -1293,8 +1434,8 @@ function normalizeRepositoryPath(repoRoot, path) {
   if (trimmed.includes("\0") || trimmed.includes("\\") || isAbsolute2(trimmed) || /^[a-zA-Z]:/.test(trimmed) || trimmed.startsWith("//")) {
     throw new ValidationError(`Check path must be repository-relative: ${path}`);
   }
-  const resolved = assertInside(repoRoot, resolve2(repoRoot, trimmed));
-  const normalized = relative2(repoRoot, resolved).split("\\").join("/");
+  const resolved = assertInside(repoRoot, resolve3(repoRoot, trimmed));
+  const normalized = relative3(repoRoot, resolved).split("\\").join("/");
   if (normalized === "" || normalized === "." || normalized !== trimmed) {
     throw new ValidationError(`Check path must identify a repository file or directory: ${path}`);
   }
@@ -1325,8 +1466,8 @@ function isRecord3(value) {
 import { lstat as lstat6, readFile as readFile4, realpath } from "node:fs/promises";
 import {
   isAbsolute as isAbsolute3,
-  relative as relative3,
-  resolve as resolve3
+  relative as relative4,
+  resolve as resolve4
 } from "node:path";
 async function addContextReference(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
   return withTaskLock(paths, taskId, () => addContextReferenceLocked(paths, taskId, input, now));
@@ -1342,7 +1483,7 @@ async function addContextReferenceLocked(paths, taskId, input, now) {
     throw new ValidationError("Context path exceeds the 4096-byte audit metadata limit.");
   }
   const estimatedBytes = await inspectContextFile(paths.repoRoot, normalizedPath);
-  const filename = resolve3(location.directory, "context.jsonl");
+  const filename = resolve4(location.directory, "context.jsonl");
   const references = await readContextReferences(paths.repoRoot, filename);
   if (references.some((reference2) => reference2.path === normalizedPath)) {
     throw new ValidationError(`Context path is already registered for task ${taskId}: ${normalizedPath}`);
@@ -1382,7 +1523,7 @@ async function addContextReferenceLocked(paths, taskId, input, now) {
 async function listContextReferences(paths, taskId) {
   const config = await readConfig(paths);
   const location = await findTask(paths, taskId);
-  const references = await readContextReferences(paths.repoRoot, resolve3(location.directory, "context.jsonl"));
+  const references = await readContextReferences(paths.repoRoot, resolve4(location.directory, "context.jsonl"));
   return {
     references,
     totals: {
@@ -1410,12 +1551,12 @@ function normalizeRepositoryPath2(input) {
   return normalized;
 }
 async function inspectContextFile(repoRoot, repositoryPath) {
-  const candidate = assertInside(repoRoot, resolve3(repoRoot, repositoryPath));
+  const candidate = assertInside(repoRoot, resolve4(repoRoot, repositoryPath));
   const segments = repositoryPath.split("/");
   let current = repoRoot;
   try {
     for (const segment of segments) {
-      current = resolve3(current, segment);
+      current = resolve4(current, segment);
       const entry2 = await lstat6(current);
       if (entry2.isSymbolicLink()) {
         throw new ValidationError(`Context path must not contain symbolic links: ${repositoryPath}`);
@@ -1426,7 +1567,7 @@ async function inspectContextFile(repoRoot, repositoryPath) {
       throw new ValidationError(`Context path must reference a regular file: ${repositoryPath}`);
     }
     const [realRoot, realCandidate] = await Promise.all([realpath(repoRoot), realpath(candidate)]);
-    const difference = relative3(realRoot, realCandidate);
+    const difference = relative4(realRoot, realCandidate);
     if (isAbsolute3(difference) || difference === ".." || difference.startsWith("../")) {
       throw new ValidationError(`Context path resolves outside the repository: ${repositoryPath}`);
     }
@@ -1692,7 +1833,7 @@ function isRecord4(value) {
 
 // src/core/git.ts
 import { execFile } from "node:child_process";
-import { resolve as resolve4 } from "node:path";
+import { resolve as resolve5 } from "node:path";
 import { promisify } from "node:util";
 var execFileAsync = promisify(execFile);
 async function inspectBusinessGitStatus(repoRoot) {
@@ -1702,7 +1843,7 @@ async function inspectBusinessGitStatus(repoRoot) {
       cwd: repoRoot,
       encoding: "utf8"
     });
-    if (resolve4(topLevel.stdout.trim()) !== resolve4(repoRoot)) {
+    if (resolve5(topLevel.stdout.trim()) !== resolve5(repoRoot)) {
       return {
         gitUnavailable: true,
         businessDirtyPaths: [],
@@ -2098,29 +2239,56 @@ async function addRequirementLike(paths, taskId, input, collection, eventType, n
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
   const id = input.id.trim();
-  const allRequirements = [...location.task.requirements, ...location.task.acceptanceCriteria];
-  if (allRequirements.some((requirement2) => requirement2.id === id)) {
-    throw new ValidationError(`Requirement ID already exists in task ${taskId}: ${id}`);
-  }
-  const timestamp = now().toISOString();
-  const requirement = {
-    schemaVersion: SCHEMA_VERSION,
-    id,
-    text: input.text.trim(),
-    createdAt: timestamp
-  };
-  const task = {
-    ...location.task,
-    [collection]: [...location.task[collection], requirement],
-    updatedAt: timestamp
-  };
-  return (await persistTaskMutation(paths, location, task, {
-    schemaVersion: SCHEMA_VERSION,
-    type: eventType,
-    timestamp,
-    actor: input.actor.trim(),
-    requirementId: id
-  })).task;
+  const actor = input.actor.trim();
+  await executeTaskMutation(paths, location, {
+    mutationKind: eventType,
+    actor,
+    timestamp: now().toISOString(),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: eventType,
+      actor,
+      requirementId: id
+    })
+  }, async (timestamp, recovering) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const allRequirements = [...current.task.requirements, ...current.task.acceptanceCriteria];
+    if (allRequirements.some((requirement2) => requirement2.id === id)) {
+      if (recovering) {
+        throw new SchemaError(`Pending ${eventType} mutation already has requirement ${id}, but task.json does not match its recorded target.`);
+      }
+      throw new ValidationError(`Requirement ID already exists in task ${taskId}: ${id}`);
+    }
+    const requirement = {
+      schemaVersion: SCHEMA_VERSION,
+      id,
+      text: input.text.trim(),
+      createdAt: timestamp
+    };
+    const task = {
+      ...current.task,
+      [collection]: [...current.task[collection], requirement],
+      updatedAt: timestamp
+    };
+    return {
+      expected: mutationTargetSummary(paths, [{
+        filename: join6(current.directory, "task.json"),
+        contents: `${JSON.stringify(task, null, 2)}
+`
+      }], mutationValueIdentity({ requirementId: id }, requirement)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: eventType,
+        mutationKind: eventType,
+        timestamp,
+        actor,
+        requirementId: id
+      },
+      apply: () => writeJsonAtomic(join6(current.directory, "task.json"), task, paths.repoRoot)
+    };
+  });
+  return (await findTask(paths, taskId)).task;
 }
 async function setTaskDocument(paths, taskId, sourceFile, artifact, actor, now) {
   return withTaskLock(paths, taskId, () => setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor, now));
@@ -2131,7 +2299,7 @@ async function setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor,
   assertBoundedNonempty2(actor, "Task document actor", 200);
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
-  const filename = isAbsolute4(sourceFile) ? sourceFile : resolve5(paths.repoRoot, sourceFile);
+  const filename = isAbsolute4(sourceFile) ? sourceFile : resolve6(paths.repoRoot, sourceFile);
   let entry;
   try {
     entry = await lstat7(filename);
@@ -2478,7 +2646,7 @@ import { promisify as promisify3 } from "node:util";
 
 // src/core/task-locks.ts
 import { lstat as lstat8, readFile as readFile7, readdir as readdir2 } from "node:fs/promises";
-import { basename as basename3, join as join7, relative as relative4 } from "node:path";
+import { basename as basename3, join as join7, relative as relative5 } from "node:path";
 var TASK_LOCK_FILENAME = /^(t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*)\.lock$/;
 async function inspectTaskLocks(paths) {
   const locksDirectory = join7(paths.runtime, "task-locks");
@@ -2537,7 +2705,7 @@ async function inspectTaskLockOwner(paths, ownerPath) {
   }
 }
 function taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, status, owner) {
-  const path = relative4(paths.repoRoot, directory).split("\\").join("/");
+  const path = relative5(paths.repoRoot, directory).split("\\").join("/");
   return {
     path,
     taskId,
@@ -2640,32 +2808,58 @@ async function proposeLearningLocked(paths, taskId, input, now) {
     MAX_RATIONALE_CHARACTERS
   );
   const actor = boundedNonempty3(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
-  const existing = taskLearningCandidates(location);
-  if (existing.some((candidate2) => candidate2.id === id)) {
-    throw new ValidationError(`Learning candidate ID already exists in task ${taskId}: ${id}`);
-  }
-  const timestamp = timestampFrom(now);
-  const candidate = {
-    schemaVersion: SCHEMA_VERSION,
-    id,
-    domain,
-    text,
-    rationale,
-    status: "proposed",
-    proposedAt: timestamp
-  };
-  const task = {
-    ...location.task,
-    learningCandidates: [...existing, candidate],
-    updatedAt: timestamp
-  };
-  return (await persistTaskMutation(paths, location, task, {
-    schemaVersion: SCHEMA_VERSION,
-    type: "learning_proposed",
-    timestamp,
+  await executeTaskMutation(paths, location, {
+    mutationKind: "learning_proposed",
     actor,
-    learningCandidateId: id
-  })).task;
+    timestamp: timestampFrom(now),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: "learning_proposed",
+      actor,
+      learningCandidateId: id
+    })
+  }, async (timestamp, recovering) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const existing = taskLearningCandidates(current);
+    if (existing.some((candidate2) => candidate2.id === id)) {
+      if (recovering) {
+        throw new SchemaError(`Pending learning proposal ${id} already exists in task.json, but does not match its recorded target.`);
+      }
+      throw new ValidationError(`Learning candidate ID already exists in task ${taskId}: ${id}`);
+    }
+    const candidate = {
+      schemaVersion: SCHEMA_VERSION,
+      id,
+      domain,
+      text,
+      rationale,
+      status: "proposed",
+      proposedAt: timestamp
+    };
+    const task = {
+      ...current.task,
+      learningCandidates: [...existing, candidate],
+      updatedAt: timestamp
+    };
+    return {
+      expected: mutationTargetSummary(paths, [{
+        filename: join8(current.directory, "task.json"),
+        contents: `${JSON.stringify(task, null, 2)}
+`
+      }], mutationValueIdentity({ learningCandidateId: id }, candidate)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: "learning_proposed",
+        mutationKind: "learning_proposed",
+        timestamp,
+        actor,
+        learningCandidateId: id
+      },
+      apply: () => writeJsonAtomic(join8(current.directory, "task.json"), task, paths.repoRoot)
+    };
+  });
+  return (await findTask(paths, taskId)).task;
 }
 async function acceptLearning(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
   await readConfig(paths);
@@ -2766,27 +2960,50 @@ async function archiveLearningLocked(paths, taskId, input, now) {
   const id = boundedNonempty3(input.id, "Learning candidate ID", MAX_ID_CHARACTERS);
   const reason = boundedNonempty3(input.reason, "Learning archive reason", MAX_REASON_CHARACTERS);
   const actor = boundedNonempty3(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
-  const candidates = taskLearningCandidates(location);
-  const candidate = requireProposedCandidate(candidates, taskId, id);
-  const timestamp = timestampFrom(now);
-  const archived = {
-    ...candidate,
-    status: "archived",
-    archivedAt: timestamp,
-    archiveReason: reason
-  };
-  const task = {
-    ...location.task,
-    learningCandidates: replaceCandidate(candidates, archived),
-    updatedAt: timestamp
-  };
-  return (await persistTaskMutation(paths, location, task, {
-    schemaVersion: SCHEMA_VERSION,
-    type: "learning_archived",
-    timestamp,
+  await executeTaskMutation(paths, location, {
+    mutationKind: "learning_archived",
     actor,
-    learningCandidateId: id
-  })).task;
+    timestamp: timestampFrom(now),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: "learning_archived",
+      actor,
+      learningCandidateId: id
+    })
+  }, async (timestamp) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const candidates = taskLearningCandidates(current);
+    const candidate = requireProposedCandidate(candidates, taskId, id);
+    const archived = {
+      ...candidate,
+      status: "archived",
+      archivedAt: timestamp,
+      archiveReason: reason
+    };
+    const task = {
+      ...current.task,
+      learningCandidates: replaceCandidate(candidates, archived),
+      updatedAt: timestamp
+    };
+    return {
+      expected: mutationTargetSummary(paths, [{
+        filename: join8(current.directory, "task.json"),
+        contents: `${JSON.stringify(task, null, 2)}
+`
+      }], mutationValueIdentity({ learningCandidateId: id }, archived)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: "learning_archived",
+        mutationKind: "learning_archived",
+        timestamp,
+        actor,
+        learningCandidateId: id
+      },
+      apply: () => writeJsonAtomic(join8(current.directory, "task.json"), task, paths.repoRoot)
+    };
+  });
+  return (await findTask(paths, taskId)).task;
 }
 function taskLearningCandidates(location) {
   const candidates = location.task.learningCandidates;
@@ -3092,8 +3309,8 @@ async function cleanupOwnedLock(directory, ownerPath) {
   return failures;
 }
 function delay2(milliseconds) {
-  return new Promise((resolve7) => {
-    setTimeout(resolve7, milliseconds);
+  return new Promise((resolve8) => {
+    setTimeout(resolve8, milliseconds);
   });
 }
 function errorMessage(error) {
@@ -3112,8 +3329,9 @@ function isRecord7(value) {
 }
 
 // src/core/validate.ts
+import { createHash as createHash2 } from "node:crypto";
 import { lstat as lstat11, readFile as readFile9, readdir as readdir4 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5, join as join9, relative as relative5, resolve as resolve6 } from "node:path";
+import { isAbsolute as isAbsolute5, join as join9, relative as relative6, resolve as resolve7 } from "node:path";
 var REQUIRED_TASK_ARTIFACTS = [
   "brief.md",
   "plan.md",
@@ -3376,7 +3594,7 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
   }
   await validateContextManifest(paths, join9(directory, "context.jsonl"), limits, add);
   const evidence = await validateEvidenceArtifact(join9(directory, "evidence.jsonl"), add);
-  await validateJournalArtifact(join9(directory, "journal.md"), task, add);
+  await validateJournalArtifact(paths, join9(directory, "journal.md"), task, add);
   await validateCheckArtifact(paths, join9(directory, "check.md"), task, evidence, add);
 }
 async function validateContextManifest(paths, filename, limits, add) {
@@ -3449,7 +3667,7 @@ async function validateContextPath(paths, manifest, repositoryPath, lineNumber, 
       return;
     }
   }
-  if (await entryKind(resolve6(paths.repoRoot, normalized)) !== "file") {
+  if (await entryKind(resolve7(paths.repoRoot, normalized)) !== "file") {
     add("CONTEXT_PATH_INVALID", manifest, `Line ${lineNumber} must reference a regular file: ${normalized}.`);
   }
 }
@@ -3484,7 +3702,7 @@ async function validateEvidenceArtifact(filename, add) {
   }
   return records;
 }
-async function validateJournalArtifact(filename, task, add) {
+async function validateJournalArtifact(paths, filename, task, add) {
   const contents = await readOptionalRegularFile(filename, "JOURNAL", add);
   if (contents === null) return;
   if (contents.trim() === "") {
@@ -3498,6 +3716,9 @@ async function validateJournalArtifact(filename, task, add) {
   let replayIsValid = true;
   let lastTransition = null;
   let lastValidEventType = null;
+  const pendingMutationIntents = /* @__PURE__ */ new Map();
+  const committedMutationIntents = [];
+  const latestLearningMutationOperation = /* @__PURE__ */ new Map();
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
     if (value === null) continue;
@@ -3514,6 +3735,28 @@ async function validateJournalArtifact(filename, task, add) {
       continue;
     }
     lastValidEventType = value.type;
+    if (value.type === "mutation_intent") {
+      const operationId = value.operationId;
+      if (pendingMutationIntents.has(operationId)) {
+        add("MUTATION_INTENT_DUPLICATE", filename, `Line ${lineNumber} duplicates pending mutation intent ${operationId}.`);
+      } else {
+        pendingMutationIntents.set(operationId, value);
+      }
+    } else if (isMutationCompletionEvent(value)) {
+      const operationId = value.operationId;
+      const intent = pendingMutationIntents.get(operationId);
+      if (intent !== void 0) {
+        if (!matchesMutationCompletion(intent, value)) {
+          add("MUTATION_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match mutation intent ${operationId}.`);
+        } else {
+          pendingMutationIntents.delete(operationId);
+          committedMutationIntents.push(intent);
+        }
+      }
+      if (String(value.type).startsWith("learning_") && typeof value.learningCandidateId === "string") {
+        latestLearningMutationOperation.set(value.learningCandidateId, operationId);
+      }
+    }
     if (value.type === "created") {
       creationCount += 1;
       if (!firstEvent) {
@@ -3556,7 +3799,7 @@ async function validateJournalArtifact(filename, task, add) {
         replayIsValid = false;
       }
     }
-    if (typeof value.operationId === "string") {
+    if (typeof value.operationId === "string" && value.type !== "mutation_intent") {
       if (operationIds.has(value.operationId)) {
         add("JOURNAL_OPERATION_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${value.operationId}.`);
       } else {
@@ -3578,6 +3821,109 @@ async function validateJournalArtifact(filename, task, add) {
       `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`
     );
   }
+  for (const intent of pendingMutationIntents.values()) {
+    add(
+      "MUTATION_INTENT_UNCOMMITTED",
+      filename,
+      `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`
+    );
+  }
+  const latestIntentByFile = /* @__PURE__ */ new Map();
+  const latestIntentBySemanticIdentity = /* @__PURE__ */ new Map();
+  for (const intent of committedMutationIntents) {
+    latestIntentBySemanticIdentity.set(mutationSemanticIdentityKey(intent), intent);
+    const expected = intent.expected;
+    if (!isMutationTargetSummary2(expected)) continue;
+    for (const target of expected.files) {
+      const path = target.path;
+      if (!path.endsWith("/task.json")) latestIntentByFile.set(path, intent);
+    }
+  }
+  for (const intent of latestIntentBySemanticIdentity.values()) {
+    if (isSupersededLearningMutation(intent, latestLearningMutationOperation)) continue;
+    if (!semanticMutationTargetMatches(task, intent)) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its expected managed target identity.`
+      );
+    }
+  }
+  for (const intent of latestIntentByFile.values()) {
+    if (!await mutationFilesMatch(paths, intent.expected)) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its latest expected managed files.`
+      );
+    }
+  }
+}
+function isSupersededLearningMutation(intent, latestLearningMutationOperation) {
+  const expected = intent.expected;
+  if (!isMutationTargetSummary2(expected) || !String(intent.mutationKind).startsWith("learning_")) return false;
+  const id = expected.identity.learningCandidateId;
+  return typeof id === "string" && latestLearningMutationOperation.get(id) !== intent.operationId;
+}
+function mutationSemanticIdentityKey(intent) {
+  const expected = intent.expected;
+  if (!isMutationTargetSummary2(expected)) return `operation:${String(intent.operationId)}`;
+  const identity = expected.identity;
+  const mutationKind = String(intent.mutationKind);
+  if (mutationKind.startsWith("learning_") && typeof identity.learningCandidateId === "string") {
+    return `learning:${identity.learningCandidateId}`;
+  }
+  if (typeof identity.requirementId === "string") {
+    return `${mutationKind}:${identity.requirementId}`;
+  }
+  return `operation:${String(intent.operationId)}`;
+}
+async function mutationFilesMatch(paths, expected) {
+  if (!isMutationTargetSummary2(expected)) return false;
+  for (const target of expected.files) {
+    const path = target.path;
+    if (path.endsWith("/task.json")) continue;
+    if (!isManagedMutationTarget2(path)) return false;
+    const filename = resolve7(paths.repoRoot, path);
+    if (await entryKind(filename) !== "file") return false;
+    try {
+      const contents = await readFile9(filename);
+      if (createHash2("sha256").update(contents).digest("hex") !== target.sha256) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+function semanticMutationTargetMatches(task, intent) {
+  const expected = intent.expected;
+  if (task === null || !isMutationTargetSummary2(expected)) return false;
+  const identity = expected.identity;
+  const mutationKind = intent.mutationKind;
+  if (mutationKind === "requirement_added" || mutationKind === "acceptance_criterion_added") {
+    const collection = mutationKind === "requirement_added" ? task.requirements : task.acceptanceCriteria;
+    const requirement = Array.isArray(collection) ? collection.find((item) => isRecord8(item) && item.id === identity.requirementId) : void 0;
+    return requirement !== void 0 && mutationIdentityValueMatches(requirement, identity);
+  }
+  if (mutationKind === "learning_proposed") {
+    return hasLearningCandidate(task, identity, "proposed");
+  }
+  if (mutationKind === "learning_archived") {
+    return hasLearningCandidate(task, identity, "archived");
+  }
+  if (mutationKind === "learning_accepted") {
+    return hasLearningCandidate(task, identity, "accepted");
+  }
+  return true;
+}
+function hasLearningCandidate(task, identity, status) {
+  if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return false;
+  const candidate = task.learningCandidates.find((item) => isRecord8(item) && item.id === identity.learningCandidateId && item.status === status);
+  return candidate !== void 0 && mutationIdentityValueMatches(candidate, identity);
+}
+function mutationIdentityValueMatches(value, identity) {
+  if (identity.valueSha256 === void 0) return true;
+  return typeof identity.valueSha256 === "string" && /^[a-f0-9]{64}$/u.test(identity.valueSha256) && createHash2("sha256").update(stableJson2(value)).digest("hex") === identity.valueSha256;
 }
 async function validateCheckArtifact(paths, filename, task, evidence, add) {
   const contents = await readOptionalRegularFile(filename, "CHECK", add);
@@ -3741,6 +4087,19 @@ function isJournalEvent(value) {
       "newStatus"
     ]) && isNonemptyString(value.operationId) && isNonemptyString(value.reason) && ALL_STATUSES.has(String(value.oldStatus)) && ALL_STATUSES.has(String(value.newStatus));
   }
+  if (value.type === "mutation_intent") {
+    return hasOnlyKeys(value, [
+      "schemaVersion",
+      "type",
+      "operationId",
+      "timestamp",
+      "actor",
+      "mutationKind",
+      "fingerprint",
+      "expected",
+      "completion"
+    ]) && isNonemptyString(value.operationId) && isMutationKind(value.mutationKind) && /^[a-f0-9]{64}$/u.test(String(value.fingerprint)) && isMutationTargetSummary2(value.expected) && isMutationCompletion(value.completion, value.operationId, value.mutationKind);
+  }
   if (value.type === "continued") {
     return hasOnlyKeys(value, [
       "schemaVersion",
@@ -3758,12 +4117,13 @@ function isJournalEvent(value) {
     return hasOnlyKeys(value, [
       "schemaVersion",
       "type",
+      "mutationKind",
       "operationId",
       "timestamp",
       "actor",
       "requirementId",
       "result"
-    ]) && isNonemptyString(value.operationId) && isNonemptyString(value.requirementId) && ["pass", "fail", "uncovered"].includes(String(value.result));
+    ]) && isNonemptyString(value.operationId) && (value.mutationKind === void 0 || value.mutationKind === value.type) && isNonemptyString(value.requirementId) && ["pass", "fail", "uncovered"].includes(String(value.result));
   }
   if (!TASK_MUTATION_KINDS.has(value.type)) return false;
   if (value.mutationKind !== value.type || !isNonemptyString(value.operationId)) {
@@ -3847,6 +4207,47 @@ function isJournalEvent(value) {
     "learningCandidateId"
   ]) && isNonemptyString(value.learningCandidateId);
 }
+function isMutationCompletionEvent(value) {
+  return typeof value.type === "string" && (value.type === "check_recorded" || value.type === "check_updated" || TASK_MUTATION_KINDS.has(value.type));
+}
+function isMutationKind(value) {
+  return typeof value === "string" && (TASK_MUTATION_KINDS.has(value) || value === "check_recorded" || value === "check_updated");
+}
+function isMutationTargetSummary2(value) {
+  if (!isRecord8(value) || !hasOnlyKeys(value, ["identity", "files"]) || !isRecord8(value.identity) || !Array.isArray(value.files)) {
+    return false;
+  }
+  if (Object.values(value.identity).some((item) => typeof item !== "string" || item.trim() === "")) return false;
+  const paths = /* @__PURE__ */ new Set();
+  return value.files.length > 0 && value.files.every((target) => {
+    if (!isRecord8(target) || !hasOnlyKeys(target, ["path", "sha256"]) || !isNonemptyString(target.path) || !/^[a-f0-9]{64}$/u.test(String(target.sha256)) || paths.has(target.path)) {
+      return false;
+    }
+    paths.add(target.path);
+    return true;
+  });
+}
+function isMutationCompletion(value, operationId, mutationKind) {
+  if (!isRecord8(value) || value.type !== mutationKind) return false;
+  return isJournalEvent({ ...value, operationId }) && value.operationId === void 0;
+}
+function matchesMutationCompletion(intent, completion) {
+  const expected = intent.completion;
+  if (!isRecord8(expected)) return false;
+  const actual = { ...completion };
+  delete actual.operationId;
+  return stableJson2(expected) === stableJson2(actual);
+}
+function isManagedMutationTarget2(path) {
+  return /^\.vinea\/tasks\/(?:active|archive)\/t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*\/(?:task\.json|brief\.md|plan\.md|context\.jsonl|evidence\.jsonl|check\.md)$/u.test(path) || path === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(path);
+}
+function stableJson2(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson2).join(",")}]`;
+  if (isRecord8(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson2(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
 function hasOnlyKeys(value, allowed) {
   return Object.keys(value).every((key) => allowed.includes(key));
 }
@@ -3923,7 +4324,7 @@ async function entryKind(path) {
   }
 }
 function displayPath(paths, filename) {
-  const value = relative5(paths.repoRoot, filename).split("\\").join("/");
+  const value = relative6(paths.repoRoot, filename).split("\\").join("/");
   return value === "" ? "." : value;
 }
 function sortIssues(issues) {

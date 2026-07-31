@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { parseCheckDocument } from "./check.js";
@@ -347,7 +348,7 @@ async function validateTaskDirectory(
 
   await validateContextManifest(paths, join(directory, "context.jsonl"), limits, add);
   const evidence = await validateEvidenceArtifact(join(directory, "evidence.jsonl"), add);
-  await validateJournalArtifact(join(directory, "journal.md"), task, add);
+  await validateJournalArtifact(paths, join(directory, "journal.md"), task, add);
   await validateCheckArtifact(paths, join(directory, "check.md"), task, evidence, add);
 }
 
@@ -481,6 +482,7 @@ async function validateEvidenceArtifact(filename: string, add: IssueAdder): Prom
 }
 
 async function validateJournalArtifact(
+  paths: VineaPaths,
   filename: string,
   task: Record<string, unknown> | null,
   add: IssueAdder,
@@ -498,6 +500,9 @@ async function validateJournalArtifact(
   let replayIsValid = true;
   let lastTransition: { oldStatus: TaskStatus; newStatus: TaskStatus } | null = null;
   let lastValidEventType: string | null = null;
+  const pendingMutationIntents = new Map<string, Record<string, unknown>>();
+  const committedMutationIntents: Record<string, unknown>[] = [];
+  const latestLearningMutationOperation = new Map<string, string>();
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
     if (value === null) continue;
@@ -514,6 +519,28 @@ async function validateJournalArtifact(
       continue;
     }
     lastValidEventType = value.type;
+    if (value.type === "mutation_intent") {
+      const operationId = value.operationId as string;
+      if (pendingMutationIntents.has(operationId)) {
+        add("MUTATION_INTENT_DUPLICATE", filename, `Line ${lineNumber} duplicates pending mutation intent ${operationId}.`);
+      } else {
+        pendingMutationIntents.set(operationId, value);
+      }
+    } else if (isMutationCompletionEvent(value)) {
+      const operationId = value.operationId as string;
+      const intent = pendingMutationIntents.get(operationId);
+      if (intent !== undefined) {
+        if (!matchesMutationCompletion(intent, value)) {
+          add("MUTATION_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match mutation intent ${operationId}.`);
+        } else {
+          pendingMutationIntents.delete(operationId);
+          committedMutationIntents.push(intent);
+        }
+      }
+      if (String(value.type).startsWith("learning_") && typeof value.learningCandidateId === "string") {
+        latestLearningMutationOperation.set(value.learningCandidateId, operationId);
+      }
+    }
     if (value.type === "created") {
       creationCount += 1;
       if (!firstEvent) {
@@ -556,7 +583,10 @@ async function validateJournalArtifact(
         replayIsValid = false;
       }
     }
-    if (typeof value.operationId === "string") {
+    // A mutation intent and its semantic completion deliberately share one
+    // operation ID. The completion is the unique operation record; only it
+    // participates in the legacy duplicate-ID check.
+    if (typeof value.operationId === "string" && value.type !== "mutation_intent") {
       if (operationIds.has(value.operationId)) {
         add("JOURNAL_OPERATION_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${value.operationId}.`);
       } else {
@@ -590,6 +620,124 @@ async function validateJournalArtifact(
       `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`,
     );
   }
+  for (const intent of pendingMutationIntents.values()) {
+    add(
+      "MUTATION_INTENT_UNCOMMITTED",
+      filename,
+      `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`,
+    );
+  }
+  const latestIntentByFile = new Map<string, Record<string, unknown>>();
+  const latestIntentBySemanticIdentity = new Map<string, Record<string, unknown>>();
+  for (const intent of committedMutationIntents) {
+    latestIntentBySemanticIdentity.set(mutationSemanticIdentityKey(intent), intent);
+    const expected = intent.expected as Record<string, unknown>;
+    if (!isMutationTargetSummary(expected)) continue;
+    for (const target of expected.files as Array<Record<string, unknown>>) {
+      const path = target.path as string;
+      if (!path.endsWith("/task.json")) latestIntentByFile.set(path, intent);
+    }
+  }
+  for (const intent of latestIntentBySemanticIdentity.values()) {
+    if (isSupersededLearningMutation(intent, latestLearningMutationOperation)) continue;
+    if (!semanticMutationTargetMatches(task, intent)) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its expected managed target identity.`,
+      );
+    }
+  }
+  for (const intent of latestIntentByFile.values()) {
+    if (!await mutationFilesMatch(paths, intent.expected as Record<string, unknown>)) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its latest expected managed files.`,
+      );
+    }
+  }
+}
+
+function isSupersededLearningMutation(
+  intent: Record<string, unknown>,
+  latestLearningMutationOperation: ReadonlyMap<string, string>,
+): boolean {
+  const expected = intent.expected;
+  if (!isMutationTargetSummary(expected) || !String(intent.mutationKind).startsWith("learning_")) return false;
+  const id = (expected.identity as Record<string, unknown>).learningCandidateId;
+  return typeof id === "string" && latestLearningMutationOperation.get(id) !== intent.operationId;
+}
+
+function mutationSemanticIdentityKey(intent: Record<string, unknown>): string {
+  const expected = intent.expected;
+  if (!isMutationTargetSummary(expected)) return `operation:${String(intent.operationId)}`;
+  const identity = expected.identity as Record<string, unknown>;
+  const mutationKind = String(intent.mutationKind);
+  if (mutationKind.startsWith("learning_") && typeof identity.learningCandidateId === "string") {
+    return `learning:${identity.learningCandidateId}`;
+  }
+  if (typeof identity.requirementId === "string") {
+    return `${mutationKind}:${identity.requirementId}`;
+  }
+  return `operation:${String(intent.operationId)}`;
+}
+
+async function mutationFilesMatch(paths: VineaPaths, expected: Record<string, unknown>): Promise<boolean> {
+  if (!isMutationTargetSummary(expected)) return false;
+  for (const target of expected.files as Array<Record<string, unknown>>) {
+    const path = target.path as string;
+    if (path.endsWith("/task.json")) continue;
+    if (!isManagedMutationTarget(path)) return false;
+    const filename = resolve(paths.repoRoot, path);
+    if (await entryKind(filename) !== "file") return false;
+    try {
+      const contents = await readFile(filename);
+      if (createHash("sha256").update(contents).digest("hex") !== target.sha256) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function semanticMutationTargetMatches(task: Record<string, unknown> | null, intent: Record<string, unknown>): boolean {
+  const expected = intent.expected;
+  if (task === null || !isMutationTargetSummary(expected)) return false;
+  const identity = expected.identity as Record<string, unknown>;
+  const mutationKind = intent.mutationKind;
+  if (mutationKind === "requirement_added" || mutationKind === "acceptance_criterion_added") {
+    const collection = mutationKind === "requirement_added" ? task.requirements : task.acceptanceCriteria;
+    const requirement = Array.isArray(collection)
+      ? collection.find((item) => isRecord(item) && item.id === identity.requirementId)
+      : undefined;
+    return requirement !== undefined && mutationIdentityValueMatches(requirement, identity);
+  }
+  if (mutationKind === "learning_proposed") {
+    return hasLearningCandidate(task, identity, "proposed");
+  }
+  if (mutationKind === "learning_archived") {
+    return hasLearningCandidate(task, identity, "archived");
+  }
+  if (mutationKind === "learning_accepted") {
+    return hasLearningCandidate(task, identity, "accepted");
+  }
+  return true;
+}
+
+function hasLearningCandidate(task: Record<string, unknown>, identity: Record<string, unknown>, status: string): boolean {
+  if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return false;
+  const candidate = task.learningCandidates.find((item) => isRecord(item)
+    && item.id === identity.learningCandidateId
+    && item.status === status);
+  return candidate !== undefined && mutationIdentityValueMatches(candidate, identity);
+}
+
+function mutationIdentityValueMatches(value: unknown, identity: Record<string, unknown>): boolean {
+  if (identity.valueSha256 === undefined) return true;
+  return typeof identity.valueSha256 === "string"
+    && /^[a-f0-9]{64}$/u.test(identity.valueSha256)
+    && createHash("sha256").update(stableJson(value)).digest("hex") === identity.valueSha256;
 }
 
 async function validateCheckArtifact(
@@ -826,6 +974,16 @@ function isJournalEvent(value: unknown): value is Record<string, unknown> & { ty
       && ALL_STATUSES.has(String(value.oldStatus))
       && ALL_STATUSES.has(String(value.newStatus));
   }
+  if (value.type === "mutation_intent") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "operationId", "timestamp", "actor", "mutationKind", "fingerprint", "expected", "completion",
+    ])
+      && isNonemptyString(value.operationId)
+      && isMutationKind(value.mutationKind)
+      && /^[a-f0-9]{64}$/u.test(String(value.fingerprint))
+      && isMutationTargetSummary(value.expected)
+      && isMutationCompletion(value.completion, value.operationId, value.mutationKind);
+  }
   if (value.type === "continued") {
     return hasOnlyKeys(value, [
       "schemaVersion", "type", "timestamp", "actor", "confirmation", "host", "sessionBound", "started", "status",
@@ -838,9 +996,10 @@ function isJournalEvent(value: unknown): value is Record<string, unknown> & { ty
   }
   if (value.type === "check_recorded" || value.type === "check_updated") {
     return hasOnlyKeys(value, [
-      "schemaVersion", "type", "operationId", "timestamp", "actor", "requirementId", "result",
+      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "requirementId", "result",
     ])
       && isNonemptyString(value.operationId)
+      && (value.mutationKind === undefined || value.mutationKind === value.type)
       && isNonemptyString(value.requirementId)
       && ["pass", "fail", "uncovered"].includes(String(value.result));
   }
@@ -883,6 +1042,67 @@ function isJournalEvent(value: unknown): value is Record<string, unknown> & { ty
   return hasOnlyKeys(value, [
     "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "learningCandidateId",
   ]) && isNonemptyString(value.learningCandidateId);
+}
+
+function isMutationCompletionEvent(value: Record<string, unknown>): boolean {
+  return typeof value.type === "string"
+    && (value.type === "check_recorded"
+    || value.type === "check_updated"
+    || TASK_MUTATION_KINDS.has(value.type));
+}
+
+function isMutationKind(value: unknown): boolean {
+  return typeof value === "string" && (TASK_MUTATION_KINDS.has(value) || value === "check_recorded" || value === "check_updated");
+}
+
+function isMutationTargetSummary(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["identity", "files"]) || !isRecord(value.identity) || !Array.isArray(value.files)) {
+    return false;
+  }
+  if (Object.values(value.identity).some((item) => typeof item !== "string" || item.trim() === "")) return false;
+  const paths = new Set<string>();
+  return value.files.length > 0 && value.files.every((target) => {
+    if (!isRecord(target)
+      || !hasOnlyKeys(target, ["path", "sha256"])
+      || !isNonemptyString(target.path)
+      || !/^[a-f0-9]{64}$/u.test(String(target.sha256))
+      || paths.has(target.path)) {
+      return false;
+    }
+    paths.add(target.path);
+    return true;
+  });
+}
+
+function isMutationCompletion(
+  value: unknown,
+  operationId: unknown,
+  mutationKind: unknown,
+): boolean {
+  if (!isRecord(value) || value.type !== mutationKind) return false;
+  return isJournalEvent({ ...value, operationId }) && value.operationId === undefined;
+}
+
+function matchesMutationCompletion(intent: Record<string, unknown>, completion: Record<string, unknown>): boolean {
+  const expected = intent.completion;
+  if (!isRecord(expected)) return false;
+  const actual = { ...completion };
+  delete actual.operationId;
+  return stableJson(expected) === stableJson(actual);
+}
+
+function isManagedMutationTarget(path: string): boolean {
+  return /^\.vinea\/tasks\/(?:active|archive)\/t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*\/(?:task\.json|brief\.md|plan\.md|context\.jsonl|evidence\.jsonl|check\.md)$/u.test(path)
+    || path === ".vinea/specs/index.md"
+    || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(path);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {

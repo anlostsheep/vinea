@@ -1,4 +1,5 @@
 import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
@@ -6,10 +7,17 @@ import { recordEvidence } from "../../src/core/evidence.js";
 import { SchemaError } from "../../src/core/errors.js";
 import { appendJsonl } from "../../src/core/json.js";
 import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
-import { findTask, persistTaskMutation, persistTaskTransition } from "../../src/core/task-store.js";
+import {
+  appendTaskContinuation,
+  findTask,
+  mutationFingerprint,
+  persistTaskMutation,
+  persistTaskTransition,
+} from "../../src/core/task-store.js";
 import { validateWorkspace } from "../../src/core/validate.js";
 import {
   createTask,
+  addRequirement,
   readTask,
   suggestRisk,
   transitionTask,
@@ -463,6 +471,232 @@ test("task mutation serialization prevents an interleaved pending transition fro
   const intents = (parseJournal(await readFile(join(location.directory, "journal.md"), "utf8")) as Array<Record<string, unknown>>)
     .filter((event) => event.type === "transition_intent" && event.oldStatus === "ready");
   expect(intents).toHaveLength(1);
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+});
+
+test("a failed task.json mutation keeps one recoverable intent and blocks unrelated journal writes", async () => {
+  const { task, directory } = await createReadyTask();
+  const location = await findTask(paths, task.id);
+  const timestamp = "2026-07-31T08:11:00.000Z";
+  const mutated: TaskRecord = {
+    ...location.task,
+    requirements: [...location.task.requirements, {
+      schemaVersion: 1,
+      id: "R2",
+      text: "Recover this requirement",
+      createdAt: timestamp,
+    }],
+    updatedAt: timestamp,
+  };
+  const event = {
+    schemaVersion: 1 as const,
+    type: "requirement_added" as const,
+    timestamp,
+    actor: "codex",
+    requirementId: "R2",
+  };
+
+  await expect(persistTaskMutation(paths, location, mutated, event, {
+    createOperationId: () => "op-task-json-retry",
+    writeTask: async () => {
+      throw new SchemaError("Injected task.json failure");
+    },
+  })).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("journal intent remains pending for retry"),
+  });
+  const journalWithPendingIntent = await readFile(join(directory, "journal.md"), "utf8");
+
+  await expect(persistTaskMutation(paths, location, {
+    ...location.task,
+    requirements: [...location.task.requirements, {
+      schemaVersion: 1,
+      id: "R3",
+      text: "A different mutation must wait",
+      createdAt: "2026-07-31T08:12:00.000Z",
+    }],
+    updatedAt: "2026-07-31T08:12:00.000Z",
+  }, {
+    schemaVersion: 1,
+    type: "requirement_added",
+    timestamp: "2026-07-31T08:12:00.000Z",
+    actor: "codex",
+    requirementId: "R3",
+  })).rejects.toMatchObject({ code: "VINEA_TRANSITION_INVALID" });
+
+  await expect(persistTaskTransition(
+    paths,
+    location,
+    { ...location.task, status: "in_progress", updatedAt: "2026-07-31T08:12:00.000Z" },
+    {
+      schemaVersion: 1,
+      timestamp: "2026-07-31T08:12:00.000Z",
+      actor: "codex",
+      reason: "Must not bypass mutation recovery",
+      oldStatus: "ready",
+      newStatus: "in_progress",
+    },
+  )).rejects.toMatchObject({ code: "VINEA_TRANSITION_INVALID" });
+  await expect(appendTaskContinuation(paths, location, {
+    schemaVersion: 1,
+    type: "continued",
+    timestamp: "2026-07-31T08:12:00.000Z",
+    actor: "codex",
+    confirmation: "user",
+    host: "codex",
+    sessionBound: false,
+    started: false,
+    status: "ready",
+  })).rejects.toMatchObject({ code: "VINEA_TRANSITION_INVALID" });
+  expect(await readFile(join(directory, "journal.md"), "utf8")).toBe(journalWithPendingIntent);
+
+  const recovered = await persistTaskMutation(paths, location, mutated, event);
+  expect(recovered.task.requirements.map(({ id }) => id)).toContain("R2");
+  const journal = parseJournal(await readFile(join(directory, "journal.md"), "utf8")) as Array<Record<string, unknown>>;
+  expect(journal.filter((entry) => entry.type === "mutation_intent")).toHaveLength(1);
+  expect(journal.filter((entry) => entry.operationId === "op-task-json-retry")).toHaveLength(2);
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+});
+
+test("requirement retry reuses the pending mutation timestamp after an interrupted task.json write", async () => {
+  const { task } = await createReadyTask();
+  const location = await findTask(paths, task.id);
+  const firstTimestamp = "2026-07-31T08:11:00.000Z";
+  const target: TaskRecord = {
+    ...location.task,
+    requirements: [...location.task.requirements, {
+      schemaVersion: 1,
+      id: "R2",
+      text: "Reuse the original timestamp",
+      createdAt: firstTimestamp,
+    }],
+    updatedAt: firstTimestamp,
+  };
+  const event = {
+    schemaVersion: 1 as const,
+    type: "requirement_added" as const,
+    timestamp: firstTimestamp,
+    actor: "codex",
+    requirementId: "R2",
+  };
+  await expect(persistTaskMutation(paths, location, target, event, {
+    createOperationId: () => "op-requirement-retry",
+    writeTask: async () => { throw new SchemaError("Injected task.json failure"); },
+  })).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
+
+  const recovered = await addRequirement(paths, task.id, {
+    id: "R2",
+    text: "Reuse the original timestamp",
+    actor: "codex",
+  }, () => new Date("2026-07-31T08:12:00.000Z"));
+
+  expect(recovered.requirements.find(({ id }) => id === "R2")).toMatchObject({ createdAt: firstTimestamp });
+  expect(recovered.updatedAt).toBe(firstTimestamp);
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+});
+
+test("task mutation recovery rejects a forged pending intent outside managed targets", async () => {
+  const { task, directory } = await createReadyTask();
+  const location = await findTask(paths, task.id);
+  const timestamp = "2026-07-31T08:11:00.000Z";
+  const target: TaskRecord = {
+    ...location.task,
+    requirements: [...location.task.requirements, {
+      schemaVersion: 1,
+      id: "R2",
+      text: "Reject forged journal targets",
+      createdAt: timestamp,
+    }],
+    updatedAt: timestamp,
+  };
+  const event = {
+    schemaVersion: 1 as const,
+    type: "requirement_added" as const,
+    timestamp,
+    actor: "codex",
+    requirementId: "R2",
+  };
+  const unmanagedTarget = join(paths.repoRoot, "README.md");
+  await writeFile(unmanagedTarget, "outside managed task targets\n", "utf8");
+  const completion = { ...event, mutationKind: "requirement_added" as const };
+  await appendJsonl(join(directory, "journal.md"), {
+    schemaVersion: 1,
+    type: "mutation_intent",
+    operationId: "op-forged-target",
+    timestamp,
+    actor: "codex",
+    mutationKind: "requirement_added",
+    fingerprint: mutationFingerprint({
+      schemaVersion: 1,
+      type: "requirement_added",
+      actor: "codex",
+      requirementId: "R2",
+    }),
+    expected: {
+      identity: { requirementId: "R2", valueSha256: "a".repeat(64) },
+      files: [{
+        path: "README.md",
+        sha256: createHash("sha256").update(await readFile(unmanagedTarget)).digest("hex"),
+      }],
+    },
+    completion,
+  }, paths.repoRoot);
+
+  await expect(persistTaskMutation(paths, location, target, event)).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("no longer matches the requested target"),
+  });
+});
+
+test("task mutation writes an intent before its target and completes it with one operation ID", async () => {
+  const { task, directory } = await createReadyTask();
+  const location = await findTask(paths, task.id);
+  const timestamp = "2026-07-31T08:12:30.000Z";
+  const changed: TaskRecord = {
+    ...location.task,
+    requirements: [...location.task.requirements, {
+      schemaVersion: 1,
+      id: "R2",
+      text: "A durable mutation is traceable.",
+      createdAt: timestamp,
+    }],
+    updatedAt: timestamp,
+  };
+
+  await persistTaskMutation(
+    paths,
+    location,
+    changed,
+    {
+      schemaVersion: 1,
+      type: "requirement_added",
+      timestamp,
+      actor: "codex",
+      requirementId: "R2",
+    },
+    { createOperationId: () => "op-mutation-intent" },
+  );
+
+  const events = parseJournal(await readFile(join(directory, "journal.md"), "utf8")) as Array<Record<string, unknown>>;
+  const intent = events.at(-2)!;
+  const completion = events.at(-1)!;
+  expect(intent).toMatchObject({
+    type: "mutation_intent",
+    operationId: "op-mutation-intent",
+    mutationKind: "requirement_added",
+    fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    expected: {
+      identity: { requirementId: "R2" },
+      files: [{ path: `.vinea/tasks/active/${task.id}/task.json`, sha256: expect.stringMatching(/^[a-f0-9]{64}$/u) }],
+    },
+  });
+  expect(completion).toMatchObject({
+    type: "requirement_added",
+    operationId: "op-mutation-intent",
+    mutationKind: "requirement_added",
+    requirementId: "R2",
+    timestamp,
+  });
   expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
 

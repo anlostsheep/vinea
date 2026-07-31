@@ -87,7 +87,8 @@ test("task mutation commands preserve requirement order, reject duplicate IDs, a
   expect(await readFile(join(taskDirectory, "task.json"), "utf8")).toBe(beforeDuplicate);
 
   const journal = parseJsonl(await readFile(join(taskDirectory, "journal.md"), "utf8"));
-  expect(journal.slice(-5)).toMatchObject([
+  const semanticMutations = journal.filter((event) => event.type !== "mutation_intent");
+  expect(semanticMutations.slice(-5)).toMatchObject([
     {
       type: "requirement_added",
       mutationKind: "requirement_added",
@@ -129,7 +130,7 @@ test("task mutation commands preserve requirement order, reject duplicate IDs, a
       timestamp: expect.any(String),
     },
   ]);
-  expect(journal.slice(-5).every((event) => !("text" in event))).toBe(true);
+  expect(semanticMutations.slice(-5).every((event) => !("text" in event))).toBe(true);
 });
 
 test("context add stores real repository-relative files and list reports cumulative budget without file contents", async () => {

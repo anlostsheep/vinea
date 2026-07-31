@@ -8,8 +8,11 @@ import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import {
   appendTaskMutationIntent,
   assertTaskMutable,
+  executeTaskMutation,
   findTask,
-  persistTaskMutation,
+  mutationFingerprint,
+  mutationTargetSummary,
+  mutationValueIdentity,
   type TaskLocation,
   withTaskLock,
 } from "./task-store.js";
@@ -81,32 +84,57 @@ async function proposeLearningLocked(
     MAX_RATIONALE_CHARACTERS,
   );
   const actor = boundedNonempty(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
-  const existing = taskLearningCandidates(location);
-  if (existing.some((candidate) => candidate.id === id)) {
-    throw new ValidationError(`Learning candidate ID already exists in task ${taskId}: ${id}`);
-  }
-  const timestamp = timestampFrom(now);
-  const candidate: LearningCandidate = {
-    schemaVersion: SCHEMA_VERSION,
-    id,
-    domain,
-    text,
-    rationale,
-    status: "proposed",
-    proposedAt: timestamp,
-  };
-  const task: TaskRecord = {
-    ...location.task,
-    learningCandidates: [...existing, candidate],
-    updatedAt: timestamp,
-  };
-  return (await persistTaskMutation(paths, location, task, {
-    schemaVersion: SCHEMA_VERSION,
-    type: "learning_proposed",
-    timestamp,
+  await executeTaskMutation(paths, location, {
+    mutationKind: "learning_proposed",
     actor,
-    learningCandidateId: id,
-  })).task;
+    timestamp: timestampFrom(now),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: "learning_proposed",
+      actor,
+      learningCandidateId: id,
+    }),
+  }, async (timestamp, recovering) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const existing = taskLearningCandidates(current);
+    if (existing.some((candidate) => candidate.id === id)) {
+      if (recovering) {
+        throw new SchemaError(`Pending learning proposal ${id} already exists in task.json, but does not match its recorded target.`);
+      }
+      throw new ValidationError(`Learning candidate ID already exists in task ${taskId}: ${id}`);
+    }
+    const candidate: LearningCandidate = {
+      schemaVersion: SCHEMA_VERSION,
+      id,
+      domain,
+      text,
+      rationale,
+      status: "proposed",
+      proposedAt: timestamp,
+    };
+    const task: TaskRecord = {
+      ...current.task,
+      learningCandidates: [...existing, candidate],
+      updatedAt: timestamp,
+    };
+    return {
+      expected: mutationTargetSummary(paths, [{
+        filename: join(current.directory, "task.json"),
+        contents: `${JSON.stringify(task, null, 2)}\n`,
+      }], mutationValueIdentity({ learningCandidateId: id }, candidate)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: "learning_proposed",
+        mutationKind: "learning_proposed",
+        timestamp,
+        actor,
+        learningCandidateId: id,
+      },
+      apply: () => writeJsonAtomic(join(current.directory, "task.json"), task, paths.repoRoot),
+    };
+  });
+  return (await findTask(paths, taskId)).task;
 }
 
 export async function acceptLearning(
@@ -237,27 +265,49 @@ async function archiveLearningLocked(
   const id = boundedNonempty(input.id, "Learning candidate ID", MAX_ID_CHARACTERS);
   const reason = boundedNonempty(input.reason, "Learning archive reason", MAX_REASON_CHARACTERS);
   const actor = boundedNonempty(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
-  const candidates = taskLearningCandidates(location);
-  const candidate = requireProposedCandidate(candidates, taskId, id);
-  const timestamp = timestampFrom(now);
-  const archived: LearningCandidate = {
-    ...candidate,
-    status: "archived",
-    archivedAt: timestamp,
-    archiveReason: reason,
-  };
-  const task: TaskRecord = {
-    ...location.task,
-    learningCandidates: replaceCandidate(candidates, archived),
-    updatedAt: timestamp,
-  };
-  return (await persistTaskMutation(paths, location, task, {
-    schemaVersion: SCHEMA_VERSION,
-    type: "learning_archived",
-    timestamp,
+  await executeTaskMutation(paths, location, {
+    mutationKind: "learning_archived",
     actor,
-    learningCandidateId: id,
-  })).task;
+    timestamp: timestampFrom(now),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: "learning_archived",
+      actor,
+      learningCandidateId: id,
+    }),
+  }, async (timestamp) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const candidates = taskLearningCandidates(current);
+    const candidate = requireProposedCandidate(candidates, taskId, id);
+    const archived: LearningCandidate = {
+      ...candidate,
+      status: "archived",
+      archivedAt: timestamp,
+      archiveReason: reason,
+    };
+    const task: TaskRecord = {
+      ...current.task,
+      learningCandidates: replaceCandidate(candidates, archived),
+      updatedAt: timestamp,
+    };
+    return {
+      expected: mutationTargetSummary(paths, [{
+        filename: join(current.directory, "task.json"),
+        contents: `${JSON.stringify(task, null, 2)}\n`,
+      }], mutationValueIdentity({ learningCandidateId: id }, archived)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: "learning_archived",
+        mutationKind: "learning_archived",
+        timestamp,
+        actor,
+        learningCandidateId: id,
+      },
+      apply: () => writeJsonAtomic(join(current.directory, "task.json"), task, paths.repoRoot),
+    };
+  });
+  return (await findTask(paths, taskId)).task;
 }
 
 function taskLearningCandidates(location: TaskLocation): LearningCandidate[] {

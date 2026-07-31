@@ -7,6 +7,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -532,6 +533,146 @@ test("validate preserves the old-status window only for a final transition inten
 
   expect(result.exitCode).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual({ issues: [] });
+});
+
+test("validate distinguishes uncommitted mutation intents from committed events with missing targets", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const task = await createTask(
+    paths,
+    {
+      title: "Mutation intent validation",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T20:10:00.000Z"),
+  );
+  const taskPath = join(task.directory, "task.json");
+  const journalPath = join(task.directory, "journal.md");
+  const timestamp = "2026-07-31T20:10:01.000Z";
+  const expected = {
+    identity: { requirementId: "R1" },
+    files: [{ path: relative(cwd, taskPath).split("\\").join("/"), sha256: "0".repeat(64) }],
+  };
+  const completion = {
+    schemaVersion: 1,
+    type: "requirement_added",
+    mutationKind: "requirement_added",
+    timestamp,
+    actor: "cli",
+    requirementId: "R1",
+  };
+  const original = await readFile(journalPath, "utf8");
+  await writeFile(
+    journalPath,
+    [
+      original.trimEnd(),
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "mutation_intent",
+        operationId: "op-completed-target-missing",
+        timestamp,
+        actor: "cli",
+        mutationKind: "requirement_added",
+        fingerprint: "a".repeat(64),
+        expected,
+        completion,
+      }),
+      JSON.stringify({ ...completion, operationId: "op-completed-target-missing" }),
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "mutation_intent",
+        operationId: "op-uncommitted",
+        timestamp,
+        actor: "cli",
+        mutationKind: "requirement_added",
+        fingerprint: "b".repeat(64),
+        expected,
+        completion,
+      }),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const result = await runCli(["validate", "--json"], cwd);
+  const codes = (JSON.parse(result.stdout) as { issues: Array<{ code: string }> }).issues.map(({ code }) => code);
+
+  expect(result.exitCode).toBe(1);
+  expect(codes).toEqual(expect.arrayContaining([
+    "MUTATION_INTENT_UNCOMMITTED",
+    "MUTATION_TARGET_MISMATCH",
+  ]));
+});
+
+test("validate detects a completed task mutation whose identified value was changed later", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const created = await createTask(paths, {
+    title: "Detect altered mutation value",
+    risk: { level: "low", reasons: [] },
+    qualityMode: "standard",
+    executionMode: "single-agent",
+    confirmation: "user",
+  }, () => new Date("2026-07-31T20:11:00.000Z"));
+  const originalRequirement = {
+    createdAt: "2026-07-31T20:11:01.000Z",
+    id: "R1",
+    schemaVersion: 1,
+    text: "Original durable requirement",
+  };
+  const stored = await readJson<TaskRecord>(join(created.directory, "task.json"));
+  await writeJson(join(created.directory, "task.json"), {
+    ...stored,
+    requirements: [{ ...originalRequirement, text: "Tampered requirement text" }],
+  });
+  const taskPath = join(created.directory, "task.json");
+  const timestamp = "2026-07-31T20:11:01.000Z";
+  const completion = {
+    schemaVersion: 1,
+    type: "requirement_added",
+    mutationKind: "requirement_added",
+    timestamp,
+    actor: "cli",
+    requirementId: "R1",
+  };
+  const journalPath = join(created.directory, "journal.md");
+  const journal = await readFile(journalPath, "utf8");
+  await writeFile(journalPath, [
+    journal.trimEnd(),
+    JSON.stringify({
+      schemaVersion: 1,
+      type: "mutation_intent",
+      operationId: "op-altered-requirement",
+      timestamp,
+      actor: "cli",
+      mutationKind: "requirement_added",
+      fingerprint: "c".repeat(64),
+      expected: {
+        identity: {
+          requirementId: "R1",
+          valueSha256: createHash("sha256").update(JSON.stringify(originalRequirement)).digest("hex"),
+        },
+        files: [{
+          path: relative(cwd, taskPath).split("\\").join("/"),
+          sha256: createHash("sha256").update(await readFile(taskPath)).digest("hex"),
+        }],
+      },
+      completion,
+    }),
+    JSON.stringify({ ...completion, operationId: "op-altered-requirement" }),
+    "",
+  ].join("\n"), "utf8");
+
+  const result = await runCli(["validate", "--json"], cwd);
+  const codes = (JSON.parse(result.stdout) as { issues: Array<{ code: string }> }).issues.map(({ code }) => code);
+
+  expect(result.exitCode).toBe(1);
+  expect(codes).toContain("MUTATION_TARGET_MISMATCH");
 });
 
 async function snapshotFiles(root: string): Promise<Record<string, { contents: string; mtimeMs: number }>> {

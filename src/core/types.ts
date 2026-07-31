@@ -121,11 +121,48 @@ export interface TaskMutationJournalEvent {
   confirmedBy?: "user";
 }
 
+export type MutationKind = TaskMutationKind | "check_recorded" | "check_updated";
+
+export interface MutationTargetSummary {
+  identity: Record<string, string>;
+  files: Array<{
+    path: string;
+    sha256: string;
+  }>;
+}
+
+export interface JournalCheckMutationEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "check_recorded" | "check_updated";
+  mutationKind: "check_recorded" | "check_updated";
+  operationId: string;
+  timestamp: IsoTimestamp;
+  actor: string;
+  requirementId: string;
+  result: CheckRow["result"];
+}
+
+export type MutationCompletionEvent = TaskMutationJournalEvent | JournalCheckMutationEvent;
+
+export interface JournalMutationIntentEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "mutation_intent";
+  operationId: string;
+  timestamp: IsoTimestamp;
+  actor: string;
+  mutationKind: MutationKind;
+  fingerprint: string;
+  expected: MutationTargetSummary;
+  completion: Omit<MutationCompletionEvent, "operationId">;
+}
+
 export type JournalEvent =
   | JournalCreationEvent
   | JournalTransitionIntentEvent
   | JournalContinuationEvent
-  | TaskMutationJournalEvent;
+  | TaskMutationJournalEvent
+  | JournalCheckMutationEvent
+  | JournalMutationIntentEvent;
 
 export interface SessionBinding {
   schemaVersion: typeof SCHEMA_VERSION;

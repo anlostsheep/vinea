@@ -1,10 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rmdir, rm, unlink, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { AmbiguousTaskError, SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
-import { assertNoSymlink, ensureDirectory, type VineaPaths } from "./paths.js";
+import { assertInside, assertNoSymlink, ensureDirectory, type VineaPaths } from "./paths.js";
 import {
   SCHEMA_VERSION,
   type EvidenceRecord,
@@ -13,6 +13,10 @@ import {
   type JournalContinuationEvent,
   type JournalTransitionDetails,
   type JournalTransitionIntentEvent,
+  type JournalMutationIntentEvent,
+  type MutationCompletionEvent,
+  type MutationKind,
+  type MutationTargetSummary,
   type SessionBinding,
   type TaskMutationJournalEvent,
   type TaskRecord,
@@ -26,6 +30,14 @@ const ARTIFACTS = [
   "check.md",
   "journal.md",
 ] as const;
+const MUTATION_TASK_ARTIFACTS = new Set([
+  "task.json",
+  "brief.md",
+  "plan.md",
+  "context.jsonl",
+  "evidence.jsonl",
+  "check.md",
+]);
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const TASK_LOCK_RETRY_MILLISECONDS = 25;
 const TASK_LOCK_TIMEOUT_MILLISECONDS = 5000;
@@ -53,6 +65,12 @@ export interface TransitionPersistenceOperations {
   appendJournal(filename: string, value: unknown, repoRoot: string): Promise<void>;
   moveDirectory(source: string, destination: string): Promise<void>;
   writeTask(filename: string, value: unknown, repoRoot: string): Promise<void>;
+}
+
+export interface PreparedTaskMutation {
+  expected: MutationTargetSummary;
+  completion: Omit<MutationCompletionEvent, "operationId">;
+  apply(): Promise<void>;
 }
 
 const DEFAULT_TRANSITION_OPERATIONS: TransitionPersistenceOperations = {
@@ -159,6 +177,7 @@ async function persistTaskTransitionLocked(
   const destination = shouldMoveToArchive ? join(paths.archivedTasks, task.id) : undefined;
   await assertNoSymlink(paths.repoRoot, journalPath);
   if (destination !== undefined) await assertNoSymlink(paths.repoRoot, destination);
+  await assertNoPendingTaskMutation(paths, location);
   const pending = await readPendingTransitionIntent(paths, journalPath, location.task.status);
   let intent: JournalTransitionIntentEvent;
   if (pending !== null) {
@@ -219,16 +238,284 @@ async function persistTaskMutationLocked(
   operationOverrides: Partial<TransitionPersistenceOperations>,
 ): Promise<TaskLocation> {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
-  await appendTaskMutationIntent(paths, location, event, operations);
-  try {
-    await operations.writeTask(join(location.directory, "task.json"), task, paths.repoRoot);
-  } catch (error) {
-    throw new SchemaError(
-      `Unable to commit task mutation for ${task.id}; journal intent remains pending for retry`,
-      error,
+  const taskPath = join(location.directory, "task.json");
+  const completion: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind"> & { mutationKind: TaskMutationJournalEvent["mutationKind"] } = {
+    ...event,
+    mutationKind: event.type,
+  };
+  await executeTaskMutationLocked(
+    paths,
+    location,
+    {
+      mutationKind: event.type,
+      actor: event.actor,
+      timestamp: event.timestamp,
+      fingerprint: mutationFingerprint(mutationEventRequest(event)),
+    },
+    async () => ({
+      expected: mutationTargetSummary(paths, [{ filename: taskPath, contents: `${JSON.stringify(task, null, 2)}\n` }], taskMutationIdentity(event, task)),
+      completion,
+      apply: async () => {
+        try {
+          await operations.writeTask(taskPath, task, paths.repoRoot);
+        } catch (error) {
+          throw new SchemaError(
+            `Unable to commit task mutation for ${task.id}; journal intent remains pending for retry`,
+            error,
+          );
+        }
+      },
+    }),
+    operations,
+  );
+  return { ...location, task };
+}
+
+export async function executeTaskMutation(
+  paths: VineaPaths,
+  location: TaskLocation,
+  request: {
+    mutationKind: MutationKind;
+    actor: string;
+    timestamp: string;
+    fingerprint: string;
+  },
+  prepare: (timestamp: string, recovering: boolean) => Promise<PreparedTaskMutation>,
+  operationOverrides: Partial<TransitionPersistenceOperations> = {},
+): Promise<JournalMutationIntentEvent> {
+  return withTaskLock(paths, location.task.id, () => executeTaskMutationLocked(
+    paths,
+    location,
+    request,
+    prepare,
+    { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides },
+  ));
+}
+
+async function executeTaskMutationLocked(
+  paths: VineaPaths,
+  location: TaskLocation,
+  request: {
+    mutationKind: MutationKind;
+    actor: string;
+    timestamp: string;
+    fingerprint: string;
+  },
+  prepare: (timestamp: string, recovering: boolean) => Promise<PreparedTaskMutation>,
+  operations: TransitionPersistenceOperations,
+): Promise<JournalMutationIntentEvent> {
+  await assertNoPendingTaskTransition(paths, location);
+  const journalPath = join(location.directory, "journal.md");
+  const pending = await readPendingTaskMutationIntent(paths, journalPath);
+  if (pending !== null) {
+    if (pending.mutationKind !== request.mutationKind || pending.fingerprint !== request.fingerprint) {
+      throw new TransitionError(
+        `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`,
+      );
+    }
+    if (await mutationTargetsMatch(paths, location, pending.expected)) {
+      await appendMutationCompletion(paths, journalPath, pending, operations);
+      return pending;
+    }
+    const prepared = await prepare(pending.timestamp, true);
+    if (stableJson(prepared.expected) !== stableJson(pending.expected) || !matchesCompletion(prepared.completion, pending.completion)) {
+      throw new SchemaError(`Pending mutation ${pending.operationId} no longer matches the requested target; inspect it before retrying.`);
+    }
+    await prepared.apply();
+    if (!await mutationTargetsMatch(paths, location, pending.expected)) {
+      throw new SchemaError(`Mutation ${pending.operationId} did not produce its expected managed targets; journal intent remains pending.`);
+    }
+    await appendMutationCompletion(paths, journalPath, pending, operations);
+    return pending;
+  }
+
+  const prepared = await prepare(request.timestamp, false);
+  const intent: JournalMutationIntentEvent = {
+    schemaVersion: SCHEMA_VERSION,
+    type: "mutation_intent",
+    operationId: operations.createOperationId(),
+    timestamp: request.timestamp,
+    actor: request.actor,
+    mutationKind: request.mutationKind,
+    fingerprint: request.fingerprint,
+    expected: prepared.expected,
+    completion: prepared.completion,
+  };
+  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  await prepared.apply();
+  if (!await mutationTargetsMatch(paths, location, intent.expected)) {
+    throw new SchemaError(`Mutation ${intent.operationId} did not produce its expected managed targets; journal intent remains pending.`);
+  }
+  await appendMutationCompletion(paths, journalPath, intent, operations);
+  return intent;
+}
+
+export function mutationFingerprint(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+export function mutationTargetSummary(
+  paths: VineaPaths,
+  targets: Array<{ filename: string; contents: string | Buffer }>,
+  identity: Record<string, string>,
+): MutationTargetSummary {
+  return {
+    identity,
+    files: targets.map(({ filename, contents }) => ({
+      path: relative(paths.repoRoot, filename).split("\\").join("/"),
+      sha256: createHash("sha256").update(contents).digest("hex"),
+    })).sort((left, right) => left.path.localeCompare(right.path)),
+  };
+}
+
+async function readPendingTaskMutationIntent(
+  paths: VineaPaths,
+  journalPath: string,
+): Promise<JournalMutationIntentEvent | null> {
+  const records = await readJsonlRecords(paths.repoRoot, journalPath);
+  let pending: JournalMutationIntentEvent | null = null;
+  for (const record of records) {
+    if (!isRecord(record) || typeof record.type !== "string") continue;
+    if (record.type === "mutation_intent") {
+      if (!isMutationIntent(record)) throw new SchemaError(`Invalid mutation intent in ${journalPath}`);
+      if (pending !== null) {
+        throw new SchemaError(`Task journal ${journalPath} has more than one uncommitted mutation intent.`);
+      }
+      pending = record;
+      continue;
+    }
+    if (pending !== null && record.operationId === pending.operationId) {
+      if (record.type !== pending.mutationKind || !matchesCompletion(recordWithoutOperationId(record), pending.completion)) {
+        throw new SchemaError(`Mutation completion ${pending.operationId} does not match its journal intent.`);
+      }
+      pending = null;
+    }
+  }
+  return pending;
+}
+
+async function mutationTargetsMatch(
+  paths: VineaPaths,
+  location: TaskLocation,
+  expected: MutationTargetSummary,
+): Promise<boolean> {
+  for (const target of expected.files) {
+    if (!isManagedMutationTarget(paths, location, target.path)) return false;
+    const filename = assertInside(paths.repoRoot, resolve(paths.repoRoot, target.path));
+    try {
+      await assertNoSymlink(paths.repoRoot, filename);
+      const contents = await readFile(filename);
+      if (createHash("sha256").update(contents).digest("hex") !== target.sha256) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isManagedMutationTarget(paths: VineaPaths, location: TaskLocation, target: string): boolean {
+  const taskDirectory = relative(paths.repoRoot, location.directory).split("\\").join("/");
+  const taskArtifact = target.startsWith(`${taskDirectory}/`)
+    ? target.slice(taskDirectory.length + 1)
+    : "";
+  if (MUTATION_TASK_ARTIFACTS.has(taskArtifact)) return true;
+  return target === ".vinea/specs/index.md"
+    || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
+}
+
+async function appendMutationCompletion(
+  paths: VineaPaths,
+  journalPath: string,
+  intent: JournalMutationIntentEvent,
+  operations: TransitionPersistenceOperations,
+): Promise<void> {
+  await operations.appendJournal(journalPath, { ...intent.completion, operationId: intent.operationId }, paths.repoRoot);
+}
+
+function taskMutationIdentity(
+  event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
+  task: TaskRecord,
+): Record<string, string> {
+  if (event.requirementId !== undefined) {
+    const collection = event.type === "requirement_added" ? task.requirements : task.acceptanceCriteria;
+    return mutationValueIdentity(
+      { requirementId: event.requirementId },
+      collection.find((requirement) => requirement.id === event.requirementId),
     );
   }
-  return { ...location, task };
+  if (event.artifact !== undefined) return { artifact: event.artifact };
+  if (event.path !== undefined) return { path: event.path };
+  if (event.evidenceId !== undefined) return { evidenceId: event.evidenceId };
+  if (event.learningCandidateId !== undefined) {
+    return mutationValueIdentity(
+      { learningCandidateId: event.learningCandidateId },
+      task.learningCandidates?.find((candidate) => candidate.id === event.learningCandidateId),
+    );
+  }
+  return { mutationKind: event.type };
+}
+
+export function mutationValueIdentity(
+  identity: Record<string, string>,
+  value: unknown,
+): Record<string, string> {
+  if (value === undefined) return identity;
+  return {
+    ...identity,
+    valueSha256: createHash("sha256").update(stableJson(value)).digest("hex"),
+  };
+}
+
+function mutationEventRequest(event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">): Record<string, unknown> {
+  const { timestamp: _timestamp, ...request } = event;
+  return request;
+}
+
+function isMutationIntent(value: Record<string, unknown>): value is Record<string, unknown> & JournalMutationIntentEvent {
+  return value.schemaVersion === SCHEMA_VERSION
+    && value.type === "mutation_intent"
+    && typeof value.operationId === "string"
+    && value.operationId !== ""
+    && typeof value.timestamp === "string"
+    && typeof value.actor === "string"
+    && typeof value.mutationKind === "string"
+    && typeof value.fingerprint === "string"
+    && /^[a-f0-9]{64}$/u.test(value.fingerprint)
+    && isMutationTargetSummary(value.expected)
+    && isRecord(value.completion);
+}
+
+function isMutationTargetSummary(value: unknown): value is MutationTargetSummary {
+  return isRecord(value)
+    && isRecord(value.identity)
+    && Object.values(value.identity).every((entry) => typeof entry === "string" && entry !== "")
+    && Array.isArray(value.files)
+    && value.files.length > 0
+    && value.files.every((entry) => isRecord(entry)
+      && typeof entry.path === "string"
+      && typeof entry.sha256 === "string"
+      && /^[a-f0-9]{64}$/u.test(entry.sha256));
+}
+
+function matchesCompletion(
+  left: Omit<MutationCompletionEvent, "operationId">,
+  right: Omit<MutationCompletionEvent, "operationId">,
+): boolean {
+  return stableJson(left) === stableJson(right);
+}
+
+function recordWithoutOperationId(value: Record<string, unknown>): Omit<MutationCompletionEvent, "operationId"> {
+  const result = { ...value };
+  delete result.operationId;
+  return result as Omit<MutationCompletionEvent, "operationId">;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export async function assertNoPendingTaskTransition(
@@ -243,6 +530,18 @@ export async function assertNoPendingTaskTransition(
   if (pending !== null) {
     throw new TransitionError(
       `Task ${location.task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before recording task changes.`,
+    );
+  }
+}
+
+export async function assertNoPendingTaskMutation(
+  paths: VineaPaths,
+  location: TaskLocation,
+): Promise<void> {
+  const pending = await readPendingTaskMutationIntent(paths, join(location.directory, "journal.md"));
+  if (pending !== null) {
+    throw new TransitionError(
+      `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`,
     );
   }
 }
@@ -289,6 +588,7 @@ async function appendTaskContinuationLocked(
   event: JournalContinuationEvent,
 ): Promise<void> {
   await assertNoPendingTaskTransition(paths, location);
+  await assertNoPendingTaskMutation(paths, location);
   const journalPath = join(location.directory, "journal.md");
   await assertNoSymlink(paths.repoRoot, journalPath);
   await appendJsonl(journalPath, event, paths.repoRoot);

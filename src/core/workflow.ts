@@ -13,9 +13,12 @@ import {
   assertTaskMutable,
   createTaskArtifacts,
   appendTaskMutationIntent,
+  executeTaskMutation,
   findTask,
   listStoredTasks,
-  persistTaskMutation,
+  mutationFingerprint,
+  mutationTargetSummary,
+  mutationValueIdentity,
   persistTaskTransition,
   readLatestCheckEvent,
   readLatestEvidence,
@@ -49,7 +52,7 @@ import {
   type TaskStatus,
   type VineaConfig,
 } from "./types.js";
-import { appendJsonl } from "./json.js";
+import { appendJsonl, writeJsonAtomic } from "./json.js";
 
 type Clock = () => Date;
 type RiskRules = VineaConfig["riskRules"];
@@ -585,29 +588,55 @@ async function addRequirementLike(
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
   const id = input.id.trim();
-  const allRequirements = [...location.task.requirements, ...location.task.acceptanceCriteria];
-  if (allRequirements.some((requirement) => requirement.id === id)) {
-    throw new ValidationError(`Requirement ID already exists in task ${taskId}: ${id}`);
-  }
-  const timestamp = now().toISOString();
-  const requirement = {
-    schemaVersion: SCHEMA_VERSION,
-    id,
-    text: input.text.trim(),
-    createdAt: timestamp,
-  };
-  const task: TaskRecord = {
-    ...location.task,
-    [collection]: [...location.task[collection], requirement],
-    updatedAt: timestamp,
-  };
-  return (await persistTaskMutation(paths, location, task, {
-    schemaVersion: SCHEMA_VERSION,
-    type: eventType,
-    timestamp,
-    actor: input.actor.trim(),
-    requirementId: id,
-  })).task;
+  const actor = input.actor.trim();
+  await executeTaskMutation(paths, location, {
+    mutationKind: eventType,
+    actor,
+    timestamp: now().toISOString(),
+    fingerprint: mutationFingerprint({
+      schemaVersion: SCHEMA_VERSION,
+      type: eventType,
+      actor,
+      requirementId: id,
+    }),
+  }, async (timestamp, recovering) => {
+    const current = await findTask(paths, taskId);
+    assertTaskMutable(current);
+    const allRequirements = [...current.task.requirements, ...current.task.acceptanceCriteria];
+    if (allRequirements.some((requirement) => requirement.id === id)) {
+      if (recovering) {
+        throw new SchemaError(`Pending ${eventType} mutation already has requirement ${id}, but task.json does not match its recorded target.`);
+      }
+      throw new ValidationError(`Requirement ID already exists in task ${taskId}: ${id}`);
+    }
+    const requirement = {
+      schemaVersion: SCHEMA_VERSION,
+      id,
+      text: input.text.trim(),
+      createdAt: timestamp,
+    };
+    const task: TaskRecord = {
+      ...current.task,
+      [collection]: [...current.task[collection], requirement],
+      updatedAt: timestamp,
+    };
+    return {
+      expected: mutationTargetSummary(paths, [{
+        filename: join(current.directory, "task.json"),
+        contents: `${JSON.stringify(task, null, 2)}\n`,
+      }], mutationValueIdentity({ requirementId: id }, requirement)),
+      completion: {
+        schemaVersion: SCHEMA_VERSION,
+        type: eventType,
+        mutationKind: eventType,
+        timestamp,
+        actor,
+        requirementId: id,
+      },
+      apply: () => writeJsonAtomic(join(current.directory, "task.json"), task, paths.repoRoot),
+    };
+  });
+  return (await findTask(paths, taskId)).task;
 }
 
 async function setTaskDocument(
