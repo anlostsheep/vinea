@@ -3,7 +3,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { parseCheckDocument } from "./check.js";
 import { validateEvidenceRecord } from "./evidence.js";
 import type { VineaPaths } from "./paths.js";
-import { SCHEMA_VERSION, type EvidenceRecord } from "./types.js";
+import { SCHEMA_VERSION, type EvidenceRecord, type TaskStatus } from "./types.js";
 
 const REQUIRED_TASK_ARTIFACTS = [
   "brief.md",
@@ -16,6 +16,15 @@ const REQUIRED_TASK_ARTIFACTS = [
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ACTIVE_STATUSES = new Set(["planning", "ready", "in_progress", "checking", "finished", "blocked"]);
 const ALL_STATUSES = new Set([...ACTIVE_STATUSES, "archived"]);
+const FORWARD_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus>> = {
+  planning: "ready",
+  ready: "in_progress",
+  in_progress: "checking",
+  checking: "finished",
+  finished: "archived",
+};
+const BLOCKABLE_STATUSES = new Set<TaskStatus>(["planning", "ready", "in_progress", "checking"]);
+const UNBLOCK_TARGETS = new Set<TaskStatus>(["ready", "in_progress", "checking"]);
 const TASK_MUTATION_KINDS = new Set([
   "requirement_added",
   "acceptance_criterion_added",
@@ -265,7 +274,7 @@ async function validateTaskDirectory(
 
   await validateContextManifest(paths, join(directory, "context.jsonl"), limits, add);
   const evidence = await validateEvidenceArtifact(join(directory, "evidence.jsonl"), add);
-  await validateJournalArtifact(join(directory, "journal.md"), add);
+  await validateJournalArtifact(join(directory, "journal.md"), task, add);
   await validateCheckArtifact(paths, join(directory, "check.md"), task, evidence, add);
 }
 
@@ -398,7 +407,11 @@ async function validateEvidenceArtifact(filename: string, add: IssueAdder): Prom
   return records;
 }
 
-async function validateJournalArtifact(filename: string, add: IssueAdder): Promise<void> {
+async function validateJournalArtifact(
+  filename: string,
+  task: Record<string, unknown> | null,
+  add: IssueAdder,
+): Promise<void> {
   const contents = await readOptionalRegularFile(filename, "JOURNAL", add);
   if (contents === null) return;
   if (contents.trim() === "") {
@@ -407,6 +420,10 @@ async function validateJournalArtifact(filename: string, add: IssueAdder): Promi
   }
   const operationIds = new Set<string>();
   let creationCount = 0;
+  let firstEvent = true;
+  let currentStatus: TaskStatus | null = null;
+  let replayIsValid = true;
+  let lastTransition: { oldStatus: TaskStatus; newStatus: TaskStatus } | null = null;
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
     if (value === null) continue;
@@ -419,9 +436,51 @@ async function validateJournalArtifact(filename: string, add: IssueAdder): Promi
     }
     if (!isJournalEvent(value)) {
       add("JOURNAL_EVENT_INVALID", filename, `Line ${lineNumber} is not a valid journal event.`);
+      replayIsValid = false;
       continue;
     }
-    if (value.type === "created") creationCount += 1;
+    if (value.type === "created") {
+      creationCount += 1;
+      if (!firstEvent) {
+        add("JOURNAL_CREATION_NOT_FIRST", filename, `Line ${lineNumber} creation event must be the first journal event.`);
+        replayIsValid = false;
+      }
+      if (creationCount === 1) currentStatus = "planning";
+    } else if (creationCount === 0) {
+      add("JOURNAL_EVENT_BEFORE_CREATION", filename, `Line ${lineNumber} occurs before the task creation event.`);
+      replayIsValid = false;
+    } else if (value.type === "transition_intent") {
+      const oldStatus = value.oldStatus as TaskStatus;
+      const newStatus = value.newStatus as TaskStatus;
+      if (currentStatus === null || oldStatus !== currentStatus) {
+        add(
+          "JOURNAL_STATUS_DISCONTINUITY",
+          filename,
+          `Line ${lineNumber} transition starts at ${oldStatus}, but the prior journal status is ${String(currentStatus)}.`,
+        );
+        replayIsValid = false;
+      } else if (!isLegalJournalTransition(oldStatus, newStatus)) {
+        add(
+          "JOURNAL_TRANSITION_INVALID",
+          filename,
+          `Line ${lineNumber} transition from ${oldStatus} to ${newStatus} is not allowed.`,
+        );
+        replayIsValid = false;
+      } else {
+        currentStatus = newStatus;
+        lastTransition = { oldStatus, newStatus };
+      }
+    } else if (value.type === "continued") {
+      const status = value.status as TaskStatus;
+      if (currentStatus === null || status !== currentStatus) {
+        add(
+          "JOURNAL_STATUS_DISCONTINUITY",
+          filename,
+          `Line ${lineNumber} continuation records ${status}, but the prior journal status is ${String(currentStatus)}.`,
+        );
+        replayIsValid = false;
+      }
+    }
     if (typeof value.operationId === "string") {
       if (operationIds.has(value.operationId)) {
         add("JOURNAL_OPERATION_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${value.operationId}.`);
@@ -429,11 +488,28 @@ async function validateJournalArtifact(filename: string, add: IssueAdder): Promi
         operationIds.add(value.operationId);
       }
     }
+    firstEvent = false;
   }
   if (creationCount === 0) {
     add("JOURNAL_CREATION_MISSING", filename, "Task journal is missing its creation event.");
   } else if (creationCount > 1) {
     add("JOURNAL_CREATION_DUPLICATE", filename, "Task journal contains multiple creation events.");
+    replayIsValid = false;
+  }
+  if (
+    replayIsValid
+    && creationCount === 1
+    && currentStatus !== null
+    && task !== null
+    && isTaskStatus(task.status)
+    && task.status !== currentStatus
+    && (lastTransition === null || task.status !== lastTransition.oldStatus)
+  ) {
+    add(
+      "JOURNAL_TASK_STATUS_MISMATCH",
+      filename,
+      `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`,
+    );
   }
 }
 
@@ -636,6 +712,17 @@ function taskRequirementIds(task: Record<string, unknown>): string[] {
   return [task.requirements, task.acceptanceCriteria]
     .flatMap((collection) => Array.isArray(collection) ? collection : [])
     .flatMap((requirement) => isRecord(requirement) && typeof requirement.id === "string" ? [requirement.id] : []);
+}
+
+function isLegalJournalTransition(oldStatus: TaskStatus, newStatus: TaskStatus): boolean {
+  if (oldStatus === newStatus) return false;
+  if (oldStatus === "blocked") return UNBLOCK_TARGETS.has(newStatus);
+  return (BLOCKABLE_STATUSES.has(oldStatus) && newStatus === "blocked")
+    || FORWARD_TRANSITIONS[oldStatus] === newStatus;
+}
+
+function isTaskStatus(value: unknown): value is TaskStatus {
+  return typeof value === "string" && ALL_STATUSES.has(value);
 }
 
 function isJournalEvent(value: unknown): value is Record<string, unknown> {

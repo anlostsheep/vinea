@@ -254,6 +254,116 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
   expect(await snapshotFiles(paths.vineaRoot)).toEqual(before);
 });
 
+test("validate replays journal state before accepting task lifecycle artifacts", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const createdAt = "2026-07-31T08:10:00.000Z";
+  const create = async (title: string, offset: number) => createTask(
+    paths,
+    {
+      title,
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date(`2026-07-31T08:10:0${offset}.000Z`),
+  );
+  const creation = (timestamp: string) => ({
+    schemaVersion: 1,
+    type: "created",
+    timestamp,
+    actor: "cli",
+    confirmation: "user",
+    status: "planning",
+  });
+  const transition = (operationId: string, oldStatus: string, newStatus: string, timestamp: string) => ({
+    schemaVersion: 1,
+    type: "transition_intent",
+    operationId,
+    timestamp,
+    actor: "cli",
+    reason: "test transition",
+    oldStatus,
+    newStatus,
+  });
+
+  const continuedBeforeCreation = await create("Continued before creation", 1);
+  await writeFile(
+    join(continuedBeforeCreation.directory, "journal.md"),
+    [
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "continued",
+        timestamp: createdAt,
+        actor: "cli",
+        confirmation: "user",
+        host: "codex",
+        sessionBound: false,
+        started: false,
+        status: "planning",
+      }),
+      JSON.stringify(creation(createdAt)),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const selfTransition = await create("Self transition", 2);
+  await writeFile(
+    join(selfTransition.directory, "journal.md"),
+    [
+      JSON.stringify(creation(createdAt)),
+      JSON.stringify(transition("op-self", "planning", "planning", "2026-07-31T08:10:02.000Z")),
+      JSON.stringify(transition("op-skip", "planning", "in_progress", "2026-07-31T08:10:03.000Z")),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const discontinuousTransition = await create("Discontinuous transition", 3);
+  await writeFile(
+    join(discontinuousTransition.directory, "journal.md"),
+    [
+      JSON.stringify(creation(createdAt)),
+      JSON.stringify(transition("op-ready", "planning", "ready", "2026-07-31T08:10:03.000Z")),
+      JSON.stringify(transition("op-discontinuous", "planning", "ready", "2026-07-31T08:10:04.000Z")),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const discontinuousTask = await readJson<TaskRecord>(join(discontinuousTransition.directory, "task.json"));
+  await writeJson(join(discontinuousTransition.directory, "task.json"), { ...discontinuousTask, status: "ready" });
+
+  const mismatchedStatus = await create("Mismatched resulting status", 4);
+  await writeFile(
+    join(mismatchedStatus.directory, "journal.md"),
+    [
+      JSON.stringify(creation(createdAt)),
+      JSON.stringify(transition("op-mismatch", "planning", "ready", "2026-07-31T08:10:05.000Z")),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const mismatchedTask = await readJson<TaskRecord>(join(mismatchedStatus.directory, "task.json"));
+  await writeJson(join(mismatchedStatus.directory, "task.json"), { ...mismatchedTask, status: "blocked" });
+
+  const before = await snapshotFiles(paths.vineaRoot);
+  const result = await runCli(["validate", "--json"], cwd);
+  const output = JSON.parse(result.stdout) as { issues: Array<{ code: string }> };
+
+  expect(result.exitCode).toBe(1);
+  expect(output.issues.map(({ code }) => code)).toEqual(expect.arrayContaining([
+    "JOURNAL_CREATION_NOT_FIRST",
+    "JOURNAL_TRANSITION_INVALID",
+    "JOURNAL_STATUS_DISCONTINUITY",
+    "JOURNAL_TASK_STATUS_MISMATCH",
+  ]));
+  expect(output.issues.filter(({ code }) => code === "JOURNAL_TRANSITION_INVALID")).toHaveLength(2);
+  expect(await snapshotFiles(paths.vineaRoot)).toEqual(before);
+});
+
 async function snapshotFiles(root: string): Promise<Record<string, { contents: string; mtimeMs: number }>> {
   const snapshot: Record<string, { contents: string; mtimeMs: number }> = {};
   await visit(root);
