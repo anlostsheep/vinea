@@ -33,6 +33,11 @@ export interface Requirement {
   createdAt: IsoTimestamp;
 }
 
+export interface CommitMetadata {
+  sha: string;
+  message?: string;
+}
+
 export interface TaskRecord {
   schemaVersion: typeof SCHEMA_VERSION;
   id: string;
@@ -43,9 +48,43 @@ export interface TaskRecord {
   executionMode: ExecutionMode;
   requirements: Requirement[];
   acceptanceCriteria: Requirement[];
-  inlineSkipReason?: string;
+  commit: CommitMetadata | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
+}
+
+export interface RiskSuggestion {
+  level: RiskLevel;
+  reasons: string[];
+}
+
+export interface JournalCreationEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "created";
+  timestamp: IsoTimestamp;
+  actor: string;
+  confirmation: "user";
+  status: "planning";
+}
+
+export interface JournalTransitionEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "transition";
+  timestamp: IsoTimestamp;
+  actor: string;
+  reason: string;
+  oldStatus: TaskStatus;
+  newStatus: TaskStatus;
+}
+
+export type JournalEvent = JournalCreationEvent | JournalTransitionEvent;
+
+export interface InlineAuditRecord {
+  schemaVersion: typeof SCHEMA_VERSION;
+  timestamp: IsoTimestamp;
+  requestSummary: string;
+  proposedRisk: RiskSuggestion;
+  reason: string;
 }
 
 export interface ContextReference {

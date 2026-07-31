@@ -1,8 +1,24 @@
 import packageJson from "../package.json" with { type: "json" };
-import { initializeWorkspace } from "./core/config.js";
+import { initializeWorkspace, readConfig } from "./core/config.js";
 import { VineaError } from "./core/errors.js";
 import { resolveVineaPaths } from "./core/paths.js";
 import { inspectWorkspace } from "./core/schema.js";
+import {
+  appendInlineAudit,
+  createTask,
+  incompleteRequirements,
+  listTasks,
+  nextGate,
+  readTask,
+  suggestRisk,
+  transitionTask,
+} from "./core/workflow.js";
+import type {
+  ExecutionMode,
+  QualityMode,
+  RiskLevel,
+  TaskRecord,
+} from "./core/types.js";
 
 const helpText = `Usage: vinea <command>
 
@@ -15,14 +31,20 @@ Commands:
   finish
   doctor
   validate
+  task list
+  task show
+  task transition
+  task unblock
 `;
 
 class UsageError extends Error {
   readonly exitCode = 2;
+  readonly code = "VINEA_VALIDATION_INVALID";
 }
 
 export async function main(args: string[]): Promise<number> {
   const command = args[0];
+  const json = args.includes("--json");
 
   if (command === "--help" || command === "-h") {
     process.stdout.write(helpText);
@@ -35,7 +57,7 @@ export async function main(args: string[]): Promise<number> {
       process.stdout.write("Initialized Vinea workspace.\n");
       return 0;
     } catch (error) {
-      return reportError(error);
+      return reportError(error, false);
     }
   }
 
@@ -59,6 +81,22 @@ export async function main(args: string[]): Promise<number> {
     return report.healthy ? 0 : 1;
   }
 
+  if (command === "propose") {
+    try {
+      return await handlePropose(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "task") {
+    try {
+      return await handleTask(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
   if (command === "--version" || command === "-V") {
     process.stdout.write(`${packageJson.version}\n`);
     return 0;
@@ -69,13 +107,220 @@ export async function main(args: string[]): Promise<number> {
   return usageError.exitCode;
 }
 
-function reportError(error: unknown): number {
-  if (error instanceof VineaError) {
+async function handlePropose(args: string[]): Promise<number> {
+  const options = parseOptions(
+    args,
+    new Set(["--title", "--description", "--risk", "--quality", "--execution", "--inline-skip-reason"]),
+    new Set(["--confirmed", "--json"]),
+  );
+  const title = requiredOption(options, "--title");
+  const description = requiredOption(options, "--description");
+  const requestedRisk = oneOf(requiredOption(options, "--risk"), ["auto", "low", "medium", "high"] as const, "--risk");
+  const qualityMode = oneOf(requiredOption(options, "--quality"), ["standard", "tdd"] as const, "--quality");
+  const executionMode = oneOf(
+    requiredOption(options, "--execution"),
+    ["single-agent", "delegated"] as const,
+    "--execution",
+  );
+  const confirmed = options.has("--confirmed");
+  const inlineSkipReason = optionalValue(options, "--inline-skip-reason");
+  const json = options.has("--json");
+  if (confirmed && inlineSkipReason !== undefined) {
+    throw new UsageError("--confirmed cannot be combined with --inline-skip-reason.");
+  }
+
+  const paths = resolveVineaPaths(process.cwd());
+  const config = await readConfig(paths);
+  const suggested = suggestRisk(title, description, [], config.riskRules);
+  const risk = {
+    level: (requestedRisk === "auto" ? suggested.level : requestedRisk) as RiskLevel,
+    reasons: suggested.reasons,
+  };
+  const proposal = { title: title.trim(), description: description.trim(), risk, qualityMode, executionMode };
+
+  if (inlineSkipReason !== undefined) {
+    const record = await appendInlineAudit(paths, {
+      title,
+      description,
+      proposedRisk: risk,
+      reason: inlineSkipReason,
+    });
+    writeOutput(record, json, renderInlineAudit(record));
+    return 0;
+  }
+
+  if (confirmed) {
+    const created = await createTask(paths, {
+      title,
+      risk,
+      qualityMode,
+      executionMode,
+      confirmation: "user",
+    });
+    writeOutput(created.task, json, renderTask(created.task));
+    return 0;
+  }
+
+  writeOutput(proposal, json, renderProposal(proposal));
+  return 0;
+}
+
+async function handleTask(args: string[]): Promise<number> {
+  const subcommand = args[0];
+  const paths = resolveVineaPaths(process.cwd());
+
+  if (subcommand === "list") {
+    const options = parseOptions(args.slice(1), new Set(["--status"]), new Set(["--json"]));
+    const status = oneOf(optionalValue(options, "--status") ?? "active", ["active", "all"] as const, "--status");
+    const tasks = await listTasks(paths, status);
+    const json = options.has("--json");
+    writeOutput(tasks, json, tasks.length === 0 ? "No tasks.\n" : tasks.map(renderTask).join("\n"));
+    return 0;
+  }
+
+  if (subcommand === "show") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), new Set(), new Set(["--json"]));
+    const task = await readTask(paths, taskId);
+    writeOutput(task, options.has("--json"), renderTask(task));
+    return 0;
+  }
+
+  if (subcommand === "transition" || subcommand === "unblock") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), new Set(["--to", "--reason"]), new Set(["--json"]));
+    const to = oneOf(
+      requiredOption(options, "--to"),
+      ["planning", "ready", "in_progress", "checking", "finished", "archived", "blocked"] as const,
+      "--to",
+    );
+    if (subcommand === "unblock" && !["ready", "in_progress", "checking"].includes(to)) {
+      throw new UsageError("unblock --to must be ready, in_progress, or checking.");
+    }
+    const task = await transitionTask(paths, taskId, to, {
+      actor: "cli",
+      reason: requiredOption(options, "--reason"),
+      unblock: subcommand === "unblock",
+    });
+    writeOutput(task, options.has("--json"), renderTask(task));
+    return 0;
+  }
+
+  throw new UsageError(`Unknown task command: ${subcommand ?? "(none)"}`);
+}
+
+function reportError(error: unknown, json: boolean): number {
+  const code = error instanceof VineaError || error instanceof UsageError
+    ? error.code
+    : "VINEA_SCHEMA_INVALID";
+  const message = error instanceof Error ? error.message : "Unknown failure";
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ error: { code, message } })}\n`);
+  } else if (error instanceof VineaError) {
     process.stderr.write(`${error.code}: ${error.message}\n`);
   } else {
-    process.stderr.write(`VINEA_SCHEMA_INVALID: ${error instanceof Error ? error.message : "Unknown failure"}\n`);
+    process.stderr.write(`${code}: ${message}\n`);
+  }
+  if (error instanceof UsageError) return error.exitCode;
+  if (error instanceof VineaError) {
+    return 1;
   }
   return 1;
+}
+
+function parseOptions(
+  args: string[],
+  valueOptions: ReadonlySet<string>,
+  booleanOptions: ReadonlySet<string>,
+): Map<string, string | true> {
+  const parsed = new Map<string, string | true>();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]!;
+    if (parsed.has(argument)) throw new UsageError(`Duplicate option: ${argument}`);
+    if (booleanOptions.has(argument)) {
+      parsed.set(argument, true);
+      continue;
+    }
+    if (!valueOptions.has(argument)) throw new UsageError(`Unknown option: ${argument}`);
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) throw new UsageError(`Missing value for ${argument}.`);
+    parsed.set(argument, value);
+    index += 1;
+  }
+  return parsed;
+}
+
+function requiredOption(options: ReadonlyMap<string, string | true>, name: string): string {
+  const value = options.get(name);
+  if (typeof value !== "string" || value.trim() === "") throw new UsageError(`Missing required option: ${name}.`);
+  return value;
+}
+
+function optionalValue(options: ReadonlyMap<string, string | true>, name: string): string | undefined {
+  const value = options.get(name);
+  return typeof value === "string" ? value : undefined;
+}
+
+function requiredTaskId(value: string | undefined): string {
+  if (value === undefined || value.startsWith("--") || value.trim() === "") {
+    throw new UsageError("Missing task ID.");
+  }
+  return value;
+}
+
+function oneOf<const T extends readonly string[]>(value: string, allowed: T, option: string): T[number] {
+  if (!allowed.includes(value)) {
+    throw new UsageError(`Invalid ${option} value: ${value}. Expected ${allowed.join("|")}.`);
+  }
+  return value as T[number];
+}
+
+function writeOutput(value: unknown, json: boolean, human: string): void {
+  process.stdout.write(json ? `${JSON.stringify(value)}\n` : human);
+}
+
+function renderProposal(proposal: {
+  title: string;
+  description: string;
+  risk: { level: RiskLevel; reasons: string[] };
+  qualityMode: QualityMode;
+  executionMode: ExecutionMode;
+}): string {
+  return [
+    `title: ${proposal.title}`,
+    `description: ${proposal.description}`,
+    `risk: ${proposal.risk.level}`,
+    `risk reasons: ${proposal.risk.reasons.length ? proposal.risk.reasons.join(", ") : "none"}`,
+    `quality mode: ${proposal.qualityMode}`,
+    `execution mode: ${proposal.executionMode}`,
+    "confirmation required",
+    "",
+  ].join("\n");
+}
+
+function renderInlineAudit(record: { timestamp: string; requestSummary: string; reason: string }): string {
+  return [
+    "Inline skip recorded.",
+    `timestamp: ${record.timestamp}`,
+    `request: ${record.requestSummary}`,
+    `reason: ${record.reason}`,
+    "",
+  ].join("\n");
+}
+
+function renderTask(task: TaskRecord): string {
+  const incomplete = incompleteRequirements(task);
+  return [
+    `task ID: ${task.id}`,
+    `status: ${task.status}`,
+    `quality mode: ${task.qualityMode}`,
+    `execution mode: ${task.executionMode}`,
+    `risk: ${task.risk.level}`,
+    `risk reasons: ${task.risk.reasons.length ? task.risk.reasons.join(", ") : "none"}`,
+    `incomplete requirements: ${incomplete.length ? incomplete.join(", ") : "none"}`,
+    `next gate: ${nextGate(task)}`,
+    "",
+  ].join("\n");
 }
 
 function renderDoctorReport(report: Awaited<ReturnType<typeof inspectWorkspace>>): string {
