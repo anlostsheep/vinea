@@ -259,8 +259,8 @@ async function handleTask(args: string[]): Promise<number> {
     const taskId = requiredTaskId(args[1]);
     const options = parseOptions(args.slice(2), new Set(["--file"]), new Set(["--json"]));
     const result = subcommand === "set-plan"
-      ? await setTaskPlan(paths, taskId, requiredOption(options, "--file"))
-      : await setTaskBrief(paths, taskId, requiredOption(options, "--file"));
+      ? await setTaskPlan(paths, taskId, requiredOption(options, "--file"), "cli")
+      : await setTaskBrief(paths, taskId, requiredOption(options, "--file"), "cli");
     writeOutput(
       result,
       options.has("--json"),
@@ -281,6 +281,7 @@ async function handleContext(args: string[]): Promise<number> {
     const reference = await addContextReference(paths, taskId, {
       path: requiredOption(options, "--path"),
       purpose: requiredOption(options, "--purpose"),
+      actor: "cli",
     });
     writeOutput(
       reference,

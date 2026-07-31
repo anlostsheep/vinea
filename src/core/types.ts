@@ -81,7 +81,32 @@ export interface JournalTransitionIntentEvent extends JournalTransitionDetails {
   operationId: string;
 }
 
-export type JournalEvent = JournalCreationEvent | JournalTransitionIntentEvent;
+export type TaskMutationKind =
+  | "requirement_added"
+  | "acceptance_criterion_added"
+  | "brief_set"
+  | "plan_set"
+  | "context_added"
+  | "evidence_recorded";
+
+export interface TaskMutationJournalEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: TaskMutationKind;
+  mutationKind: TaskMutationKind;
+  operationId: string;
+  timestamp: IsoTimestamp;
+  actor: string;
+  requirementId?: string;
+  artifact?: "brief.md" | "plan.md";
+  path?: string;
+  evidenceId?: string;
+  evidenceKind?: EvidenceRecord["kind"];
+}
+
+export type JournalEvent =
+  | JournalCreationEvent
+  | JournalTransitionIntentEvent
+  | TaskMutationJournalEvent;
 
 export interface InlineAuditRecord {
   schemaVersion: typeof SCHEMA_VERSION;
@@ -108,7 +133,7 @@ export interface EvidenceRecord {
   recordedAt: IsoTimestamp;
   command?: string;
   exitCode?: number;
-  actor?: string;
+  actor: string;
 }
 
 export interface CheckRow {

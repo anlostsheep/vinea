@@ -15,6 +15,8 @@ beforeAll(async () => {
 test("evidence record stores bounded audit metadata and rejects contradictory TDD evidence without appending", async () => {
   const { cwd, task } = await initializedTask("Evidence metadata", "tdd");
   const evidencePath = evidenceArtifact(cwd, task.id);
+  const journalPath = journalArtifact(cwd, task.id);
+  const beforeInvalidJournal = await readFile(journalPath, "utf8");
 
   const invalidRed = await recordEvidence(cwd, task.id, {
     kind: "tdd-red",
@@ -28,6 +30,7 @@ test("evidence record stores bounded audit metadata and rejects contradictory TD
     error: { code: "VINEA_VALIDATION_INVALID" },
   });
   expect(await readFile(evidencePath, "utf8")).toBe("");
+  expect(await readFile(journalPath, "utf8")).toBe(beforeInvalidJournal);
 
   const recorded = await recordEvidence(cwd, task.id, {
     kind: "tdd-red",
@@ -50,8 +53,21 @@ test("evidence record stores bounded audit metadata and rejects contradictory TD
     recordedAt: expect.any(String),
   });
   expect(JSON.parse(recorded.stdout)).not.toHaveProperty("output");
+  const journal = parseJsonl(await readFile(journalPath, "utf8"));
+  expect(journal.at(-1)).toMatchObject({
+    type: "evidence_recorded",
+    mutationKind: "evidence_recorded",
+    operationId: expect.any(String),
+    actor: "cli",
+    timestamp: expect.any(String),
+    evidenceId: JSON.parse(recorded.stdout).id,
+    evidenceKind: "tdd-red",
+  });
+  expect(journal.at(-1)).not.toHaveProperty("summary");
+  expect(journal.at(-1)).not.toHaveProperty("command");
 
   const beforeContradiction = await readFile(evidencePath, "utf8");
+  const beforeContradictionJournal = await readFile(journalPath, "utf8");
   const contradictoryGreen = await recordEvidence(cwd, task.id, {
     kind: "tdd-green",
     summary: "Green command still failed",
@@ -61,6 +77,7 @@ test("evidence record stores bounded audit metadata and rejects contradictory TD
   });
   expect(contradictoryGreen.exitCode).toBe(1);
   expect(await readFile(evidencePath, "utf8")).toBe(beforeContradiction);
+  expect(await readFile(journalPath, "utf8")).toBe(beforeContradictionJournal);
 });
 
 test("a TDD checking gate requires a valid red record before a valid green and leaves transition state durable on failure", async () => {
@@ -124,9 +141,37 @@ test("standard quality tasks may enter checking without TDD red or green evidenc
   expect(await readFile(evidenceArtifact(cwd, task.id), "utf8")).toBe("");
 });
 
+test("malformed minimal red and green objects cannot satisfy the TDD checking gate", async () => {
+  const { cwd, task } = await initializedTask("Reject malformed evidence", "tdd");
+  await prepareInProgressTask(cwd, task);
+  const evidencePath = evidenceArtifact(cwd, task.id);
+  const journalPath = journalArtifact(cwd, task.id);
+  await writeFile(
+    evidencePath,
+    [
+      JSON.stringify({ schemaVersion: 1, kind: "tdd-red", result: "fail", exitCode: 1 }),
+      JSON.stringify({ schemaVersion: 1, kind: "tdd-green", result: "pass", exitCode: 0 }),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const beforeJournal = await readFile(journalPath, "utf8");
+
+  const result = await transitionToChecking(cwd, task.id);
+
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    error: { code: "VINEA_SCHEMA_INVALID" },
+  });
+  expect((await showTask(cwd, task.id)).status).toBe("in_progress");
+  expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
+});
+
 test("evidence summaries reject oversized audit payloads before append", async () => {
   const { cwd, task } = await initializedTask("Bound evidence", "standard");
   const evidencePath = evidenceArtifact(cwd, task.id);
+  const journalPath = journalArtifact(cwd, task.id);
+  const beforeJournal = await readFile(journalPath, "utf8");
 
   const result = await recordEvidence(cwd, task.id, {
     kind: "manual",
@@ -139,6 +184,7 @@ test("evidence summaries reject oversized audit payloads before append", async (
     error: { code: "VINEA_VALIDATION_INVALID" },
   });
   expect(await readFile(evidencePath, "utf8")).toBe("");
+  expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
 });
 
 async function initializedTask(
@@ -233,6 +279,10 @@ async function showTask(cwd: string, taskId: string): Promise<TaskRecord> {
 
 function evidenceArtifact(cwd: string, taskId: string): string {
   return join(cwd, ".vinea", "tasks", "active", taskId, "evidence.jsonl");
+}
+
+function journalArtifact(cwd: string, taskId: string): string {
+  return join(cwd, ".vinea", "tasks", "active", taskId, "journal.md");
 }
 
 function parseJsonl(contents: string): Array<Record<string, unknown>> {

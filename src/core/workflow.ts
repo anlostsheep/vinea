@@ -5,6 +5,7 @@ import { TransitionError, ValidationError } from "./errors.js";
 import { assertTddReadyForCheck } from "./evidence.js";
 import {
   createTaskArtifacts,
+  appendTaskMutationIntent,
   findTask,
   listStoredTasks,
   persistTaskMutation,
@@ -219,16 +220,20 @@ export async function setTaskBrief(
   paths: VineaPaths,
   taskId: string,
   sourceFile: string,
+  actor = "cli",
+  now: Clock = () => new Date(),
 ): Promise<TaskDocumentResult> {
-  return setTaskDocument(paths, taskId, sourceFile, "brief.md");
+  return setTaskDocument(paths, taskId, sourceFile, "brief.md", actor, now);
 }
 
 export async function setTaskPlan(
   paths: VineaPaths,
   taskId: string,
   sourceFile: string,
+  actor = "cli",
+  now: Clock = () => new Date(),
 ): Promise<TaskDocumentResult> {
-  return setTaskDocument(paths, taskId, sourceFile, "plan.md");
+  return setTaskDocument(paths, taskId, sourceFile, "plan.md", actor, now);
 }
 
 export function nextGate(task: TaskRecord): string {
@@ -263,9 +268,9 @@ async function addRequirementLike(
   now: Clock,
 ): Promise<TaskRecord> {
   await readConfig(paths);
-  assertNonempty(input.id, "Requirement ID");
+  assertBoundedNonempty(input.id, "Requirement ID", 200);
   assertNonempty(input.text, "Requirement text");
-  assertNonempty(input.actor, "Requirement actor");
+  assertBoundedNonempty(input.actor, "Requirement actor", 200);
   const location = await findTask(paths, taskId);
   const id = input.id.trim();
   const allRequirements = [...location.task.requirements, ...location.task.acceptanceCriteria];
@@ -290,7 +295,6 @@ async function addRequirementLike(
     timestamp,
     actor: input.actor.trim(),
     requirementId: id,
-    text: requirement.text,
   })).task;
 }
 
@@ -299,21 +303,28 @@ async function setTaskDocument(
   taskId: string,
   sourceFile: string,
   artifact: "brief.md" | "plan.md",
+  actor: string,
+  now: Clock,
 ): Promise<TaskDocumentResult> {
   await readConfig(paths);
   assertNonempty(sourceFile, "Source file");
+  assertBoundedNonempty(actor, "Task document actor", 200);
   const location = await findTask(paths, taskId);
   const filename = isAbsolute(sourceFile) ? sourceFile : resolve(paths.repoRoot, sourceFile);
   let entry;
-  let bytes: Buffer;
   try {
     entry = await lstat(filename);
-    bytes = await readFile(filename);
   } catch (error) {
-    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
+    throw new ValidationError(`Unable to inspect task document source ${sourceFile}`, error);
   }
   if (!entry.isFile() || entry.isSymbolicLink()) {
     throw new ValidationError(`Task document source must be a regular non-symlink file: ${sourceFile}`);
+  }
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(filename);
+  } catch (error) {
+    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
   }
   let contents: string;
   try {
@@ -324,6 +335,15 @@ async function setTaskDocument(
   if (contents.trim() === "") {
     throw new ValidationError(`Task document source must not be empty: ${sourceFile}`);
   }
+  const timestamp = now().toISOString();
+  const type = artifact === "brief.md" ? "brief_set" : "plan_set";
+  await appendTaskMutationIntent(paths, location, {
+    schemaVersion: SCHEMA_VERSION,
+    type,
+    timestamp,
+    actor: actor.trim(),
+    artifact,
+  });
   await writeTaskArtifact(paths, location, artifact, contents);
   return { taskId, artifact, estimatedBytes: bytes.byteLength };
 }
@@ -388,4 +408,11 @@ function formatTaskTimestamp(date: Date): string {
 
 function assertNonempty(value: string, label: string): void {
   if (value.trim() === "") throw new ValidationError(`${label} must not be empty.`);
+}
+
+function assertBoundedNonempty(value: string, label: string, maxBytes: number): void {
+  assertNonempty(value, label);
+  if (Buffer.byteLength(value.trim(), "utf8") > maxBytes) {
+    throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
+  }
 }

@@ -9,6 +9,7 @@ import {
   type JournalCreationEvent,
   type JournalTransitionDetails,
   type JournalTransitionIntentEvent,
+  type TaskMutationJournalEvent,
   type TaskRecord,
 } from "./types.js";
 
@@ -33,16 +34,6 @@ export interface TransitionPersistenceOperations {
   appendJournal(filename: string, value: unknown, repoRoot: string): Promise<void>;
   moveDirectory(source: string, destination: string): Promise<void>;
   writeTask(filename: string, value: unknown, repoRoot: string): Promise<void>;
-}
-
-export interface TaskMutationJournalEvent {
-  schemaVersion: typeof SCHEMA_VERSION;
-  type: "requirement_added" | "acceptance_criterion_added";
-  operationId: string;
-  timestamp: string;
-  actor: string;
-  requirementId: string;
-  text: string;
 }
 
 const DEFAULT_TRANSITION_OPERATIONS: TransitionPersistenceOperations = {
@@ -170,17 +161,11 @@ export async function persistTaskMutation(
   paths: VineaPaths,
   location: TaskLocation,
   task: TaskRecord,
-  event: Omit<TaskMutationJournalEvent, "operationId">,
+  event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
   operationOverrides: Partial<TransitionPersistenceOperations> = {},
 ): Promise<TaskLocation> {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
-  const journalPath = join(location.directory, "journal.md");
-  await assertNoSymlink(paths.repoRoot, journalPath);
-  const intent: TaskMutationJournalEvent = {
-    ...event,
-    operationId: operations.createOperationId(),
-  };
-  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  await appendTaskMutationIntent(paths, location, event, operations);
   try {
     await operations.writeTask(join(location.directory, "task.json"), task, paths.repoRoot);
   } catch (error) {
@@ -190,6 +175,24 @@ export async function persistTaskMutation(
     );
   }
   return { ...location, task };
+}
+
+export async function appendTaskMutationIntent(
+  paths: VineaPaths,
+  location: TaskLocation,
+  event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
+  operationOverrides: Partial<TransitionPersistenceOperations> = {},
+): Promise<TaskMutationJournalEvent> {
+  const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
+  const journalPath = join(location.directory, "journal.md");
+  await assertNoSymlink(paths.repoRoot, journalPath);
+  const intent: TaskMutationJournalEvent = {
+    ...event,
+    mutationKind: event.type,
+    operationId: operations.createOperationId(),
+  };
+  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  return intent;
 }
 
 export async function writeTaskArtifact(

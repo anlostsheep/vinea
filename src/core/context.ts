@@ -9,7 +9,7 @@ import { SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl } from "./json.js";
 import type { VineaPaths } from "./paths.js";
 import { assertInside } from "./paths.js";
-import { findTask } from "./task-store.js";
+import { appendTaskMutationIntent, findTask } from "./task-store.js";
 import {
   SCHEMA_VERSION,
   type ContextReference,
@@ -21,6 +21,7 @@ type Clock = () => Date;
 export interface AddContextInput {
   path: string;
   purpose: string;
+  actor: string;
 }
 
 export interface ContextManifest {
@@ -40,8 +41,12 @@ export async function addContextReference(
 ): Promise<ContextReference> {
   const config = await readConfig(paths);
   assertNonempty(input.purpose, "Context purpose");
+  assertBoundedNonempty(input.actor, "Context actor", 200);
   const location = await findTask(paths, taskId);
   const normalizedPath = normalizeRepositoryPath(input.path);
+  if (Buffer.byteLength(normalizedPath, "utf8") > 4096) {
+    throw new ValidationError("Context path exceeds the 4096-byte audit metadata limit.");
+  }
   const estimatedBytes = await inspectContextFile(paths.repoRoot, normalizedPath);
   const filename = resolve(location.directory, "context.jsonl");
   const references = await readContextReferences(filename);
@@ -72,6 +77,13 @@ export async function addContextReference(
     estimatedBytes,
     addedAt: now().toISOString(),
   };
+  await appendTaskMutationIntent(paths, location, {
+    schemaVersion: SCHEMA_VERSION,
+    type: "context_added",
+    timestamp: reference.addedAt,
+    actor: input.actor.trim(),
+    path: reference.path,
+  });
   await appendJsonl(filename, reference, paths.repoRoot);
   return reference;
 }
@@ -177,6 +189,13 @@ function isContextReference(value: unknown): value is ContextReference {
 
 function assertNonempty(value: string, label: string): void {
   if (value.trim() === "") throw new ValidationError(`${label} must not be empty.`);
+}
+
+function assertBoundedNonempty(value: string, label: string, maxBytes: number): void {
+  assertNonempty(value, label);
+  if (Buffer.byteLength(value.trim(), "utf8") > maxBytes) {
+    throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
+  }
 }
 
 function isMissing(error: unknown): error is NodeJS.ErrnoException {
