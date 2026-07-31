@@ -1,27 +1,44 @@
+import { execFile } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { DEFAULT_CONFIG, readConfig } from "./config.js";
+import { listContextReferences } from "./context.js";
 import { TransitionError, ValidationError } from "./errors.js";
 import { assertTddReadyForCheck } from "./evidence.js";
 import {
+  appendTaskContinuation,
   createTaskArtifacts,
   appendTaskMutationIntent,
   findTask,
   listStoredTasks,
   persistTaskMutation,
   persistTaskTransition,
+  readLatestCheckEvent,
+  readLatestEvidence,
+  readSessionBinding,
+  sessionBindingPath,
+  writeSessionBinding,
   writeTaskArtifact,
   type TaskLocation,
 } from "./task-store.js";
 import type { VineaPaths } from "./paths.js";
+import { inspectWorkspace } from "./schema.js";
 import {
   SCHEMA_VERSION,
+  type ContinuationResult,
   type ExecutionMode,
+  type Host,
   type InlineAuditRecord,
+  type JournalContinuationEvent,
   type JournalCreationEvent,
   type JournalTransitionDetails,
+  type OrientBinding,
+  type OrientCandidate,
+  type OrientSummary,
   type QualityMode,
   type RiskSuggestion,
+  type SessionBinding,
   type TaskRecord,
   type TaskStatus,
   type VineaConfig,
@@ -30,6 +47,7 @@ import { appendJsonl } from "./json.js";
 
 type Clock = () => Date;
 type RiskRules = VineaConfig["riskRules"];
+const execFileAsync = promisify(execFile);
 
 export interface CreateTaskInput {
   title: string;
@@ -48,6 +66,20 @@ export interface TransitionOptions {
   actor: string;
   reason: string;
   unblock?: boolean;
+  now?: Clock;
+}
+
+export interface OrientInput {
+  host: Host;
+  sessionId?: string;
+}
+
+export interface ContinueTaskInput {
+  host: Host;
+  sessionId?: string;
+  confirmed: boolean;
+  start?: boolean;
+  reason?: string;
   now?: Clock;
 }
 
@@ -161,6 +193,128 @@ export async function readTask(paths: VineaPaths, taskId: string): Promise<TaskR
 export async function listTasks(paths: VineaPaths, status: "active" | "all"): Promise<TaskRecord[]> {
   await readConfig(paths);
   return (await listStoredTasks(paths, status)).map(({ task }) => task);
+}
+
+export async function orientWorkspace(
+  paths: VineaPaths,
+  input: OrientInput,
+): Promise<OrientSummary> {
+  assertHost(input.host);
+  if (input.sessionId !== undefined) {
+    sessionBindingPath(paths, input.host, input.sessionId);
+  }
+  const [health, gitStatus] = await Promise.all([
+    inspectWorkspace(paths),
+    inspectGitStatus(paths.repoRoot),
+  ]);
+  const canInspectTasks = health.initialized
+    && health.supportedSchema
+    && !health.missingRequiredDirectories.includes("tasks/active");
+  const locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
+  const candidates = await Promise.all(locations.map(async (location): Promise<OrientCandidate> => {
+    const [context, latestEvidence, latestCheckEvent] = await Promise.all([
+      listContextReferences(paths, location.task.id),
+      readLatestEvidence(location),
+      readLatestCheckEvent(location),
+    ]);
+    return {
+      id: location.task.id,
+      title: location.task.title,
+      status: location.task.status,
+      qualityMode: location.task.qualityMode,
+      executionMode: location.task.executionMode,
+      requirementsNotCovered: incompleteRequirements(location.task),
+      contextReferences: context.references,
+      latestEvidence,
+      latestCheckEvent,
+    };
+  }));
+  let binding: OrientBinding | null = null;
+  let hasValidBinding = false;
+  if (input.sessionId !== undefined) {
+    const stored = await readSessionBinding(paths, input.host, input.sessionId);
+    if (stored.status === "valid") {
+      hasValidBinding = candidates.some(({ id }) => id === stored.binding.taskId);
+      binding = {
+        status: hasValidBinding ? "bound" : "stale",
+        taskId: stored.binding.taskId,
+        boundAt: stored.binding.boundAt,
+      };
+    } else if (stored.status === "malformed") {
+      binding = { status: "malformed", message: stored.message };
+    }
+  }
+  const recommendation = hasValidBinding
+    ? "resume-bound"
+    : candidates.length === 0
+      ? "no-active-task"
+      : candidates.length === 1
+        ? "confirm-single"
+        : "choose-task";
+  return { health, gitStatus, binding, candidates, recommendation };
+}
+
+export async function continueTask(
+  paths: VineaPaths,
+  taskId: string,
+  input: ContinueTaskInput,
+): Promise<ContinuationResult> {
+  assertHost(input.host);
+  if (input.sessionId !== undefined) {
+    sessionBindingPath(paths, input.host, input.sessionId);
+  }
+  if (!input.confirmed) {
+    throw new ValidationError("Continuation requires explicit --confirmed.");
+  }
+  if (input.start === true) {
+    assertNonempty(input.reason ?? "", "Continuation start reason");
+  } else if (input.reason !== undefined) {
+    throw new ValidationError("--reason requires --start.");
+  }
+  await readConfig(paths);
+  let location = await findTask(paths, taskId);
+  if (location.scope === "archive" || location.task.status === "archived") {
+    throw new ValidationError(`Task is archived and cannot be continued: ${taskId}`);
+  }
+  if (input.start === true && location.task.status !== "ready") {
+    throw new ValidationError(
+      `Only a ready task can be started during continuation; ${taskId} is ${location.task.status}.`,
+    );
+  }
+
+  const timestamp = (input.now ?? (() => new Date()))().toISOString();
+  let task = location.task;
+  if (input.start === true) {
+    task = await transitionTask(paths, taskId, "in_progress", {
+      actor: input.host,
+      reason: input.reason!,
+      now: () => new Date(timestamp),
+    });
+    location = await findTask(paths, taskId);
+  }
+  const event: JournalContinuationEvent = {
+    schemaVersion: SCHEMA_VERSION,
+    type: "continued",
+    timestamp,
+    actor: input.host,
+    confirmation: "user",
+    host: input.host,
+    sessionBound: input.sessionId !== undefined,
+    started: input.start === true,
+    status: task.status,
+  };
+  await appendTaskContinuation(paths, location, event);
+
+  let binding: SessionBinding | null = null;
+  if (input.sessionId !== undefined) {
+    binding = {
+      schemaVersion: SCHEMA_VERSION,
+      taskId,
+      boundAt: timestamp,
+    };
+    await writeSessionBinding(paths, input.host, input.sessionId, binding);
+  }
+  return { task, binding };
 }
 
 export async function transitionTask(
@@ -414,5 +568,31 @@ function assertBoundedNonempty(value: string, label: string, maxBytes: number): 
   assertNonempty(value, label);
   if (Buffer.byteLength(value.trim(), "utf8") > maxBytes) {
     throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
+  }
+}
+
+function assertHost(value: string): asserts value is Host {
+  if (value !== "codex" && value !== "claude") {
+    throw new ValidationError(`Invalid host: ${value}. Expected codex|claude.`);
+  }
+}
+
+async function inspectGitStatus(repoRoot: string): Promise<OrientSummary["gitStatus"]> {
+  try {
+    const result = await execFileAsync("git", ["status", "--porcelain"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    return {
+      available: true,
+      porcelain: result.stdout,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      available: false,
+      porcelain: "",
+      error: error instanceof Error ? error.message : "Unable to run git status --porcelain.",
+    };
   }
 }

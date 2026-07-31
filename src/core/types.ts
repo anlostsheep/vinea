@@ -81,6 +81,18 @@ export interface JournalTransitionIntentEvent extends JournalTransitionDetails {
   operationId: string;
 }
 
+export interface JournalContinuationEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "continued";
+  timestamp: IsoTimestamp;
+  actor: string;
+  confirmation: "user";
+  host: Host;
+  sessionBound: boolean;
+  started: boolean;
+  status: TaskStatus;
+}
+
 export type TaskMutationKind =
   | "requirement_added"
   | "acceptance_criterion_added"
@@ -106,7 +118,71 @@ export interface TaskMutationJournalEvent {
 export type JournalEvent =
   | JournalCreationEvent
   | JournalTransitionIntentEvent
+  | JournalContinuationEvent
   | TaskMutationJournalEvent;
+
+export interface SessionBinding {
+  schemaVersion: typeof SCHEMA_VERSION;
+  taskId: string;
+  boundAt: IsoTimestamp;
+}
+
+export type OrientBinding =
+  | {
+      status: "bound" | "stale";
+      taskId: string;
+      boundAt: IsoTimestamp;
+    }
+  | {
+      status: "malformed";
+      message: string;
+    };
+
+export interface GitStatusSummary {
+  available: boolean;
+  porcelain: string;
+  error: string | null;
+}
+
+export interface RepositoryHealthSummary {
+  initialized: boolean;
+  configSchemaVersion: number | null;
+  missingRequiredDirectories: string[];
+  supportedSchema: boolean;
+  migrationGuidance: string | null;
+  healthy: boolean;
+}
+
+export interface OrientCandidate {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  qualityMode: QualityMode;
+  executionMode: ExecutionMode;
+  requirementsNotCovered: string[];
+  contextReferences: ContextReference[];
+  latestEvidence: EvidenceRecord | null;
+  latestCheckEvent: Record<string, unknown> | null;
+}
+
+export type OrientRecommendation =
+  | "resume-bound"
+  | "confirm-single"
+  | "choose-task"
+  | "no-active-task";
+
+export interface OrientSummary {
+  health: RepositoryHealthSummary;
+  gitStatus: GitStatusSummary;
+  binding: OrientBinding | null;
+  candidates: OrientCandidate[];
+  recommendation: OrientRecommendation;
+}
+
+export interface ContinuationResult {
+  task: TaskRecord;
+  binding: SessionBinding | null;
+}
 
 export interface InlineAuditRecord {
   schemaVersion: typeof SCHEMA_VERSION;

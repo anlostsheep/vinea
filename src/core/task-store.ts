@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { AmbiguousTaskError, SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
-import { assertNoSymlink, type VineaPaths } from "./paths.js";
+import { assertNoSymlink, ensureDirectory, type VineaPaths } from "./paths.js";
 import {
   SCHEMA_VERSION,
+  type EvidenceRecord,
+  type Host,
   type JournalCreationEvent,
+  type JournalContinuationEvent,
   type JournalTransitionDetails,
   type JournalTransitionIntentEvent,
+  type SessionBinding,
   type TaskMutationJournalEvent,
   type TaskRecord,
 } from "./types.js";
@@ -28,6 +32,11 @@ export interface TaskLocation {
   directory: string;
   scope: "active" | "archive";
 }
+
+export type SessionBindingReadResult =
+  | { status: "missing" }
+  | { status: "valid"; binding: SessionBinding }
+  | { status: "malformed"; message: string };
 
 export interface TransitionPersistenceOperations {
   createOperationId(): string;
@@ -195,6 +204,90 @@ export async function appendTaskMutationIntent(
   return intent;
 }
 
+export async function appendTaskContinuation(
+  paths: VineaPaths,
+  location: TaskLocation,
+  event: JournalContinuationEvent,
+): Promise<void> {
+  const journalPath = join(location.directory, "journal.md");
+  await assertNoSymlink(paths.repoRoot, journalPath);
+  await appendJsonl(journalPath, event, paths.repoRoot);
+}
+
+export function sessionBindingPath(paths: VineaPaths, host: Host, sessionId: string): string {
+  const safeSessionId = safeSessionFilenamePart(sessionId);
+  return join(paths.sessions, `${host}-${safeSessionId}.json`);
+}
+
+export async function readSessionBinding(
+  paths: VineaPaths,
+  host: Host,
+  sessionId: string,
+): Promise<SessionBindingReadResult> {
+  const filename = sessionBindingPath(paths, host, sessionId);
+  try {
+    await assertNoSymlink(paths.repoRoot, filename);
+    const contents = await readFile(filename, "utf8");
+    let value: unknown;
+    try {
+      value = JSON.parse(contents) as unknown;
+    } catch {
+      return { status: "malformed", message: `Invalid JSON in session binding ${filename}` };
+    }
+    if (!isSessionBinding(value)) {
+      return { status: "malformed", message: `Invalid session binding in ${filename}` };
+    }
+    return { status: "valid", binding: value };
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return { status: "missing" };
+    if (error instanceof ValidationError) throw error;
+    if (error instanceof SchemaError) {
+      return { status: "malformed", message: error.message };
+    }
+    return {
+      status: "malformed",
+      message: `Unable to read session binding ${filename}`,
+    };
+  }
+}
+
+export async function writeSessionBinding(
+  paths: VineaPaths,
+  host: Host,
+  sessionId: string,
+  binding: SessionBinding,
+): Promise<void> {
+  const filename = sessionBindingPath(paths, host, sessionId);
+  await ensureDirectory(paths.repoRoot, paths.sessions);
+  await writeJsonAtomic(filename, binding, paths.repoRoot);
+}
+
+export async function readLatestEvidence(location: TaskLocation): Promise<EvidenceRecord | null> {
+  const filename = join(location.directory, "evidence.jsonl");
+  const records = await readJsonlRecords(filename);
+  if (records.length === 0) return null;
+  const evidence = records.map((record, index) => {
+    if (!isEvidenceRecord(record)) {
+      throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`);
+    }
+    return record;
+  });
+  return evidence.at(-1)!;
+}
+
+export async function readLatestCheckEvent(
+  location: TaskLocation,
+): Promise<Record<string, unknown> | null> {
+  const filename = join(location.directory, "journal.md");
+  const events = await readJsonlRecords(filename);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!isRecord(event) || typeof event.type !== "string") continue;
+    if (event.type === "check_recorded" || event.type === "check_updated") return event;
+  }
+  return null;
+}
+
 export async function writeTaskArtifact(
   paths: VineaPaths,
   location: TaskLocation,
@@ -254,8 +347,8 @@ async function loadLocation(
   directory: string,
   scope: "active" | "archive",
 ): Promise<TaskLocation> {
-  const task = await readJson<TaskRecord>(join(directory, "task.json"), paths.repoRoot);
-  if (task.schemaVersion !== SCHEMA_VERSION || typeof task.id !== "string") {
+  const task = await readJson<unknown>(join(directory, "task.json"), paths.repoRoot);
+  if (!isTaskRecordShape(task) || task.id !== basename(directory)) {
     throw new SchemaError(`Invalid task record in ${directory}`);
   }
   return { task, directory, scope };
@@ -283,4 +376,94 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isCode(error: unknown, code: string): error is NodeJS.ErrnoException {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function safeSessionFilenamePart(sessionId: string): string {
+  if (sessionId.trim() === "") {
+    throw new ValidationError("Session ID must not be empty.");
+  }
+  if (sessionId.includes("/") || sessionId.includes("\\") || sessionId.includes("\0")) {
+    throw new ValidationError("Session ID must not contain path separators or NUL bytes.");
+  }
+  if (sessionId === "." || sessionId === "..") {
+    throw new ValidationError("Session ID must not contain path traversal.");
+  }
+  if (Buffer.byteLength(sessionId, "utf8") > 200) {
+    throw new ValidationError("Session ID exceeds the 200-byte local binding limit.");
+  }
+  return /^[A-Za-z0-9._-]+$/.test(sessionId)
+    ? sessionId
+    : `b64-${Buffer.from(sessionId, "utf8").toString("base64url")}`;
+}
+
+function isSessionBinding(value: unknown): value is SessionBinding {
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).some((key) => !["schemaVersion", "taskId", "boundAt"].includes(key))) return false;
+  return value.schemaVersion === SCHEMA_VERSION
+    && typeof value.taskId === "string"
+    && TASK_ID_PATTERN.test(value.taskId)
+    && isIsoTimestamp(value.boundAt);
+}
+
+function isEvidenceRecord(value: unknown): value is EvidenceRecord {
+  if (!isRecord(value)) return false;
+  return value.schemaVersion === SCHEMA_VERSION
+    && typeof value.id === "string"
+    && value.id.trim() !== ""
+    && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind))
+    && typeof value.summary === "string"
+    && value.summary.trim() !== ""
+    && ["pass", "fail"].includes(String(value.result))
+    && isIsoTimestamp(value.recordedAt)
+    && typeof value.actor === "string"
+    && value.actor.trim() !== "";
+}
+
+function isTaskRecordShape(value: unknown): value is TaskRecord {
+  if (!isRecord(value)) return false;
+  const risk = value.risk;
+  return value.schemaVersion === SCHEMA_VERSION
+    && typeof value.id === "string"
+    && TASK_ID_PATTERN.test(value.id)
+    && typeof value.title === "string"
+    && value.title.trim() !== ""
+    && ["planning", "ready", "in_progress", "checking", "finished", "archived", "blocked"].includes(
+      String(value.status),
+    )
+    && isRecord(risk)
+    && ["low", "medium", "high"].includes(String(risk.level))
+    && Array.isArray(risk.reasons)
+    && risk.reasons.every((reason) => typeof reason === "string")
+    && ["standard", "tdd"].includes(String(value.qualityMode))
+    && ["single-agent", "delegated"].includes(String(value.executionMode))
+    && Array.isArray(value.requirements)
+    && Array.isArray(value.acceptanceCriteria)
+    && isIsoTimestamp(value.createdAt)
+    && isIsoTimestamp(value.updatedAt);
+}
+
+async function readJsonlRecords(filename: string): Promise<unknown[]> {
+  let contents: string;
+  try {
+    contents = await readFile(filename, "utf8");
+  } catch (error) {
+    throw new SchemaError(`Unable to read JSONL file ${filename}`, error);
+  }
+  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
+    try {
+      return JSON.parse(line) as unknown;
+    } catch (error) {
+      throw new SchemaError(`Invalid JSONL in ${filename} at line ${index + 1}`, error);
+    }
+  });
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

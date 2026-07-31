@@ -17,7 +17,9 @@ import {
   incompleteRequirements,
   listTasks,
   nextGate,
+  orientWorkspace,
   readTask,
+  continueTask,
   setTaskBrief,
   setTaskPlan,
   suggestRisk,
@@ -26,6 +28,7 @@ import {
 import type {
   EvidenceRecord,
   ExecutionMode,
+  OrientSummary,
   QualityMode,
   RiskLevel,
   TaskRecord,
@@ -107,6 +110,22 @@ export async function main(args: string[]): Promise<number> {
     }
   }
 
+  if (command === "orient") {
+    try {
+      return await handleOrient(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "continue") {
+    try {
+      return await handleContinue(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
   if (command === "task") {
     try {
       return await handleTask(args.slice(1));
@@ -139,6 +158,55 @@ export async function main(args: string[]): Promise<number> {
   const usageError = new UsageError(`Unknown command: ${command ?? "(none)"}`);
   process.stderr.write(`${usageError.message}\n`);
   return usageError.exitCode;
+}
+
+async function handleOrient(args: string[]): Promise<number> {
+  const options = parseOptions(
+    args,
+    new Set(["--host", "--session-id"]),
+    new Set(["--json"]),
+  );
+  const host = oneOf(requiredOption(options, "--host"), ["codex", "claude"] as const, "--host");
+  const summary = await orientWorkspace(resolveVineaPaths(process.cwd()), {
+    host,
+    sessionId: optionalValue(options, "--session-id"),
+  });
+  writeOutput(summary, options.has("--json"), renderOrient(summary));
+  return summary.health.initialized && summary.health.supportedSchema ? 0 : 1;
+}
+
+async function handleContinue(args: string[]): Promise<number> {
+  const taskId = requiredTaskId(args[0]);
+  const options = parseOptions(
+    args.slice(1),
+    new Set(["--host", "--session-id", "--reason"]),
+    new Set(["--confirmed", "--start", "--json"]),
+  );
+  if (!options.has("--confirmed")) {
+    throw new UsageError("Continuation requires explicit --confirmed.");
+  }
+  const start = options.has("--start");
+  const reason = optionalValue(options, "--reason");
+  if (start && reason === undefined) {
+    throw new UsageError("--start requires --reason.");
+  }
+  if (!start && reason !== undefined) {
+    throw new UsageError("--reason requires --start.");
+  }
+  const host = oneOf(requiredOption(options, "--host"), ["codex", "claude"] as const, "--host");
+  const result = await continueTask(resolveVineaPaths(process.cwd()), taskId, {
+    host,
+    sessionId: optionalValue(options, "--session-id"),
+    confirmed: true,
+    start,
+    reason,
+  });
+  writeOutput(
+    result,
+    options.has("--json"),
+    `Continued ${result.task.id} on ${host}; status: ${result.task.status}; binding: ${result.binding === null ? "none" : "saved"}.\n`,
+  );
+  return 0;
 }
 
 async function handlePropose(args: string[]): Promise<number> {
@@ -479,6 +547,26 @@ function renderEvidence(evidence: EvidenceRecord): string {
     `summary: ${evidence.summary}`,
     "",
   ].join("\n");
+}
+
+function renderOrient(summary: OrientSummary): string {
+  const lines = [
+    `workspace healthy: ${summary.health.healthy}`,
+    `git available: ${summary.gitStatus.available}`,
+    `git status: ${summary.gitStatus.porcelain === "" ? "clean" : summary.gitStatus.porcelain.trimEnd()}`,
+    `binding: ${summary.binding === null ? "none" : summary.binding.status}`,
+    `recommendation: ${summary.recommendation}`,
+  ];
+  for (const candidate of summary.candidates) {
+    lines.push(
+      `${candidate.id}: ${candidate.title} [${candidate.status}; ${candidate.qualityMode}; ${candidate.executionMode}]`,
+      `  requirements not covered: ${candidate.requirementsNotCovered.length ? candidate.requirementsNotCovered.join(", ") : "none"}`,
+      `  context references: ${candidate.contextReferences.length ? candidate.contextReferences.map(({ path }) => path).join(", ") : "none"}`,
+      `  latest evidence: ${candidate.latestEvidence?.id ?? "none"}`,
+      `  latest check event: ${String(candidate.latestCheckEvent?.type ?? "none")}`,
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function renderDoctorReport(report: Awaited<ReturnType<typeof inspectWorkspace>>): string {
