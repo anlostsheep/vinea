@@ -195,7 +195,7 @@ function isValidGreen(value: EvidenceRecord): boolean {
     && value.exitCode === 0;
 }
 
-function validateEvidenceRecord(value: unknown): EvidenceRecord {
+export function validateEvidenceRecord(value: unknown): EvidenceRecord {
   if (!isRecord(value)) throw new ValidationError("Evidence record must be an object.");
   if (Object.keys(value).some((field) => !EVIDENCE_FIELDS.has(field))) {
     throw new ValidationError("Evidence record contains unsupported fields.");

@@ -156,6 +156,16 @@ async function readRows(
   } catch (error) {
     throw new SchemaError(`Unable to read check matrix ${filename}`, error);
   }
+  return parseCheckDocument(contents, paths.repoRoot, declaredRequirementIds(location), evidence, filename);
+}
+
+export function parseCheckDocument(
+  contents: string,
+  repoRoot: string,
+  declaredIds: string[],
+  evidence: EvidenceRecord[],
+  filename: string,
+): CheckRow[] {
   if (contents === "") return [];
   const firstLineEnd = contents.indexOf("\n");
   const firstLine = firstLineEnd === -1 ? contents : contents.slice(0, firstLineEnd);
@@ -178,12 +188,11 @@ async function readRows(
     || !Array.isArray(value.rows)) {
     throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
   }
-  const declaredIds = declaredRequirementIds(location);
   const evidenceIds = new Set(evidence.map(({ id }) => id));
   const seen = new Set<string>();
   let previousDeclarationIndex = -1;
   const rows = value.rows.map((candidate, index) => {
-    const row = validateStoredRow(candidate, paths.repoRoot, filename, index + 1);
+    const row = validateStoredRow(candidate, repoRoot, filename, index + 1);
     const declarationIndex = declaredIds.indexOf(row.requirementId);
     if (declarationIndex === -1) {
       throw new SchemaError(`Check row references undeclared requirement ${row.requirementId} in ${filename}`);

@@ -124,6 +124,136 @@ test("validate aggregates malformed shared and runtime state in stable order wit
   expect(await snapshotFiles(paths.vineaRoot)).toEqual(before);
 });
 
+test("validate rejects invalid versioned evidence, journal, and authoritative check artifacts without writes", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const primary = await createTask(
+    paths,
+    {
+      title: "Versioned artifact validation",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:09:10.000Z"),
+  );
+  const task = await readJson<TaskRecord>(join(primary.directory, "task.json"));
+  const requirement = {
+    schemaVersion: 1,
+    id: "R1",
+    text: "Validate versioned artifacts",
+    createdAt: "2026-07-31T08:09:10.000Z",
+  } as const;
+  await writeJson(join(primary.directory, "task.json"), {
+    ...task,
+    requirements: [requirement],
+  });
+  const evidence = {
+    schemaVersion: 1,
+    id: "evidence-1",
+    kind: "command",
+    summary: "A valid command result",
+    result: "pass",
+    recordedAt: "2026-07-31T08:09:10.000Z",
+    exitCode: 0,
+    actor: "cli",
+  } as const;
+  await writeFile(
+    join(primary.directory, "evidence.jsonl"),
+    [
+      JSON.stringify(evidence),
+      JSON.stringify({ ...evidence, id: "future-evidence", schemaVersion: 2 }),
+      JSON.stringify({ ...evidence, summary: "Duplicate evidence ID" }),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(join(primary.directory, "journal.md"), "", "utf8");
+  const checkRow = {
+    schemaVersion: 1,
+    requirementId: "R1",
+    planItem: "Validate artifacts",
+    paths: ["README.md"],
+    evidenceIds: ["evidence-1"],
+    result: "pass",
+    summary: "Backed by command evidence",
+    checkedAt: "2026-07-31T08:09:10.000Z",
+  };
+  const checkPayload = Buffer.from(JSON.stringify({ schemaVersion: 1, rows: [checkRow, checkRow] }), "utf8")
+    .toString("base64url");
+  await writeFile(
+    join(primary.directory, "check.md"),
+    `<!-- vinea-checks:v1:${checkPayload} -->\n`,
+    "utf8",
+  );
+  const secondary = await createTask(
+    paths,
+    {
+      title: "Future journal schema",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:09:11.000Z"),
+  );
+  await writeFile(
+    join(secondary.directory, "journal.md"),
+    `${JSON.stringify({
+      schemaVersion: 2,
+      type: "created",
+      timestamp: "2026-07-31T08:09:11.000Z",
+      actor: "cli",
+      confirmation: "user",
+      status: "planning",
+    })}\n`,
+    "utf8",
+  );
+  const missingCreation = await createTask(
+    paths,
+    {
+      title: "Missing journal creation",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:09:12.000Z"),
+  );
+  await writeFile(
+    join(missingCreation.directory, "journal.md"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      type: "continued",
+      timestamp: "2026-07-31T08:09:12.000Z",
+      actor: "cli",
+      confirmation: "user",
+      host: "codex",
+      sessionBound: false,
+      started: false,
+      status: "planning",
+    })}\n`,
+    "utf8",
+  );
+  const before = await snapshotFiles(paths.vineaRoot);
+
+  const result = await runCli(["validate", "--json"], cwd);
+  const output = JSON.parse(result.stdout) as { issues: Array<{ code: string }> };
+
+  expect(result.exitCode).toBe(1);
+  expect(output.issues.map(({ code }) => code)).toEqual(expect.arrayContaining([
+    "EVIDENCE_SCHEMA_UNSUPPORTED",
+    "EVIDENCE_ID_DUPLICATE",
+    "JOURNAL_EMPTY",
+    "JOURNAL_SCHEMA_UNSUPPORTED",
+    "JOURNAL_CREATION_MISSING",
+    "CHECK_PAYLOAD_INVALID",
+  ]));
+  expect(await snapshotFiles(paths.vineaRoot)).toEqual(before);
+});
+
 async function snapshotFiles(root: string): Promise<Record<string, { contents: string; mtimeMs: number }>> {
   const snapshot: Record<string, { contents: string; mtimeMs: number }> = {};
   await visit(root);

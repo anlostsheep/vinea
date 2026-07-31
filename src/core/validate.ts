@@ -1,7 +1,9 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { parseCheckDocument } from "./check.js";
+import { validateEvidenceRecord } from "./evidence.js";
 import type { VineaPaths } from "./paths.js";
-import { SCHEMA_VERSION } from "./types.js";
+import { SCHEMA_VERSION, type EvidenceRecord } from "./types.js";
 
 const REQUIRED_TASK_ARTIFACTS = [
   "brief.md",
@@ -14,6 +16,17 @@ const REQUIRED_TASK_ARTIFACTS = [
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ACTIVE_STATUSES = new Set(["planning", "ready", "in_progress", "checking", "finished", "blocked"]);
 const ALL_STATUSES = new Set([...ACTIVE_STATUSES, "archived"]);
+const TASK_MUTATION_KINDS = new Set([
+  "requirement_added",
+  "acceptance_criterion_added",
+  "brief_set",
+  "plan_set",
+  "context_added",
+  "evidence_recorded",
+  "learning_proposed",
+  "learning_accepted",
+  "learning_archived",
+]);
 
 export interface ValidationIssue {
   code: string;
@@ -227,6 +240,7 @@ async function validateTaskDirectory(
     if (!isTaskRecordShape(task)) {
       add("TASK_RECORD_INVALID", taskFilename, "Task record does not match the supported task structure.");
     }
+    validateTaskRequirementIds(task, taskFilename, add);
     if (
       scope === "active"
       && taskId === directoryName
@@ -250,8 +264,9 @@ async function validateTaskDirectory(
   }
 
   await validateContextManifest(paths, join(directory, "context.jsonl"), limits, add);
-  await validateJsonlSyntax(join(directory, "evidence.jsonl"), "EVIDENCE_JSONL_INVALID", add);
-  await validateJsonlSyntax(join(directory, "journal.md"), "JOURNAL_JSONL_INVALID", add);
+  const evidence = await validateEvidenceArtifact(join(directory, "evidence.jsonl"), add);
+  await validateJournalArtifact(join(directory, "journal.md"), add);
+  await validateCheckArtifact(paths, join(directory, "check.md"), task, evidence, add);
 }
 
 async function validateContextManifest(
@@ -351,11 +366,95 @@ async function validateContextPath(
   }
 }
 
-async function validateJsonlSyntax(filename: string, code: string, add: IssueAdder): Promise<void> {
-  const contents = await readOptionalRegularFile(filename, code.replace("_JSONL_INVALID", ""), add);
-  if (contents === null) return;
+async function validateEvidenceArtifact(filename: string, add: IssueAdder): Promise<EvidenceRecord[]> {
+  const contents = await readOptionalRegularFile(filename, "EVIDENCE", add);
+  if (contents === null) return [];
+  const records: EvidenceRecord[] = [];
+  const seenIds = new Set<string>();
   for (const { line, lineNumber } of jsonlLines(contents)) {
-    parseJsonl(line, lineNumber, filename, code, add);
+    const value = parseJsonl(line, lineNumber, filename, "EVIDENCE_JSONL_INVALID", add);
+    if (value === null) continue;
+    if (isRecord(value) && value.schemaVersion !== SCHEMA_VERSION) {
+      add(
+        "EVIDENCE_SCHEMA_UNSUPPORTED",
+        filename,
+        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`,
+      );
+    }
+    let record: EvidenceRecord;
+    try {
+      record = validateEvidenceRecord(value);
+    } catch {
+      add("EVIDENCE_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid evidence record.`);
+      continue;
+    }
+    if (seenIds.has(record.id)) {
+      add("EVIDENCE_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates evidence ID ${record.id}.`);
+      continue;
+    }
+    seenIds.add(record.id);
+    records.push(record);
+  }
+  return records;
+}
+
+async function validateJournalArtifact(filename: string, add: IssueAdder): Promise<void> {
+  const contents = await readOptionalRegularFile(filename, "JOURNAL", add);
+  if (contents === null) return;
+  if (contents.trim() === "") {
+    add("JOURNAL_EMPTY", filename, "Task journal must contain its creation event.");
+    return;
+  }
+  const operationIds = new Set<string>();
+  let creationCount = 0;
+  for (const { line, lineNumber } of jsonlLines(contents)) {
+    const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
+    if (value === null) continue;
+    if (isRecord(value) && value.schemaVersion !== SCHEMA_VERSION) {
+      add(
+        "JOURNAL_SCHEMA_UNSUPPORTED",
+        filename,
+        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`,
+      );
+    }
+    if (!isJournalEvent(value)) {
+      add("JOURNAL_EVENT_INVALID", filename, `Line ${lineNumber} is not a valid journal event.`);
+      continue;
+    }
+    if (value.type === "created") creationCount += 1;
+    if (typeof value.operationId === "string") {
+      if (operationIds.has(value.operationId)) {
+        add("JOURNAL_OPERATION_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${value.operationId}.`);
+      } else {
+        operationIds.add(value.operationId);
+      }
+    }
+  }
+  if (creationCount === 0) {
+    add("JOURNAL_CREATION_MISSING", filename, "Task journal is missing its creation event.");
+  } else if (creationCount > 1) {
+    add("JOURNAL_CREATION_DUPLICATE", filename, "Task journal contains multiple creation events.");
+  }
+}
+
+async function validateCheckArtifact(
+  paths: VineaPaths,
+  filename: string,
+  task: Record<string, unknown> | null,
+  evidence: EvidenceRecord[],
+  add: IssueAdder,
+): Promise<void> {
+  const contents = await readOptionalRegularFile(filename, "CHECK", add);
+  if (contents === null || contents === "") return;
+  const declaredIds = task === null ? [] : taskRequirementIds(task);
+  try {
+    parseCheckDocument(contents, paths.repoRoot, declaredIds, evidence, filename);
+  } catch {
+    add(
+      "CHECK_PAYLOAD_INVALID",
+      filename,
+      "Check document must match a valid authoritative payload, declared requirements, evidence, and rendered table.",
+    );
   }
 }
 
@@ -516,6 +615,116 @@ function isTaskRecordShape(value: Record<string, unknown>): boolean {
     && isCommitMetadata(value.commit)
     && isIsoTimestamp(value.createdAt)
     && isIsoTimestamp(value.updatedAt);
+}
+
+function validateTaskRequirementIds(
+  task: Record<string, unknown>,
+  filename: string,
+  add: IssueAdder,
+): void {
+  const seen = new Set<string>();
+  for (const id of taskRequirementIds(task)) {
+    if (seen.has(id)) {
+      add("TASK_REQUIREMENT_ID_DUPLICATE", filename, `Task declares duplicate requirement or acceptance ID ${id}.`);
+    } else {
+      seen.add(id);
+    }
+  }
+}
+
+function taskRequirementIds(task: Record<string, unknown>): string[] {
+  return [task.requirements, task.acceptanceCriteria]
+    .flatMap((collection) => Array.isArray(collection) ? collection : [])
+    .flatMap((requirement) => isRecord(requirement) && typeof requirement.id === "string" ? [requirement.id] : []);
+}
+
+function isJournalEvent(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)
+    || value.schemaVersion !== SCHEMA_VERSION
+    || !isIsoTimestamp(value.timestamp)
+    || !isNonemptyString(value.actor)
+    || typeof value.type !== "string") {
+    return false;
+  }
+  if (value.type === "created") {
+    return hasOnlyKeys(value, ["schemaVersion", "type", "timestamp", "actor", "confirmation", "status"])
+      && value.confirmation === "user"
+      && value.status === "planning";
+  }
+  if (value.type === "transition_intent") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "operationId", "timestamp", "actor", "reason", "oldStatus", "newStatus",
+    ])
+      && isNonemptyString(value.operationId)
+      && isNonemptyString(value.reason)
+      && ALL_STATUSES.has(String(value.oldStatus))
+      && ALL_STATUSES.has(String(value.newStatus));
+  }
+  if (value.type === "continued") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "timestamp", "actor", "confirmation", "host", "sessionBound", "started", "status",
+    ])
+      && value.confirmation === "user"
+      && (value.host === "codex" || value.host === "claude")
+      && typeof value.sessionBound === "boolean"
+      && typeof value.started === "boolean"
+      && ALL_STATUSES.has(String(value.status));
+  }
+  if (value.type === "check_recorded" || value.type === "check_updated") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "operationId", "timestamp", "actor", "requirementId", "result",
+    ])
+      && isNonemptyString(value.operationId)
+      && isNonemptyString(value.requirementId)
+      && ["pass", "fail", "uncovered"].includes(String(value.result));
+  }
+  if (!TASK_MUTATION_KINDS.has(value.type)) return false;
+  if (value.mutationKind !== value.type
+    || !isNonemptyString(value.operationId)) {
+    return false;
+  }
+  if (value.type === "requirement_added" || value.type === "acceptance_criterion_added") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "requirementId",
+    ]) && isNonemptyString(value.requirementId);
+  }
+  if (value.type === "brief_set") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "artifact",
+    ]) && value.artifact === "brief.md";
+  }
+  if (value.type === "plan_set") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "artifact",
+    ]) && value.artifact === "plan.md";
+  }
+  if (value.type === "context_added") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "path",
+    ]) && isNonemptyString(value.path);
+  }
+  if (value.type === "evidence_recorded") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "evidenceId", "evidenceKind",
+    ]) && isNonemptyString(value.evidenceId)
+      && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.evidenceKind));
+  }
+  if (value.type === "learning_accepted") {
+    return hasOnlyKeys(value, [
+      "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "learningCandidateId", "confirmedBy",
+    ]) && isNonemptyString(value.learningCandidateId) && value.confirmedBy === "user";
+  }
+  return hasOnlyKeys(value, [
+    "schemaVersion", "type", "mutationKind", "operationId", "timestamp", "actor", "learningCandidateId",
+  ]) && isNonemptyString(value.learningCandidateId);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
 }
 
 function isSessionBindingShape(value: Record<string, unknown>): boolean {
