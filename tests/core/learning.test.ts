@@ -251,7 +251,7 @@ test("spec index membership ignores display labels and pre-existing duplicate ta
   const specPath = join(cwd, ".vinea", "specs", "testing-practice.md");
   await writeFile(
     indexPath,
-    "# Vinea Specs\n\n## Indexed specs\n\n- [Testing practice](testing-practice.md)\n",
+    "# Vinea Specs\n\n## Indexed specs\n\n- [Testing practice](testing-practice.md \"Reusable rules\")\n",
     "utf8",
   );
   expect((await proposeLearning(cwd, task.id, {
@@ -269,7 +269,7 @@ test("spec index membership ignores display labels and pre-existing duplicate ta
   ], cwd);
   expect(accepted.exitCode).toBe(0);
   expect(await readFile(indexPath, "utf8")).toBe(
-    "# Vinea Specs\n\n## Indexed specs\n\n- [Testing practice](testing-practice.md)\n",
+    "# Vinea Specs\n\n## Indexed specs\n\n- [Testing practice](testing-practice.md \"Reusable rules\")\n",
   );
 
   expect((await proposeLearning(cwd, task.id, {
@@ -285,7 +285,8 @@ test("spec index membership ignores display labels and pre-existing duplicate ta
       "",
       "## Indexed specs",
       "",
-      "- [Testing practice](testing-practice.md)",
+      "- [Testing practice](testing-practice.md \"Reusable rules\")",
+      "- [Parenthesized title](testing-practice.md (Reusable rules))",
       "- [Duplicate label](./testing-practice.md)",
       "",
     ].join("\n"),

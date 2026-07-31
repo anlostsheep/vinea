@@ -318,9 +318,16 @@ function containsNormalizedRule(contents: string, normalizedRule: string): boole
 
 function countDomainIndexTargets(contents: string, domain: string): number {
   return contents.split(/\r?\n/u).filter((line) => {
-    const match = line.match(/^\s*-\s*\[[^\]]+\]\(\s*([^)]+?)\s*\)\s*$/u);
-    return match !== null && normalizeSpecTarget(match[1]!) === `${domain}.md`;
+    const target = parseSpecIndexTarget(line);
+    return target !== undefined && normalizeSpecTarget(target) === `${domain}.md`;
   }).length;
+}
+
+function parseSpecIndexTarget(line: string): string | undefined {
+  const match = line.match(
+    /^\s*-\s*\[[^\]]*\]\(\s*(<[^>\r\n]+>|[^\s)]+)(?:[ \t]+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^)\\])*\)))?\s*\)\s*$/u,
+  );
+  return match?.[1];
 }
 
 function normalizeSpecTarget(value: string): string {
