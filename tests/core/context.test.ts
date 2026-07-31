@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import {
   mkdir,
   readFile,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -291,6 +292,41 @@ test("set brief and plan reject symlink and FIFO sources before reading or journ
   expect(fifo.exitCode).toBe(1);
   expect(await readFile(planPath, "utf8")).toBe(beforePlan);
   expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
+});
+
+test("task artifact readers reject symlinked brief, plan, and context files", async () => {
+  const cwd = await initializedRepo();
+  const outside = join(cwd, "outside-artifact.txt");
+  await writeFile(outside, "outside\n", "utf8");
+
+  for (const artifact of ["brief.md", "plan.md"] as const) {
+    const task = await createTask(cwd, `Unsafe ${artifact}`, "standard");
+    const taskDirectory = join(cwd, ".vinea", "tasks", "active", task.id);
+    const artifactPath = join(taskDirectory, artifact);
+    await rm(artifactPath);
+    await symlink(outside, artifactPath);
+    const ready = await runCli([
+      "task", "transition", task.id,
+      "--to", "ready",
+      "--reason", "Attempt unsafe readiness",
+      "--json",
+    ], cwd);
+    expect(ready.exitCode).toBe(1);
+    expect(JSON.parse(ready.stdout)).toMatchObject({ error: { code: "VINEA_SCHEMA_INVALID" } });
+  }
+
+  const task = await createTask(cwd, "Unsafe context reader", "standard");
+  const contextPath = contextArtifact(cwd, task.id);
+  await rm(contextPath);
+  await symlink(outside, contextPath);
+  for (const args of [
+    ["context", "list", task.id, "--json"],
+    ["orient", "--host", "codex", "--json"],
+  ]) {
+    const result = await runCli(args, cwd);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ error: { code: "VINEA_SCHEMA_INVALID" } });
+  }
 });
 
 async function initializedRepo(): Promise<string> {

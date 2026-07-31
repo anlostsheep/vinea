@@ -26,7 +26,7 @@ import {
   writeTaskArtifact,
   type TaskLocation,
 } from "./task-store.js";
-import type { VineaPaths } from "./paths.js";
+import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import { inspectWorkspace } from "./schema.js";
 import {
   SCHEMA_VERSION,
@@ -357,7 +357,7 @@ export async function transitionTask(
   const location = await findTask(paths, taskId);
   const oldStatus = location.task.status;
   assertTransitionAllowed(oldStatus, newStatus, options.unblock === true);
-  if (newStatus === "ready") await assertReadyPrerequisites(location);
+  if (newStatus === "ready") await assertReadyPrerequisites(paths, location);
   if (newStatus === "checking") await assertTddReadyForCheck(paths, location);
 
   const timestamp = (options.now ?? (() => new Date()))().toISOString();
@@ -626,10 +626,16 @@ async function setTaskDocument(
   return { taskId, artifact, estimatedBytes: bytes.byteLength };
 }
 
-async function assertReadyPrerequisites(location: TaskLocation): Promise<void> {
+async function assertReadyPrerequisites(paths: VineaPaths, location: TaskLocation): Promise<void> {
+  const briefPath = join(location.directory, "brief.md");
+  const planPath = join(location.directory, "plan.md");
+  await Promise.all([
+    assertNoSymlink(paths.repoRoot, briefPath),
+    assertNoSymlink(paths.repoRoot, planPath),
+  ]);
   const [brief, plan] = await Promise.all([
-    readFile(join(location.directory, "brief.md"), "utf8"),
-    readFile(join(location.directory, "plan.md"), "utf8"),
+    readFile(briefPath, "utf8"),
+    readFile(planPath, "utf8"),
   ]);
   const missing: string[] = [];
   if (brief.trim() === "") missing.push("brief.md");

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { AmbiguousTaskError, SchemaError, ValidationError } from "./errors.js";
+import { AmbiguousTaskError, SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
 import { assertNoSymlink, ensureDirectory, type VineaPaths } from "./paths.js";
 import {
@@ -207,6 +207,22 @@ export async function persistTaskMutation(
   return { ...location, task };
 }
 
+export async function assertNoPendingTaskTransition(
+  paths: VineaPaths,
+  location: TaskLocation,
+): Promise<void> {
+  const pending = await readPendingTransitionIntent(
+    paths,
+    join(location.directory, "journal.md"),
+    location.task.status,
+  );
+  if (pending !== null) {
+    throw new TransitionError(
+      `Task ${location.task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before recording task changes.`,
+    );
+  }
+}
+
 export async function appendTaskMutationIntent(
   paths: VineaPaths,
   location: TaskLocation,
@@ -214,6 +230,7 @@ export async function appendTaskMutationIntent(
   operationOverrides: Partial<TransitionPersistenceOperations> = {},
 ): Promise<TaskMutationJournalEvent> {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
+  await assertNoPendingTaskTransition(paths, location);
   const journalPath = join(location.directory, "journal.md");
   await assertNoSymlink(paths.repoRoot, journalPath);
   const intent: TaskMutationJournalEvent = {
@@ -230,6 +247,7 @@ export async function appendTaskContinuation(
   location: TaskLocation,
   event: JournalContinuationEvent,
 ): Promise<void> {
+  await assertNoPendingTaskTransition(paths, location);
   const journalPath = join(location.directory, "journal.md");
   await assertNoSymlink(paths.repoRoot, journalPath);
   await appendJsonl(journalPath, event, paths.repoRoot);
@@ -316,6 +334,7 @@ export async function writeTaskArtifact(
   artifact: "brief.md" | "plan.md",
   contents: string,
 ): Promise<void> {
+  await assertNoPendingTaskTransition(paths, location);
   await writeTaskTextArtifact(paths, location, artifact, contents);
 }
 
@@ -324,6 +343,7 @@ export async function writeCheckArtifact(
   location: TaskLocation,
   contents: string,
 ): Promise<void> {
+  await assertNoPendingTaskTransition(paths, location);
   await writeTaskTextArtifact(paths, location, "check.md", contents);
 }
 

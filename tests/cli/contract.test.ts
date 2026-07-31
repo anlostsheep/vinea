@@ -130,7 +130,10 @@ test("the public CLI completes and reopens one archived TDD task as machine-read
     "--json",
   ], cwd);
 
-  expect((await runJson<TaskRecord>(["finish", task.id, "--confirmed", "--json"], cwd)).status).toBe("finished");
+  const finished = await runCli(["finish", task.id, "--confirmed"], cwd);
+  expect(finished.exitCode).toBe(0);
+  expect(finished.stdout).toContain("status: finished");
+  expect(finished.stdout).toContain("incomplete requirements: none");
   expect((await runJson<TaskRecord>(["archive", task.id, "--confirmed", "--json"], cwd)).status).toBe("archived");
 
   const orient = await runJson<OrientSummary>(["orient", "--host", "codex", "--json"], cwd);

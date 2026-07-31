@@ -5,7 +5,12 @@ import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl } from "./json.js";
 import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
-import { findTask, writeCheckArtifact, type TaskLocation } from "./task-store.js";
+import {
+  assertNoPendingTaskTransition,
+  findTask,
+  writeCheckArtifact,
+  type TaskLocation,
+} from "./task-store.js";
 import {
   SCHEMA_VERSION,
   type CheckRow,
@@ -60,6 +65,7 @@ export async function upsertCheck(
   if (location.task.status === "finished") {
     throw new ValidationError(`Finished task check rows cannot be edited: ${taskId}`);
   }
+  await assertNoPendingTaskTransition(paths, location);
   const evidence = await readEvidence(paths, location);
   const requirementId = boundedNonempty(input.requirementId, "Requirement ID", MAX_ID_BYTES);
   const declaredIds = declaredRequirementIds(location);

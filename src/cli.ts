@@ -245,7 +245,7 @@ async function handlePropose(args: string[]): Promise<number> {
       executionMode,
       confirmation: "user",
     });
-    writeOutput(created.task, json, renderTask(created.task));
+    await writeTaskOutput(paths, created.task, json);
     return 0;
   }
 
@@ -299,7 +299,7 @@ async function handleTask(args: string[]): Promise<number> {
       reason: requiredOption(options, "--reason"),
       unblock: subcommand === "unblock",
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
 
@@ -314,7 +314,7 @@ async function handleTask(args: string[]): Promise<number> {
     const task = subcommand === "require"
       ? await addRequirement(paths, taskId, input)
       : await addAcceptanceCriterion(paths, taskId, input);
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
 
@@ -413,7 +413,7 @@ async function handleLearning(args: string[]): Promise<number> {
       rationale: requiredOption(options, "--rationale"),
       actor: "cli",
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   if (subcommand === "accept") {
@@ -432,7 +432,7 @@ async function handleLearning(args: string[]): Promise<number> {
       confirmedBy,
       actor: "cli",
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   if (subcommand === "archive") {
@@ -446,7 +446,7 @@ async function handleLearning(args: string[]): Promise<number> {
       reason: requiredOption(options, "--reason"),
       actor: "cli",
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   throw new UsageError(`Unknown learning command: ${subcommand ?? "(none)"}`);
@@ -490,11 +490,12 @@ async function handleFinish(args: string[]): Promise<number> {
   const taskId = requiredTaskId(args[0]);
   const options = parseOptions(args.slice(1), new Set(), new Set(["--confirmed", "--json"]));
   if (!options.has("--confirmed")) throw new UsageError("Finish requires explicit --confirmed.");
-  const task = await finishTask(resolveVineaPaths(process.cwd()), taskId, {
+  const paths = resolveVineaPaths(process.cwd());
+  const task = await finishTask(paths, taskId, {
     confirmed: true,
     actor: "cli",
   });
-  writeOutput(task, options.has("--json"), renderTask(task));
+  await writeTaskOutput(paths, task, options.has("--json"));
   return 0;
 }
 
@@ -502,12 +503,22 @@ async function handleArchive(args: string[]): Promise<number> {
   const taskId = requiredTaskId(args[0]);
   const options = parseOptions(args.slice(1), new Set(), new Set(["--confirmed", "--json"]));
   if (!options.has("--confirmed")) throw new UsageError("Archive requires explicit --confirmed.");
-  const task = await archiveTask(resolveVineaPaths(process.cwd()), taskId, {
+  const paths = resolveVineaPaths(process.cwd());
+  const task = await archiveTask(paths, taskId, {
     confirmed: true,
     actor: "cli",
   });
-  writeOutput(task, options.has("--json"), renderTask(task));
+  await writeTaskOutput(paths, task, options.has("--json"));
   return 0;
+}
+
+async function writeTaskOutput(
+  paths: ReturnType<typeof resolveVineaPaths>,
+  task: Awaited<ReturnType<typeof readTask>>,
+  json: boolean,
+): Promise<void> {
+  const check = await showCheck(paths, task.id);
+  writeOutput(task, json, renderTask(task, check.rows));
 }
 
 void main(process.argv.slice(2)).then((exitCode) => {

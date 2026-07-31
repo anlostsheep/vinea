@@ -580,8 +580,21 @@ async function persistTaskMutation(paths, location, task, event, operationOverri
   }
   return { ...location, task };
 }
+async function assertNoPendingTaskTransition(paths, location) {
+  const pending = await readPendingTransitionIntent(
+    paths,
+    join3(location.directory, "journal.md"),
+    location.task.status
+  );
+  if (pending !== null) {
+    throw new TransitionError(
+      `Task ${location.task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before recording task changes.`
+    );
+  }
+}
 async function appendTaskMutationIntent(paths, location, event, operationOverrides = {}) {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
+  await assertNoPendingTaskTransition(paths, location);
   const journalPath = join3(location.directory, "journal.md");
   await assertNoSymlink(paths.repoRoot, journalPath);
   const intent = {
@@ -593,6 +606,7 @@ async function appendTaskMutationIntent(paths, location, event, operationOverrid
   return intent;
 }
 async function appendTaskContinuation(paths, location, event) {
+  await assertNoPendingTaskTransition(paths, location);
   const journalPath = join3(location.directory, "journal.md");
   await assertNoSymlink(paths.repoRoot, journalPath);
   await appendJsonl(journalPath, event, paths.repoRoot);
@@ -656,9 +670,11 @@ async function readLatestCheckEvent(paths, location) {
   return null;
 }
 async function writeTaskArtifact(paths, location, artifact, contents) {
+  await assertNoPendingTaskTransition(paths, location);
   await writeTaskTextArtifact(paths, location, artifact, contents);
 }
 async function writeCheckArtifact(paths, location, contents) {
+  await assertNoPendingTaskTransition(paths, location);
   await writeTaskTextArtifact(paths, location, "check.md", contents);
 }
 async function removeTaskSessionBindings(paths, taskId) {
@@ -892,6 +908,7 @@ async function upsertCheck(paths, taskId, input, now = () => /* @__PURE__ */ new
   if (location.task.status === "finished") {
     throw new ValidationError(`Finished task check rows cannot be edited: ${taskId}`);
   }
+  await assertNoPendingTaskTransition(paths, location);
   const evidence = await readEvidence(paths, location);
   const requirementId = boundedNonempty(input.requirementId, "Requirement ID", MAX_ID_BYTES);
   const declaredIds = declaredRequirementIds(location);
@@ -1212,7 +1229,7 @@ async function addContextReference(paths, taskId, input, now = () => /* @__PURE_
   }
   const estimatedBytes = await inspectContextFile(paths.repoRoot, normalizedPath);
   const filename = resolve3(location.directory, "context.jsonl");
-  const references = await readContextReferences(filename);
+  const references = await readContextReferences(paths.repoRoot, filename);
   if (references.some((reference2) => reference2.path === normalizedPath)) {
     throw new ValidationError(`Context path is already registered for task ${taskId}: ${normalizedPath}`);
   }
@@ -1251,7 +1268,7 @@ async function addContextReference(paths, taskId, input, now = () => /* @__PURE_
 async function listContextReferences(paths, taskId) {
   const config = await readConfig(paths);
   const location = await findTask(paths, taskId);
-  const references = await readContextReferences(resolve3(location.directory, "context.jsonl"));
+  const references = await readContextReferences(paths.repoRoot, resolve3(location.directory, "context.jsonl"));
   return {
     references,
     totals: {
@@ -1308,7 +1325,8 @@ async function inspectContextFile(repoRoot, repositoryPath) {
     throw new ValidationError(`Unable to inspect context path: ${repositoryPath}`, error);
   }
 }
-async function readContextReferences(filename) {
+async function readContextReferences(repoRoot, filename) {
+  await assertNoSymlink(repoRoot, filename);
   let contents;
   try {
     contents = await readFile4(filename, "utf8");
@@ -1813,7 +1831,7 @@ async function transitionTask(paths, taskId, newStatus, options) {
   const location = await findTask(paths, taskId);
   const oldStatus = location.task.status;
   assertTransitionAllowed(oldStatus, newStatus, options.unblock === true);
-  if (newStatus === "ready") await assertReadyPrerequisites(location);
+  if (newStatus === "ready") await assertReadyPrerequisites(paths, location);
   if (newStatus === "checking") await assertTddReadyForCheck(paths, location);
   const timestamp = (options.now ?? (() => /* @__PURE__ */ new Date()))().toISOString();
   const task = { ...location.task, status: newStatus, updatedAt: timestamp };
@@ -2018,10 +2036,16 @@ async function setTaskDocument(paths, taskId, sourceFile, artifact, actor, now) 
   await writeTaskArtifact(paths, location, artifact, contents);
   return { taskId, artifact, estimatedBytes: bytes.byteLength };
 }
-async function assertReadyPrerequisites(location) {
+async function assertReadyPrerequisites(paths, location) {
+  const briefPath = join6(location.directory, "brief.md");
+  const planPath = join6(location.directory, "plan.md");
+  await Promise.all([
+    assertNoSymlink(paths.repoRoot, briefPath),
+    assertNoSymlink(paths.repoRoot, planPath)
+  ]);
   const [brief, plan] = await Promise.all([
-    readFile6(join6(location.directory, "brief.md"), "utf8"),
-    readFile6(join6(location.directory, "plan.md"), "utf8")
+    readFile6(briefPath, "utf8"),
+    readFile6(planPath, "utf8")
   ]);
   const missing = [];
   if (brief.trim() === "") missing.push("brief.md");
@@ -3847,7 +3871,7 @@ async function handlePropose(args) {
       executionMode,
       confirmation: "user"
     });
-    writeOutput(created.task, json, renderTask(created.task));
+    await writeTaskOutput(paths, created.task, json);
     return 0;
   }
   writeOutput(proposal, json, renderProposal(proposal));
@@ -3896,7 +3920,7 @@ async function handleTask(args) {
       reason: requiredOption(options, "--reason"),
       unblock: subcommand === "unblock"
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   if (subcommand === "require" || subcommand === "accept") {
@@ -3908,7 +3932,7 @@ async function handleTask(args) {
       actor: "cli"
     };
     const task = subcommand === "require" ? await addRequirement(paths, taskId, input) : await addAcceptanceCriterion(paths, taskId, input);
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   if (subcommand === "set-plan" || subcommand === "set-brief") {
@@ -4000,7 +4024,7 @@ async function handleLearning(args) {
       rationale: requiredOption(options, "--rationale"),
       actor: "cli"
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   if (subcommand === "accept") {
@@ -4019,7 +4043,7 @@ async function handleLearning(args) {
       confirmedBy,
       actor: "cli"
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   if (subcommand === "archive") {
@@ -4033,7 +4057,7 @@ async function handleLearning(args) {
       reason: requiredOption(options, "--reason"),
       actor: "cli"
     });
-    writeOutput(task, options.has("--json"), renderTask(task));
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   throw new UsageError(`Unknown learning command: ${subcommand ?? "(none)"}`);
@@ -4074,23 +4098,29 @@ async function handleFinish(args) {
   const taskId = requiredTaskId(args[0]);
   const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--confirmed", "--json"]));
   if (!options.has("--confirmed")) throw new UsageError("Finish requires explicit --confirmed.");
-  const task = await finishTask(resolveVineaPaths(process.cwd()), taskId, {
+  const paths = resolveVineaPaths(process.cwd());
+  const task = await finishTask(paths, taskId, {
     confirmed: true,
     actor: "cli"
   });
-  writeOutput(task, options.has("--json"), renderTask(task));
+  await writeTaskOutput(paths, task, options.has("--json"));
   return 0;
 }
 async function handleArchive(args) {
   const taskId = requiredTaskId(args[0]);
   const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--confirmed", "--json"]));
   if (!options.has("--confirmed")) throw new UsageError("Archive requires explicit --confirmed.");
-  const task = await archiveTask(resolveVineaPaths(process.cwd()), taskId, {
+  const paths = resolveVineaPaths(process.cwd());
+  const task = await archiveTask(paths, taskId, {
     confirmed: true,
     actor: "cli"
   });
-  writeOutput(task, options.has("--json"), renderTask(task));
+  await writeTaskOutput(paths, task, options.has("--json"));
   return 0;
+}
+async function writeTaskOutput(paths, task, json) {
+  const check = await showCheck(paths, task.id);
+  writeOutput(task, json, renderTask(task, check.rows));
 }
 void main(process.argv.slice(2)).then((exitCode) => {
   process.exitCode = exitCode;

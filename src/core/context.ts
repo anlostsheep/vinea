@@ -7,8 +7,7 @@ import {
 import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl } from "./json.js";
-import type { VineaPaths } from "./paths.js";
-import { assertInside } from "./paths.js";
+import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
 import { appendTaskMutationIntent, assertTaskMutable, findTask } from "./task-store.js";
 import {
   SCHEMA_VERSION,
@@ -50,7 +49,7 @@ export async function addContextReference(
   }
   const estimatedBytes = await inspectContextFile(paths.repoRoot, normalizedPath);
   const filename = resolve(location.directory, "context.jsonl");
-  const references = await readContextReferences(filename);
+  const references = await readContextReferences(paths.repoRoot, filename);
 
   if (references.some((reference) => reference.path === normalizedPath)) {
     throw new ValidationError(`Context path is already registered for task ${taskId}: ${normalizedPath}`);
@@ -95,7 +94,7 @@ export async function listContextReferences(
 ): Promise<ContextManifest> {
   const config = await readConfig(paths);
   const location = await findTask(paths, taskId);
-  const references = await readContextReferences(resolve(location.directory, "context.jsonl"));
+  const references = await readContextReferences(paths.repoRoot, resolve(location.directory, "context.jsonl"));
   return {
     references,
     totals: {
@@ -155,7 +154,8 @@ async function inspectContextFile(repoRoot: string, repositoryPath: string): Pro
   }
 }
 
-async function readContextReferences(filename: string): Promise<ContextReference[]> {
+async function readContextReferences(repoRoot: string, filename: string): Promise<ContextReference[]> {
+  await assertNoSymlink(repoRoot, filename);
   let contents: string;
   try {
     contents = await readFile(filename, "utf8");

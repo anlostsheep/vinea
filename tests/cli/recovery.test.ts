@@ -37,6 +37,20 @@ test("CLI retries pending active and archive transition intents without duplicat
     { writeTask: async () => { throw new SchemaError("Injected active task.json failure"); } },
   )).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
 
+  const interleavedMutation = await runCli([
+    "task", "require", active.id,
+    "--id", "R2",
+    "--text", "Must not interleave a pending transition",
+    "--json",
+  ], cwd);
+  expect(interleavedMutation.exitCode).toBe(1);
+  expect(JSON.parse(interleavedMutation.stdout)).toMatchObject({
+    error: {
+      code: "VINEA_TRANSITION_INVALID",
+      message: expect.stringContaining("retry that transition"),
+    },
+  });
+
   const activeRetry = await runCli([
     "task", "transition", active.id,
     "--to", "in_progress",
