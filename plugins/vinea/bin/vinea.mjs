@@ -15,7 +15,7 @@ var package_default = {
     test: "vitest run",
     "package:plugin": "node scripts/package-public-plugin.mjs",
     "check:plugin": "node scripts/check-public-plugin.mjs",
-    check: "npm run typecheck && npm test && npm run build",
+    check: "npm run typecheck && npm test && npm run package:plugin && npm run check:plugin",
     "test:e2e:manual": "node dist/vinea.mjs --help"
   },
   devDependencies: {

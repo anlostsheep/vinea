@@ -1,54 +1,105 @@
 # Vinea
 
-Vinea is a Node.js command-line tool and host plugin for guided repository
-workflows. It keeps task state in the target repository, so Codex and Claude
-Code can deliberately recover the same task in a new session.
+Vinea is a lightweight, file-first workflow for AI coding teams. Its task
+state lives in the target Git repository, so Codex and Claude Code can
+deliberately recover the same work in a new session.
 
-## Plugin distribution
+The committed public plugin is [`plugins/vinea`](plugins/vinea). It contains
+one bundled Node CLI and eight host-prefixed skills: `vinea:orient`,
+`vinea:propose`, `vinea:brainstorm`, `vinea:plan`, `vinea:continue`,
+`vinea:check`, `vinea:finish`, and `vinea:doctor`.
 
-The committed public plugin unit is [`plugins/vinea`](plugins/vinea). It ships
-the same bundled CLI and eight prefixed workflow skills for both hosts; it has
-no MCP server, daemon, hooks, apps, or cloud service.
+## Install locally
 
-Build and check the distributable tree with:
+From a Vinea checkout, use the helper for the host you want to test:
 
 ```sh
-npm run package:plugin
-npm run check:plugin
+scripts/install-codex-plugin.sh
+scripts/install-claude-plugin.sh
 ```
 
-The source manifests live under `hosts/`; the packager replaces their version
-placeholder with the root package version and writes the public Codex and
-Claude Code manifests plus both repository marketplace files.
+Each helper first runs `npm run package:plugin`, then copies the public plugin
+tree into a host-specific personal marketplace:
 
-## Development
+| Host | Public plugin copy | Marketplace action |
+| --- | --- | --- |
+| Codex | `~/.codex/plugins/vinea` | Updates `~/.agents/plugins/marketplace.json` with source `./.codex/plugins/vinea`, then runs `codex plugin marketplace add` and `codex plugin add`. |
+| Claude Code | `~/.claude/plugins/marketplaces/vinea-local/plugins/vinea` | Writes the dedicated `vinea-local` marketplace, then runs `claude plugin validate`, `marketplace add`/`update`, and `plugin install --scope user`. |
+
+The helpers do not write external credentials. If the relevant CLI is absent,
+they prepare and print the exact local files and manual commands, but do not
+claim that the plugin was activated. In either host, start a **new session**
+after installation or update: installed skills and plugins are not hot-reloaded.
+
+For a one-session Claude Code experiment without installation, the host also
+supports its own `--plugin-dir` option; that is a host feature rather than a
+Vinea installation path.
+
+## Workflow
+
+Start every new or uncertain session with `vinea:orient`. First-release
+recovery is intentionally explicit: there is no hook that attaches a task in
+the background. Codex stores a session binding when the host supplies
+`CODEX_THREAD_ID`; when Claude Code has no host session ID, `vinea:orient`
+presents active candidates and requires the user to confirm one.
+
+A concise medium-risk lifecycle looks like this:
+
+1. Use `vinea:propose`, review the risk and mode options, then create the task
+   only after the user confirms.
+2. Use `vinea:brainstorm` only for a real design choice. It asks one question
+   at a time, presents 2–3 options, and waits for approval. Use `vinea:plan`
+   to record implementation and quality choices.
+3. For a user-confirmed TDD task, record a real failing `tdd-red` result before
+   implementation and a later passing `tdd-green` result. TDD is optional,
+   never a default requirement.
+4. Use `vinea:check` to cover every requirement with observed evidence. Commit
+   or otherwise handle the business Git changes through the repository's own
+   workflow before `vinea:finish` and `vinea:archive`.
+5. `vinea:finish` proposes learning candidates but never promotes them by
+   itself. The user must explicitly accept reusable learning; otherwise archive
+   it with the task.
+
+Delegated work is also optional. It requires user confirmation and a host that
+can actually provide the roles: research/check agents stay read-only and one
+implementer owns business writes. When the host cannot support this, Vinea asks
+for single-agent execution or another host; it does not silently substitute a
+different mode.
+
+## Repository state and validation
+
+Vinea writes only the target repository's `.vinea/` directory. The workspace,
+task records, artifacts, and runtime pointers carry explicit schema versions;
+a later unsupported version is reported rather than silently rewritten. Active
+tasks live below `.vinea/tasks/active/<task-id>/`, while completed task records
+move to `.vinea/tasks/archive/<task-id>/`. Reusable rules appear below
+`.vinea/specs/` only after an explicit user acceptance.
+
+Use the host-independent validator in CI when you want to check Vinea state:
+
+```sh
+node plugins/vinea/bin/vinea.mjs validate --json
+```
+
+`validate` reads versioned Vinea state and local session pointers without
+writing or requiring an AI host. It is not a replacement for the consuming
+project's unit, integration, lint, build, or deployment checks; configure
+those separately.
+
+Vinea deliberately ships no MCP server, daemon, hooks, apps, or cloud service.
+
+## Development and distribution checks
 
 ```sh
 npm install
 npm run check
+npm run package:plugin
+npm run check:plugin
 ```
 
-Run the bundled CLI with:
+Run the development or packaged CLI directly with:
 
 ```sh
 node dist/vinea.mjs --help
-```
-
-The packaged equivalent is:
-
-```sh
 node plugins/vinea/bin/vinea.mjs --help
 ```
-
-## CI state validation
-
-Use the host-independent validator as the only CI command for Vinea
-structure and state validation:
-
-```sh
-vinea validate --json
-```
-
-The command checks versioned Vinea state and local session pointers without
-writing files or requiring an AI host. It does not run the project's own
-tests; configure those separately in CI.
