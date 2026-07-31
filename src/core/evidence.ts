@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { readConfig } from "./config.js";
 import { SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { appendJsonl } from "./json.js";
-import type { VineaPaths } from "./paths.js";
+import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import {
   appendTaskMutationIntent,
   assertTaskMutable,
@@ -93,9 +93,9 @@ export async function recordEvidence(
   return record;
 }
 
-export async function assertTddReadyForCheck(location: TaskLocation): Promise<void> {
+export async function assertTddReadyForCheck(paths: VineaPaths, location: TaskLocation): Promise<void> {
   if (location.task.qualityMode !== "tdd") return;
-  const evidence = await readEvidenceRecords(join(location.directory, "evidence.jsonl"));
+  const evidence = await readEvidenceRecords(paths.repoRoot, join(location.directory, "evidence.jsonl"));
   let hasValidRed = false;
   for (const record of evidence) {
     if (isValidRed(record)) {
@@ -158,7 +158,8 @@ function boundedNonempty(value: string, label: string, maxBytes: number): string
   return normalized;
 }
 
-async function readEvidenceRecords(filename: string): Promise<EvidenceRecord[]> {
+async function readEvidenceRecords(repoRoot: string, filename: string): Promise<EvidenceRecord[]> {
+  await assertNoSymlink(repoRoot, filename);
   let contents: string;
   try {
     contents = await readFile(filename, "utf8");

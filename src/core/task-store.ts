@@ -145,12 +145,26 @@ export async function persistTaskTransition(
   const destination = shouldMoveToArchive ? join(paths.archivedTasks, task.id) : undefined;
   await assertNoSymlink(paths.repoRoot, journalPath);
   if (destination !== undefined) await assertNoSymlink(paths.repoRoot, destination);
-  const intent: JournalTransitionIntentEvent = {
-    ...transition,
-    type: "transition_intent",
-    operationId: operations.createOperationId(),
-  };
-  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  const pending = await readPendingTransitionIntent(paths, journalPath, location.task.status);
+  let intent: JournalTransitionIntentEvent;
+  if (pending !== null) {
+    if (pending.oldStatus !== transition.oldStatus || pending.newStatus !== transition.newStatus) {
+      throw new SchemaError(
+        `Task ${task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before starting another.`,
+      );
+    }
+    // A previous intent is deliberately retained as the operation identity. The
+    // task.json write is its commit marker, so retrying must finish this intent
+    // rather than append a second, discontinuous transition.
+    intent = pending;
+  } else {
+    intent = {
+      ...transition,
+      type: "transition_intent",
+      operationId: operations.createOperationId(),
+    };
+    await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  }
 
   let targetDirectory = location.directory;
   let targetScope = location.scope;
@@ -164,12 +178,13 @@ export async function persistTaskTransition(
     targetScope = "archive";
   }
 
+  const committedTask = pending === null ? task : { ...task, updatedAt: intent.timestamp };
   try {
-    await operations.writeTask(join(targetDirectory, "task.json"), task, paths.repoRoot);
+    await operations.writeTask(join(targetDirectory, "task.json"), committedTask, paths.repoRoot);
   } catch (error) {
     throw new SchemaError(`Unable to commit task transition for ${task.id}; transition intent remains pending for retry`, error);
   }
-  return { task, directory: targetDirectory, scope: targetScope };
+  return { task: committedTask, directory: targetDirectory, scope: targetScope };
 }
 
 export async function persistTaskMutation(
@@ -268,9 +283,9 @@ export async function writeSessionBinding(
   await writeJsonAtomic(filename, binding, paths.repoRoot);
 }
 
-export async function readLatestEvidence(location: TaskLocation): Promise<EvidenceRecord | null> {
+export async function readLatestEvidence(paths: VineaPaths, location: TaskLocation): Promise<EvidenceRecord | null> {
   const filename = join(location.directory, "evidence.jsonl");
-  const records = await readJsonlRecords(filename);
+  const records = await readJsonlRecords(paths.repoRoot, filename);
   if (records.length === 0) return null;
   const evidence = records.map((record, index) => {
     if (!isEvidenceRecord(record)) {
@@ -282,10 +297,11 @@ export async function readLatestEvidence(location: TaskLocation): Promise<Eviden
 }
 
 export async function readLatestCheckEvent(
+  paths: VineaPaths,
   location: TaskLocation,
 ): Promise<Record<string, unknown> | null> {
   const filename = join(location.directory, "journal.md");
-  const events = await readJsonlRecords(filename);
+  const events = await readJsonlRecords(paths.repoRoot, filename);
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (!isRecord(event) || typeof event.type !== "string") continue;
@@ -589,7 +605,41 @@ function isCommitMetadata(value: unknown): boolean {
     && (value.message === undefined || typeof value.message === "string");
 }
 
-async function readJsonlRecords(filename: string): Promise<unknown[]> {
+async function readPendingTransitionIntent(
+  paths: VineaPaths,
+  filename: string,
+  taskStatus: TaskRecord["status"],
+): Promise<JournalTransitionIntentEvent | null> {
+  const records = await readJsonlRecords(paths.repoRoot, filename);
+  const candidate = records.at(-1);
+  if (!isTransitionIntent(candidate) || candidate.oldStatus !== taskStatus) return null;
+  return candidate;
+}
+
+function isTransitionIntent(value: unknown): value is JournalTransitionIntentEvent {
+  return isRecord(value)
+    && value.schemaVersion === SCHEMA_VERSION
+    && value.type === "transition_intent"
+    && typeof value.operationId === "string"
+    && typeof value.timestamp === "string"
+    && typeof value.actor === "string"
+    && typeof value.reason === "string"
+    && isTaskStatus(value.oldStatus)
+    && isTaskStatus(value.newStatus);
+}
+
+function isTaskStatus(value: unknown): value is TaskRecord["status"] {
+  return value === "planning"
+    || value === "ready"
+    || value === "in_progress"
+    || value === "checking"
+    || value === "finished"
+    || value === "archived"
+    || value === "blocked";
+}
+
+async function readJsonlRecords(repoRoot: string, filename: string): Promise<unknown[]> {
+  await assertNoSymlink(repoRoot, filename);
   let contents: string;
   try {
     contents = await readFile(filename, "utf8");

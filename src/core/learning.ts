@@ -323,14 +323,14 @@ function countDomainIndexTargets(contents: string, domain: string): number {
   }).length;
 }
 
-function parseSpecIndexTarget(line: string): string | undefined {
+export function parseSpecIndexTarget(line: string): string | undefined {
   const match = line.match(
     /^\s*-\s*\[[^\]]*\]\(\s*(<[^>\r\n]+>|[^\s)]+)(?:[ \t]+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^)\\])*\)))?\s*\)\s*$/u,
   );
   return match?.[1];
 }
 
-function normalizeSpecTarget(value: string): string {
+export function normalizeSpecTarget(value: string): string {
   let target = value.trim();
   if (target.startsWith("<") && target.endsWith(">")) {
     target = target.slice(1, -1).trim();

@@ -531,12 +531,23 @@ async function persistTaskTransition(paths, location, task, transition, operatio
   const destination = shouldMoveToArchive ? join3(paths.archivedTasks, task.id) : void 0;
   await assertNoSymlink(paths.repoRoot, journalPath);
   if (destination !== void 0) await assertNoSymlink(paths.repoRoot, destination);
-  const intent = {
-    ...transition,
-    type: "transition_intent",
-    operationId: operations.createOperationId()
-  };
-  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  const pending = await readPendingTransitionIntent(paths, journalPath, location.task.status);
+  let intent;
+  if (pending !== null) {
+    if (pending.oldStatus !== transition.oldStatus || pending.newStatus !== transition.newStatus) {
+      throw new SchemaError(
+        `Task ${task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before starting another.`
+      );
+    }
+    intent = pending;
+  } else {
+    intent = {
+      ...transition,
+      type: "transition_intent",
+      operationId: operations.createOperationId()
+    };
+    await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  }
   let targetDirectory = location.directory;
   let targetScope = location.scope;
   if (destination !== void 0) {
@@ -548,12 +559,13 @@ async function persistTaskTransition(paths, location, task, transition, operatio
     targetDirectory = destination;
     targetScope = "archive";
   }
+  const committedTask = pending === null ? task : { ...task, updatedAt: intent.timestamp };
   try {
-    await operations.writeTask(join3(targetDirectory, "task.json"), task, paths.repoRoot);
+    await operations.writeTask(join3(targetDirectory, "task.json"), committedTask, paths.repoRoot);
   } catch (error) {
     throw new SchemaError(`Unable to commit task transition for ${task.id}; transition intent remains pending for retry`, error);
   }
-  return { task, directory: targetDirectory, scope: targetScope };
+  return { task: committedTask, directory: targetDirectory, scope: targetScope };
 }
 async function persistTaskMutation(paths, location, task, event, operationOverrides = {}) {
   const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
@@ -621,9 +633,9 @@ async function writeSessionBinding(paths, host, sessionId, binding) {
   await ensureDirectory(paths.repoRoot, paths.sessions);
   await writeJsonAtomic(filename, binding, paths.repoRoot);
 }
-async function readLatestEvidence(location) {
+async function readLatestEvidence(paths, location) {
   const filename = join3(location.directory, "evidence.jsonl");
-  const records = await readJsonlRecords(filename);
+  const records = await readJsonlRecords(paths.repoRoot, filename);
   if (records.length === 0) return null;
   const evidence = records.map((record, index) => {
     if (!isEvidenceRecord(record)) {
@@ -633,9 +645,9 @@ async function readLatestEvidence(location) {
   });
   return evidence.at(-1);
 }
-async function readLatestCheckEvent(location) {
+async function readLatestCheckEvent(paths, location) {
   const filename = join3(location.directory, "journal.md");
-  const events = await readJsonlRecords(filename);
+  const events = await readJsonlRecords(paths.repoRoot, filename);
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (!isRecord2(event) || typeof event.type !== "string") continue;
@@ -829,7 +841,20 @@ function isCommitMetadata(value) {
   if (Object.keys(value).some((key) => !["sha", "message"].includes(key))) return false;
   return typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
 }
-async function readJsonlRecords(filename) {
+async function readPendingTransitionIntent(paths, filename, taskStatus) {
+  const records = await readJsonlRecords(paths.repoRoot, filename);
+  const candidate = records.at(-1);
+  if (!isTransitionIntent(candidate) || candidate.oldStatus !== taskStatus) return null;
+  return candidate;
+}
+function isTransitionIntent(value) {
+  return isRecord2(value) && value.schemaVersion === SCHEMA_VERSION && value.type === "transition_intent" && typeof value.operationId === "string" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.reason === "string" && isTaskStatus(value.oldStatus) && isTaskStatus(value.newStatus);
+}
+function isTaskStatus(value) {
+  return value === "planning" || value === "ready" || value === "in_progress" || value === "checking" || value === "finished" || value === "archived" || value === "blocked";
+}
+async function readJsonlRecords(repoRoot, filename) {
+  await assertNoSymlink(repoRoot, filename);
   let contents;
   try {
     contents = await readFile2(filename, "utf8");
@@ -867,7 +892,7 @@ async function upsertCheck(paths, taskId, input, now = () => /* @__PURE__ */ new
   if (location.task.status === "finished") {
     throw new ValidationError(`Finished task check rows cannot be edited: ${taskId}`);
   }
-  const evidence = await readEvidence(location);
+  const evidence = await readEvidence(paths, location);
   const requirementId = boundedNonempty(input.requirementId, "Requirement ID", MAX_ID_BYTES);
   const declaredIds = declaredRequirementIds(location);
   if (!declaredIds.includes(requirementId)) {
@@ -921,11 +946,11 @@ async function upsertCheck(paths, taskId, input, now = () => /* @__PURE__ */ new
 async function showCheck(paths, taskId) {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
-  const evidence = await readEvidence(location);
+  const evidence = await readEvidence(paths, location);
   return summarize(taskId, await readRows(paths, location, evidence));
 }
 async function readCheckForLocation(paths, location) {
-  const evidence = await readEvidence(location);
+  const evidence = await readEvidence(paths, location);
   const rows = await readRows(paths, location, evidence);
   return { summary: summarize(location.task.id, rows), evidence };
 }
@@ -943,6 +968,7 @@ function summarize(taskId, rows) {
 }
 async function readRows(paths, location, evidence) {
   const filename = join4(location.directory, "check.md");
+  await assertNoSymlink(paths.repoRoot, filename);
   let contents;
   try {
     contents = await readFile3(filename, "utf8");
@@ -1057,8 +1083,9 @@ function validateStoredRow(value, repoRoot, filename, rowNumber) {
     checkedAt: value.checkedAt
   };
 }
-async function readEvidence(location) {
+async function readEvidence(paths, location) {
   const filename = join4(location.directory, "evidence.jsonl");
+  await assertNoSymlink(paths.repoRoot, filename);
   let contents;
   try {
     contents = await readFile3(filename, "utf8");
@@ -1379,9 +1406,9 @@ async function recordEvidence(paths, taskId, input, now = () => /* @__PURE__ */ 
   await appendJsonl(join5(location.directory, "evidence.jsonl"), record, paths.repoRoot);
   return record;
 }
-async function assertTddReadyForCheck(location) {
+async function assertTddReadyForCheck(paths, location) {
   if (location.task.qualityMode !== "tdd") return;
-  const evidence = await readEvidenceRecords(join5(location.directory, "evidence.jsonl"));
+  const evidence = await readEvidenceRecords(paths.repoRoot, join5(location.directory, "evidence.jsonl"));
   let hasValidRed = false;
   for (const record of evidence) {
     if (isValidRed(record)) {
@@ -1432,7 +1459,8 @@ function boundedNonempty2(value, label, maxBytes) {
   }
   return normalized;
 }
-async function readEvidenceRecords(filename) {
+async function readEvidenceRecords(repoRoot, filename) {
+  await assertNoSymlink(repoRoot, filename);
   let contents;
   try {
     contents = await readFile5(filename, "utf8");
@@ -1683,10 +1711,11 @@ async function orientWorkspace(paths, input) {
   const canInspectTasks = health.initialized && health.supportedSchema;
   const locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
   const candidates = await Promise.all(locations.map(async (location) => {
-    const [context, latestEvidence, latestCheckEvent] = await Promise.all([
+    const [context, latestEvidence, latestCheckEvent, check] = await Promise.all([
       listContextReferences(paths, location.task.id),
-      readLatestEvidence(location),
-      readLatestCheckEvent(location)
+      readLatestEvidence(paths, location),
+      readLatestCheckEvent(paths, location),
+      readCheckForLocation(paths, location)
     ]);
     return {
       id: location.task.id,
@@ -1694,7 +1723,7 @@ async function orientWorkspace(paths, input) {
       status: location.task.status,
       qualityMode: location.task.qualityMode,
       executionMode: location.task.executionMode,
-      requirementsNotCovered: incompleteRequirements(location.task),
+      requirementsNotCovered: incompleteRequirements(location.task, check.summary.rows),
       contextReferences: context.references,
       latestEvidence,
       latestCheckEvent
@@ -1785,7 +1814,7 @@ async function transitionTask(paths, taskId, newStatus, options) {
   const oldStatus = location.task.status;
   assertTransitionAllowed(oldStatus, newStatus, options.unblock === true);
   if (newStatus === "ready") await assertReadyPrerequisites(location);
-  if (newStatus === "checking") await assertTddReadyForCheck(location);
+  if (newStatus === "checking") await assertTddReadyForCheck(paths, location);
   const timestamp = (options.now ?? (() => /* @__PURE__ */ new Date()))().toISOString();
   const task = { ...location.task, status: newStatus, updatedAt: timestamp };
   const transition = {
@@ -1834,7 +1863,7 @@ async function finishTask(paths, taskId, input) {
     );
   }
   try {
-    await assertTddReadyForCheck(location);
+    await assertTddReadyForCheck(paths, location);
   } catch (error) {
     throw new FinishGateError(
       `Finish TDD evidence is invalid; a valid tdd-red must precede tdd-green for ${taskId}.`
@@ -1900,8 +1929,9 @@ function nextGate(task) {
   if (task.status === "archived") return "none";
   return FORWARD_TRANSITIONS[task.status] ?? "none";
 }
-function incompleteRequirements(task) {
-  return task.requirements.filter((requirement) => !task.acceptanceCriteria.some((criterion) => criterion.id === requirement.id)).map((requirement) => requirement.id);
+function incompleteRequirements(task, rows = []) {
+  const passingIds = new Set(rows.filter((row) => row.result === "pass").map((row) => row.requirementId));
+  return [...task.requirements, ...task.acceptanceCriteria].map((requirement) => requirement.id).filter((id) => !passingIds.has(id));
 }
 function assertTransitionAllowed(oldStatus, newStatus, unblock) {
   if (oldStatus === "blocked") {
@@ -2173,8 +2203,8 @@ function renderInlineAudit(record) {
     ""
   ].join("\n");
 }
-function renderTask(task) {
-  const incomplete = incompleteRequirements(task);
+function renderTask(task, checkRows = []) {
+  const incomplete = incompleteRequirements(task, checkRows);
   return [
     `task ID: ${task.id}`,
     `status: ${task.status}`,
@@ -2865,6 +2895,8 @@ var TASK_MUTATION_KINDS = /* @__PURE__ */ new Set([
   "learning_accepted",
   "learning_archived"
 ]);
+var RUNTIME_IGNORE2 = ".runtime/\n";
+var MANAGED_SPEC_TARGET = /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
 async function validateWorkspace(paths) {
   const issues = [];
   const add = (code, filename, message) => {
@@ -2880,6 +2912,7 @@ async function validateWorkspace(paths) {
     return { issues: sortIssues(issues) };
   }
   const limits = await validateConfig(paths, add);
+  await validateManagedSpecs(paths, add);
   await validateInlineAudit(paths, add);
   for (const [label, directory] of [
     ["specs", paths.specs],
@@ -2910,6 +2943,49 @@ async function validateWorkspace(paths) {
   }
   await validateSessionBindings(paths, taskScan.activeTaskIds, add);
   return { issues: sortIssues(issues) };
+}
+async function validateManagedSpecs(paths, add) {
+  const gitignore = await readRequiredRegularFile(paths.gitignore, "VINEA_GITIGNORE", add);
+  if (gitignore !== null && gitignore !== RUNTIME_IGNORE2) {
+    add(
+      "VINEA_GITIGNORE_INVALID",
+      paths.gitignore,
+      "Managed .vinea/.gitignore must contain exactly .runtime/."
+    );
+  }
+  if (await entryKind(paths.specs) !== "directory") return;
+  const index = await readRequiredRegularFile(paths.specIndex, "SPEC_INDEX", add);
+  if (index === null) return;
+  const seenTargets = /* @__PURE__ */ new Set();
+  for (const [index_, line] of index.split(/\r?\n/u).entries()) {
+    if (!/^\s*-\s*\[/u.test(line)) continue;
+    const target = parseSpecIndexTarget(line);
+    if (target === void 0) {
+      add("SPEC_INDEX_ENTRY_INVALID", paths.specIndex, `Line ${index_ + 1} is not a valid indexed spec link.`);
+      continue;
+    }
+    const normalized = normalizeSpecTarget(target);
+    if (!MANAGED_SPEC_TARGET.test(normalized)) {
+      add(
+        "SPEC_INDEX_TARGET_INVALID",
+        paths.specIndex,
+        `Line ${index_ + 1} must target a managed relative <domain>.md spec file.`
+      );
+      continue;
+    }
+    if (seenTargets.has(normalized)) {
+      add("SPEC_INDEX_TARGET_DUPLICATE", paths.specIndex, `Line ${index_ + 1} duplicates spec target ${normalized}.`);
+      continue;
+    }
+    seenTargets.add(normalized);
+    const targetPath = join8(paths.specs, normalized);
+    const kind = await entryKind(targetPath);
+    if (kind === "missing") {
+      add("SPEC_INDEX_TARGET_MISSING", targetPath, `Indexed spec target ${normalized} is missing.`);
+    } else if (kind !== "file") {
+      add("SPEC_INDEX_TARGET_INVALID", targetPath, `Indexed spec target ${normalized} must be a regular file.`);
+    }
+  }
 }
 async function validateConfig(paths, add) {
   const value = await readJsonObject(paths.config, "CONFIG", add);
@@ -3223,7 +3299,7 @@ async function validateJournalArtifact(filename, task, add) {
     add("JOURNAL_CREATION_DUPLICATE", filename, "Task journal contains multiple creation events.");
     replayIsValid = false;
   }
-  if (replayIsValid && creationCount === 1 && currentStatus !== null && task !== null && isTaskStatus(task.status) && task.status !== currentStatus && (lastValidEventType !== "transition_intent" || lastTransition === null || task.status !== lastTransition.oldStatus)) {
+  if (replayIsValid && creationCount === 1 && currentStatus !== null && task !== null && isTaskStatus2(task.status) && task.status !== currentStatus && (lastValidEventType !== "transition_intent" || lastTransition === null || task.status !== lastTransition.oldStatus)) {
     add(
       "JOURNAL_TASK_STATUS_MISMATCH",
       filename,
@@ -3371,7 +3447,7 @@ function isLegalJournalTransition(oldStatus, newStatus) {
   if (oldStatus === "blocked") return UNBLOCK_TARGETS2.has(newStatus);
   return BLOCKABLE_STATUSES.has(oldStatus) && newStatus === "blocked" || FORWARD_TRANSITIONS2[oldStatus] === newStatus;
 }
-function isTaskStatus(value) {
+function isTaskStatus2(value) {
   return typeof value === "string" && ALL_STATUSES.has(value);
 }
 function isJournalEvent(value) {
@@ -3785,14 +3861,20 @@ async function handleTask(args) {
     const status = oneOf(optionalValue(options, "--status") ?? "active", ["active", "all"], "--status");
     const tasks = await listTasks(paths, status);
     const json = options.has("--json");
-    writeOutput(tasks, json, tasks.length === 0 ? "No tasks.\n" : tasks.map(renderTask).join("\n"));
+    const checks = await Promise.all(tasks.map((task) => showCheck(paths, task.id)));
+    writeOutput(
+      tasks,
+      json,
+      tasks.length === 0 ? "No tasks.\n" : tasks.map((task, index) => renderTask(task, checks[index].rows)).join("\n")
+    );
     return 0;
   }
   if (subcommand === "show") {
     const taskId = requiredTaskId(args[1]);
     const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
     const task = await readTask(paths, taskId);
-    writeOutput(task, options.has("--json"), renderTask(task));
+    const check = await showCheck(paths, taskId);
+    writeOutput(task, options.has("--json"), renderTask(task, check.rows));
     return 0;
   }
   if (subcommand === "transition" || subcommand === "unblock") {

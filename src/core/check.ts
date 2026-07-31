@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { readConfig } from "./config.js";
 import { SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl } from "./json.js";
-import { assertInside, type VineaPaths } from "./paths.js";
+import { assertInside, assertNoSymlink, type VineaPaths } from "./paths.js";
 import { findTask, writeCheckArtifact, type TaskLocation } from "./task-store.js";
 import {
   SCHEMA_VERSION,
@@ -60,7 +60,7 @@ export async function upsertCheck(
   if (location.task.status === "finished") {
     throw new ValidationError(`Finished task check rows cannot be edited: ${taskId}`);
   }
-  const evidence = await readEvidence(location);
+  const evidence = await readEvidence(paths, location);
   const requirementId = boundedNonempty(input.requirementId, "Requirement ID", MAX_ID_BYTES);
   const declaredIds = declaredRequirementIds(location);
   if (!declaredIds.includes(requirementId)) {
@@ -118,7 +118,7 @@ export async function upsertCheck(
 export async function showCheck(paths: VineaPaths, taskId: string): Promise<CheckSummary> {
   await readConfig(paths);
   const location = await findTask(paths, taskId);
-  const evidence = await readEvidence(location);
+  const evidence = await readEvidence(paths, location);
   return summarize(taskId, await readRows(paths, location, evidence));
 }
 
@@ -126,7 +126,7 @@ export async function readCheckForLocation(
   paths: VineaPaths,
   location: TaskLocation,
 ): Promise<{ summary: CheckSummary; evidence: EvidenceRecord[] }> {
-  const evidence = await readEvidence(location);
+  const evidence = await readEvidence(paths, location);
   const rows = await readRows(paths, location, evidence);
   return { summary: summarize(location.task.id, rows), evidence };
 }
@@ -150,6 +150,7 @@ async function readRows(
   evidence: EvidenceRecord[],
 ): Promise<CheckRow[]> {
   const filename = join(location.directory, "check.md");
+  await assertNoSymlink(paths.repoRoot, filename);
   let contents: string;
   try {
     contents = await readFile(filename, "utf8");
@@ -298,8 +299,9 @@ function validateStoredRow(
   };
 }
 
-async function readEvidence(location: TaskLocation): Promise<EvidenceRecord[]> {
+async function readEvidence(paths: VineaPaths, location: TaskLocation): Promise<EvidenceRecord[]> {
   const filename = join(location.directory, "evidence.jsonl");
+  await assertNoSymlink(paths.repoRoot, filename);
   let contents: string;
   try {
     contents = await readFile(filename, "utf8");

@@ -2,6 +2,7 @@ import { access, mkdir, readFile, readdir, readlink, rm, symlink, writeFile } fr
 import { join } from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
+import { upsertCheck } from "../../src/core/check.js";
 import { addContextReference } from "../../src/core/context.js";
 import { recordEvidence } from "../../src/core/evidence.js";
 import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
@@ -78,7 +79,7 @@ test("orient summarizes one shared task and cross-host recovery does not require
       status: "planning",
       qualityMode: "tdd",
       executionMode: "single-agent",
-      requirementsNotCovered: ["R1"],
+      requirementsNotCovered: ["R1", "A1"],
       contextReferences: [
         expect.objectContaining({
           path: "resume-context.txt",
@@ -144,6 +145,43 @@ test("orient reports multiple active candidates without selecting either one", a
   expect(summary.recommendation).toBe("choose-task");
   expect(summary.binding).toBeNull();
   expect(summary.candidates.map(({ id }) => id)).toEqual([first.task.id, second.task.id]);
+});
+
+test("orient derives uncovered requirements from authoritative passing check rows", async () => {
+  const created = await createTask(
+    paths,
+    {
+      title: "Checked requirements",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    fixedNow,
+  );
+  await addRequirement(paths, created.task.id, { id: "R1", text: "Requirement", actor: "codex" });
+  await addAcceptanceCriterion(paths, created.task.id, { id: "A1", text: "Acceptance", actor: "codex" });
+  const evidence = await recordEvidence(paths, created.task.id, {
+    kind: "manual",
+    summary: "Checked behavior",
+    result: "pass",
+    actor: "codex",
+  });
+  for (const requirementId of ["R1", "A1"]) {
+    await upsertCheck(paths, created.task.id, {
+      requirementId,
+      planItem: "Verify declared outcome",
+      paths: ["README.md"],
+      evidenceIds: [evidence.id],
+      result: "pass",
+      summary: "Observed passing evidence",
+      actor: "codex",
+    });
+  }
+
+  const summary = await orient(paths, { host: "codex" });
+
+  expect(summary.candidates[0]?.requirementsNotCovered).toEqual([]);
 });
 
 test("orient reports a stale local binding and still requires confirmation for the single candidate", async () => {

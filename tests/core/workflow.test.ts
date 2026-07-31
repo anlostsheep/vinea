@@ -6,6 +6,7 @@ import { recordEvidence } from "../../src/core/evidence.js";
 import { SchemaError } from "../../src/core/errors.js";
 import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
 import { findTask, persistTaskTransition } from "../../src/core/task-store.js";
+import { validateWorkspace } from "../../src/core/validate.js";
 import {
   createTask,
   readTask,
@@ -351,6 +352,51 @@ test("late archive commit failure leaves only an intent and is recoverable by re
   });
   expect(recovered.status).toBe("archived");
   expect((await readJson<TaskRecord>(join(archivedDirectory, "task.json"))).status).toBe("archived");
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+});
+
+test("a failed active task commit reuses its pending intent on retry and validates cleanly", async () => {
+  const { task, directory } = await createReadyTask();
+  const location = await findTask(paths, task.id);
+  const inProgress: TaskRecord = {
+    ...location.task,
+    status: "in_progress",
+    updatedAt: "2026-07-31T08:11:00.000Z",
+  };
+
+  await expect(
+    persistTaskTransition(
+      paths,
+      location,
+      inProgress,
+      {
+        schemaVersion: 1,
+        timestamp: "2026-07-31T08:11:00.000Z",
+        actor: "codex",
+        reason: "Start work",
+        oldStatus: "ready",
+        newStatus: "in_progress",
+      },
+      {
+        createOperationId: () => "op-injected-active",
+        writeTask: async () => {
+          throw new SchemaError("Injected task commit failure");
+        },
+      },
+    ),
+  ).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
+
+  const retried = await transitionTask(paths, task.id, "in_progress", {
+    actor: "codex",
+    reason: "Retry start work",
+    now: () => new Date("2026-07-31T08:12:00.000Z"),
+  });
+  expect(retried.status).toBe("in_progress");
+  const intents = (parseJournal(await readFile(join(directory, "journal.md"), "utf8")) as Array<Record<string, unknown>>)
+    .filter((event) => event.type === "transition_intent" && event.oldStatus === "ready");
+  expect(intents).toHaveLength(1);
+  expect(intents[0]).toMatchObject({ operationId: "op-injected-active", newStatus: "in_progress" });
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
 
 test("blocked tasks require explicit unblock and both transitions are auditable", async () => {

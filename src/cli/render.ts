@@ -6,6 +6,7 @@ import type { ValidationReport } from "../core/validate.js";
 import { incompleteRequirements, nextGate } from "../core/workflow.js";
 import type {
   EvidenceRecord,
+  CheckRow,
   ExecutionMode,
   OrientSummary,
   QualityMode,
@@ -114,8 +115,8 @@ export function renderInlineAudit(record: {
   ].join("\n");
 }
 
-export function renderTask(task: TaskRecord): string {
-  const incomplete = incompleteRequirements(task);
+export function renderTask(task: TaskRecord, checkRows: CheckRow[] = []): string {
+  const incomplete = incompleteRequirements(task, checkRows);
   return [
     `task ID: ${task.id}`,
     `status: ${task.status}`,

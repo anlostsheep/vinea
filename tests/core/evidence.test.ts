@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
@@ -163,7 +163,9 @@ test("malformed minimal red and green objects cannot satisfy the TDD checking ga
   expect(JSON.parse(result.stdout)).toMatchObject({
     error: { code: "VINEA_SCHEMA_INVALID" },
   });
-  expect((await showTask(cwd, task.id)).status).toBe("in_progress");
+  expect(JSON.parse(await readFile(join(cwd, ".vinea", "tasks", "active", task.id, "task.json"), "utf8"))).toMatchObject({
+    status: "in_progress",
+  });
   expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
 });
 
@@ -185,6 +187,63 @@ test("evidence summaries reject oversized audit payloads before append", async (
   });
   expect(await readFile(evidencePath, "utf8")).toBe("");
   expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
+});
+
+test("symlinked evidence and check artifacts are rejected by recovery and completion gates", async () => {
+  const evidenceFixture = await initializedTask("Unsafe evidence artifact", "tdd");
+  await prepareInProgressTask(evidenceFixture.cwd, evidenceFixture.task);
+  const evidencePath = evidenceArtifact(evidenceFixture.cwd, evidenceFixture.task.id);
+  const outsideEvidence = join(evidenceFixture.cwd, "outside-evidence.jsonl");
+  await writeFile(outsideEvidence, "", "utf8");
+  await rm(evidencePath);
+  await symlink(outsideEvidence, evidencePath);
+
+  for (const args of [
+    ["task", "transition", evidenceFixture.task.id, "--to", "checking", "--reason", "Check unsafe evidence", "--json"],
+    ["task", "show", evidenceFixture.task.id, "--json"],
+    ["orient", "--host", "codex", "--json"],
+  ]) {
+    const result = await runCli(args, evidenceFixture.cwd);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ error: { code: "VINEA_SCHEMA_INVALID" } });
+  }
+
+  const checkFixture = await initializedTask("Unsafe check artifact", "standard");
+  await prepareInProgressTask(checkFixture.cwd, checkFixture.task);
+  const evidence = await recordEvidence(checkFixture.cwd, checkFixture.task.id, {
+    kind: "command",
+    summary: "Passing command evidence",
+    command: "npm test -- focused",
+    exitCode: 0,
+    result: "pass",
+  });
+  const evidenceId = (JSON.parse(evidence.stdout) as { id: string }).id;
+  expect((await transitionToChecking(checkFixture.cwd, checkFixture.task.id)).exitCode).toBe(0);
+  expect((await runCli([
+    "check", checkFixture.task.id,
+    "--requirement", "R1",
+    "--plan-item", "Verify completion",
+    "--paths", "README.md",
+    "--evidence", evidenceId,
+    "--result", "pass",
+    "--summary", "Passing evidence covers the requirement",
+    "--json",
+  ], checkFixture.cwd)).exitCode).toBe(0);
+  const checkPath = join(checkFixture.cwd, ".vinea", "tasks", "active", checkFixture.task.id, "check.md");
+  const outsideCheck = join(checkFixture.cwd, "outside-check.md");
+  await writeFile(outsideCheck, "", "utf8");
+  await rm(checkPath);
+  await symlink(outsideCheck, checkPath);
+
+  for (const args of [
+    ["finish", checkFixture.task.id, "--confirmed", "--json"],
+    ["task", "show", checkFixture.task.id, "--json"],
+    ["orient", "--host", "codex", "--json"],
+  ]) {
+    const result = await runCli(args, checkFixture.cwd);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({ error: { code: "VINEA_SCHEMA_INVALID" } });
+  }
 });
 
 async function initializedTask(

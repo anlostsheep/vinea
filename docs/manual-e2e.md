@@ -57,7 +57,7 @@ performing it.
    vinea task transition "$task_id" --to ready --reason "Brief, plan, and context are complete"
    ```
 
-   Expected result: `brief.md`, `plan.md`, `context-manifest.json`, `journal.md`,
+   Expected result: `brief.md`, `plan.md`, `context.jsonl`, `journal.md`,
    and `check.md` exist in the active task directory, and `task.json` is `ready`.
 3. Attach Codex without starting work, then start only after a second explicit
    confirmation:

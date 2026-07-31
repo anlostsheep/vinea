@@ -2,6 +2,7 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { parseCheckDocument } from "./check.js";
 import { validateEvidenceRecord } from "./evidence.js";
+import { normalizeSpecTarget, parseSpecIndexTarget } from "./learning.js";
 import type { VineaPaths } from "./paths.js";
 import { SCHEMA_VERSION, type EvidenceRecord, type TaskStatus } from "./types.js";
 
@@ -36,6 +37,8 @@ const TASK_MUTATION_KINDS = new Set([
   "learning_accepted",
   "learning_archived",
 ]);
+const RUNTIME_IGNORE = ".runtime/\n";
+const MANAGED_SPEC_TARGET = /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
 
 export interface ValidationIssue {
   code: string;
@@ -74,6 +77,7 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
   }
 
   const limits = await validateConfig(paths, add);
+  await validateManagedSpecs(paths, add);
   await validateInlineAudit(paths, add);
 
   for (const [label, directory] of [
@@ -107,6 +111,51 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
 
   await validateSessionBindings(paths, taskScan.activeTaskIds, add);
   return { issues: sortIssues(issues) };
+}
+
+async function validateManagedSpecs(paths: VineaPaths, add: IssueAdder): Promise<void> {
+  const gitignore = await readRequiredRegularFile(paths.gitignore, "VINEA_GITIGNORE", add);
+  if (gitignore !== null && gitignore !== RUNTIME_IGNORE) {
+    add(
+      "VINEA_GITIGNORE_INVALID",
+      paths.gitignore,
+      "Managed .vinea/.gitignore must contain exactly .runtime/.",
+    );
+  }
+
+  if (await entryKind(paths.specs) !== "directory") return;
+  const index = await readRequiredRegularFile(paths.specIndex, "SPEC_INDEX", add);
+  if (index === null) return;
+  const seenTargets = new Set<string>();
+  for (const [index_, line] of index.split(/\r?\n/u).entries()) {
+    if (!/^\s*-\s*\[/u.test(line)) continue;
+    const target = parseSpecIndexTarget(line);
+    if (target === undefined) {
+      add("SPEC_INDEX_ENTRY_INVALID", paths.specIndex, `Line ${index_ + 1} is not a valid indexed spec link.`);
+      continue;
+    }
+    const normalized = normalizeSpecTarget(target);
+    if (!MANAGED_SPEC_TARGET.test(normalized)) {
+      add(
+        "SPEC_INDEX_TARGET_INVALID",
+        paths.specIndex,
+        `Line ${index_ + 1} must target a managed relative <domain>.md spec file.`,
+      );
+      continue;
+    }
+    if (seenTargets.has(normalized)) {
+      add("SPEC_INDEX_TARGET_DUPLICATE", paths.specIndex, `Line ${index_ + 1} duplicates spec target ${normalized}.`);
+      continue;
+    }
+    seenTargets.add(normalized);
+    const targetPath = join(paths.specs, normalized);
+    const kind = await entryKind(targetPath);
+    if (kind === "missing") {
+      add("SPEC_INDEX_TARGET_MISSING", targetPath, `Indexed spec target ${normalized} is missing.`);
+    } else if (kind !== "file") {
+      add("SPEC_INDEX_TARGET_INVALID", targetPath, `Indexed spec target ${normalized} must be a regular file.`);
+    }
+  }
 }
 
 async function validateConfig(

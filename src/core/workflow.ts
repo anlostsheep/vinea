@@ -31,6 +31,7 @@ import { inspectWorkspace } from "./schema.js";
 import {
   SCHEMA_VERSION,
   type ContinuationResult,
+  type CheckRow,
   type ExecutionMode,
   type Host,
   type InlineAuditRecord,
@@ -235,10 +236,11 @@ export async function orientWorkspace(
   const canInspectTasks = health.initialized && health.supportedSchema;
   const locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
   const candidates = await Promise.all(locations.map(async (location): Promise<OrientCandidate> => {
-    const [context, latestEvidence, latestCheckEvent] = await Promise.all([
+    const [context, latestEvidence, latestCheckEvent, check] = await Promise.all([
       listContextReferences(paths, location.task.id),
-      readLatestEvidence(location),
-      readLatestCheckEvent(location),
+      readLatestEvidence(paths, location),
+      readLatestCheckEvent(paths, location),
+      readCheckForLocation(paths, location),
     ]);
     return {
       id: location.task.id,
@@ -246,7 +248,7 @@ export async function orientWorkspace(
       status: location.task.status,
       qualityMode: location.task.qualityMode,
       executionMode: location.task.executionMode,
-      requirementsNotCovered: incompleteRequirements(location.task),
+      requirementsNotCovered: incompleteRequirements(location.task, check.summary.rows),
       contextReferences: context.references,
       latestEvidence,
       latestCheckEvent,
@@ -356,7 +358,7 @@ export async function transitionTask(
   const oldStatus = location.task.status;
   assertTransitionAllowed(oldStatus, newStatus, options.unblock === true);
   if (newStatus === "ready") await assertReadyPrerequisites(location);
-  if (newStatus === "checking") await assertTddReadyForCheck(location);
+  if (newStatus === "checking") await assertTddReadyForCheck(paths, location);
 
   const timestamp = (options.now ?? (() => new Date()))().toISOString();
   const task: TaskRecord = { ...location.task, status: newStatus, updatedAt: timestamp };
@@ -413,7 +415,7 @@ export async function finishTask(
   }
 
   try {
-    await assertTddReadyForCheck(location);
+    await assertTddReadyForCheck(paths, location);
   } catch (error) {
     throw new FinishGateError(
       `Finish TDD evidence is invalid; a valid tdd-red must precede tdd-green for ${taskId}.`,
@@ -515,10 +517,11 @@ export function nextGate(task: TaskRecord): string {
   return FORWARD_TRANSITIONS[task.status] ?? "none";
 }
 
-export function incompleteRequirements(task: TaskRecord): string[] {
-  return task.requirements
-    .filter((requirement) => !task.acceptanceCriteria.some((criterion) => criterion.id === requirement.id))
-    .map((requirement) => requirement.id);
+export function incompleteRequirements(task: TaskRecord, rows: CheckRow[] = []): string[] {
+  const passingIds = new Set(rows.filter((row) => row.result === "pass").map((row) => row.requirementId));
+  return [...task.requirements, ...task.acceptanceCriteria]
+    .map((requirement) => requirement.id)
+    .filter((id) => !passingIds.has(id));
 }
 
 function assertTransitionAllowed(oldStatus: TaskStatus, newStatus: TaskStatus, unblock: boolean): void {

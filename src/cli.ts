@@ -262,7 +262,12 @@ async function handleTask(args: string[]): Promise<number> {
     const status = oneOf(optionalValue(options, "--status") ?? "active", ["active", "all"] as const, "--status");
     const tasks = await listTasks(paths, status);
     const json = options.has("--json");
-    writeOutput(tasks, json, tasks.length === 0 ? "No tasks.\n" : tasks.map(renderTask).join("\n"));
+    const checks = await Promise.all(tasks.map((task) => showCheck(paths, task.id)));
+    writeOutput(
+      tasks,
+      json,
+      tasks.length === 0 ? "No tasks.\n" : tasks.map((task, index) => renderTask(task, checks[index]!.rows)).join("\n"),
+    );
     return 0;
   }
 
@@ -270,7 +275,8 @@ async function handleTask(args: string[]): Promise<number> {
     const taskId = requiredTaskId(args[1]);
     const options = parseOptions(args.slice(2), new Set(), new Set(["--json"]));
     const task = await readTask(paths, taskId);
-    writeOutput(task, options.has("--json"), renderTask(task));
+    const check = await showCheck(paths, taskId);
+    writeOutput(task, options.has("--json"), renderTask(task, check.rows));
     return 0;
   }
 

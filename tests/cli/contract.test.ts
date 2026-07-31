@@ -46,6 +46,7 @@ test("the public CLI completes and reopens one archived TDD task as machine-read
 
   for (const command of [
     ["task", "require", task.id, "--id", "R1", "--text", "The behavior is verified", "--json"],
+    ["task", "accept", task.id, "--id", "A1", "--text", "The focused test passes", "--json"],
     ["task", "set-brief", task.id, "--file", "brief-source.md", "--json"],
     ["task", "set-plan", task.id, "--file", "plan-source.md", "--json"],
     ["context", "add", task.id, "--path", "feature.ts", "--purpose", "Implementation target", "--json"],
@@ -99,6 +100,21 @@ test("the public CLI completes and reopens one archived TDD task as machine-read
   ], cwd);
   expect(check.rows).toHaveLength(1);
 
+  const acceptanceCheck = await runJson<{ rows: CheckRow[] }>([
+    "check", task.id,
+    "--requirement", "A1",
+    "--plan-item", "Verify the focused test outcome",
+    "--paths", "feature.ts",
+    "--evidence", green.id,
+    "--result", "pass",
+    "--summary", "The passing TDD evidence covers acceptance",
+    "--json",
+  ], cwd);
+  expect(acceptanceCheck.rows).toHaveLength(2);
+  const activeHumanTask = await runCli(["task", "show", task.id], cwd);
+  expect(activeHumanTask.exitCode).toBe(0);
+  expect(activeHumanTask.stdout).toContain("incomplete requirements: none");
+
   await runJson([
     "learning", "propose", task.id,
     "--id", "L1",
@@ -124,7 +140,13 @@ test("the public CLI completes and reopens one archived TDD task as machine-read
   const shownCheck = await runJson<{ taskId: string; rows: CheckRow[] }>([
     "check", "show", task.id, "--json",
   ], cwd);
-  expect(shownCheck).toMatchObject({ taskId: task.id, rows: [{ requirementId: "R1", result: "pass" }] });
+  expect(shownCheck).toMatchObject({
+    taskId: task.id,
+    rows: [
+      { requirementId: "R1", result: "pass" },
+      { requirementId: "A1", result: "pass" },
+    ],
+  });
   const validation = await runJson<ValidationReport>(["validate", "--json"], cwd);
   expect(validation).toEqual({ issues: [] });
 });

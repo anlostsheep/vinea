@@ -4,6 +4,7 @@ import {
   readdir,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -33,6 +34,44 @@ test("validate emits one deterministic JSON object and accepts a missing local r
   expect(result.stderr).toBe("");
   expect(result.stdout.trim().split("\n")).toHaveLength(1);
   expect(JSON.parse(result.stdout)).toEqual({ issues: [] });
+});
+
+test("validate verifies managed spec files, index targets, and the runtime ignore contract", async () => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+  const paths = resolveVineaPaths(cwd);
+  const reportCodes = async (): Promise<string[]> => {
+    const result = await runCli(["validate", "--json"], cwd);
+    return (JSON.parse(result.stdout) as { issues: Array<{ code: string }> }).issues.map(({ code }) => code);
+  };
+
+  await rm(paths.gitignore);
+  expect(await reportCodes()).toContain("VINEA_GITIGNORE_MISSING");
+  await writeFile(paths.gitignore, ".runtime/\n", "utf8");
+  await writeFile(paths.gitignore, "runtime/\n", "utf8");
+  expect(await reportCodes()).toContain("VINEA_GITIGNORE_INVALID");
+  await writeFile(paths.gitignore, ".runtime/\n", "utf8");
+
+  await writeFile(paths.specIndex, "# Vinea Specs\n\n- [Escaped](../outside.md)\n", "utf8");
+  expect(await reportCodes()).toContain("SPEC_INDEX_TARGET_INVALID");
+  await writeFile(paths.specIndex, "# Vinea Specs\n\n- [Missing](missing.md)\n", "utf8");
+  expect(await reportCodes()).toContain("SPEC_INDEX_TARGET_MISSING");
+  await writeFile(paths.specIndex, "# Vinea Specs\n\n- [Malformed](missing.md\n", "utf8");
+  expect(await reportCodes()).toContain("SPEC_INDEX_ENTRY_INVALID");
+
+  const outsideSpec = join(cwd, "outside-spec.md");
+  await writeFile(outsideSpec, "# Outside\n", "utf8");
+  await symlink(outsideSpec, join(paths.specs, "testing.md"));
+  await writeFile(
+    paths.specIndex,
+    "# Vinea Specs\n\n- [Testing](testing.md)\n- [Duplicate](./testing.md)\n",
+    "utf8",
+  );
+  const codes = await reportCodes();
+  expect(codes).toEqual(expect.arrayContaining([
+    "SPEC_INDEX_TARGET_INVALID",
+    "SPEC_INDEX_TARGET_DUPLICATE",
+  ]));
 });
 
 test("validate aggregates malformed shared and runtime state in stable order without writes", async () => {
