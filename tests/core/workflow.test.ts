@@ -1,4 +1,4 @@
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
@@ -114,6 +114,27 @@ test("createTask fails instead of overwriting a colliding deterministic ID", asy
   });
 });
 
+test("createTask rejects an archived ID collision without creating active artifacts", async () => {
+  const taskId = "t-20260731-080910-archived-collision";
+  await mkdir(join(paths.archivedTasks, taskId));
+
+  await expect(
+    createTask(
+      paths,
+      {
+        title: "Archived collision",
+        risk: { level: "low", reasons: [] },
+        qualityMode: "standard",
+        executionMode: "single-agent",
+        confirmation: "user",
+      },
+      fixedNow,
+    ),
+  ).rejects.toMatchObject({ code: "VINEA_VALIDATION_INVALID" });
+  await expect(access(join(paths.activeTasks, taskId))).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await readdir(join(paths.archivedTasks, taskId))).toEqual([]);
+});
+
 test("task lookup rejects an invalid task ID before resolving a filesystem path", async () => {
   await expect(readTask(paths, "../tasks")).rejects.toMatchObject({
     code: "VINEA_VALIDATION_INVALID",
@@ -163,6 +184,52 @@ test("ready transition requires meaningful brief and plan content plus a require
   expect(ready.status).toBe("ready");
 });
 
+test("ready transition rejects blank or structurally malformed requirement entries", async () => {
+  const { task, directory } = await createTask(
+    paths,
+    {
+      title: "Validate requirement structure",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    fixedNow,
+  );
+  await writeFile(join(directory, "brief.md"), "# Brief\n\nValidate requirements.\n", "utf8");
+  await writeFile(join(directory, "plan.md"), "# Plan\n\n1. Validate.\n", "utf8");
+  const stored = await readJson<TaskRecord>(join(directory, "task.json"));
+  stored.requirements = [
+    {
+      schemaVersion: 1,
+      id: " ",
+      text: "Has no ID",
+      createdAt: "2026-07-31T08:09:30.000Z",
+    },
+    { broken: true } as unknown as TaskRecord["requirements"][number],
+  ];
+  stored.acceptanceCriteria = [
+    {
+      schemaVersion: 1,
+      id: "A1",
+      text: " ",
+      createdAt: "2026-07-31T08:09:30.000Z",
+    },
+  ];
+  await writeJson(join(directory, "task.json"), stored);
+
+  await expect(
+    transitionTask(paths, task.id, "ready", {
+      actor: "codex",
+      reason: "Malformed entries should not satisfy ready",
+      now: () => new Date("2026-07-31T08:10:00.000Z"),
+    }),
+  ).rejects.toMatchObject({
+    code: "VINEA_TRANSITION_INVALID",
+    message: expect.stringContaining("valid requirement or acceptance criterion"),
+  });
+});
+
 test("invalid skipped transitions fail without changing task state", async () => {
   const { task } = await createReadyTask();
 
@@ -174,6 +241,48 @@ test("invalid skipped transitions fail without changing task state", async () =>
     }),
   ).rejects.toMatchObject({ code: "VINEA_TRANSITION_INVALID" });
   expect((await readTask(paths, task.id)).status).toBe("ready");
+});
+
+test("journal append failure restores the prior task state and updatedAt", async () => {
+  const { task, directory } = await createReadyTask();
+  const before = await readJson<TaskRecord>(join(directory, "task.json"));
+  const journalPath = join(directory, "journal.md");
+  const beforeJournal = await readFile(journalPath, "utf8");
+  await chmod(journalPath, 0o444);
+
+  await expect(
+    transitionTask(paths, task.id, "in_progress", {
+      actor: "codex",
+      reason: "This journal append will fail",
+      now: () => new Date("2026-07-31T08:11:00.000Z"),
+    }),
+  ).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
+
+  expect(await readJson<TaskRecord>(join(directory, "task.json"))).toEqual(before);
+  expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
+});
+
+test("archive move failure restores task state and removes the appended transition", async () => {
+  const { task, directory } = await createFinishedTask();
+  const taskPath = join(directory, "task.json");
+  const journalPath = join(directory, "journal.md");
+  const beforeTask = await readJson<TaskRecord>(taskPath);
+  const beforeJournal = await readFile(journalPath, "utf8");
+  const archiveCollision = join(paths.archivedTasks, task.id);
+  await writeFile(archiveCollision, "occupied\n", "utf8");
+
+  await expect(
+    transitionTask(paths, task.id, "archived", {
+      actor: "codex",
+      reason: "Archive task",
+      now: () => new Date("2026-07-31T08:14:00.000Z"),
+    }),
+  ).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
+
+  expect(await readJson<TaskRecord>(taskPath)).toEqual(beforeTask);
+  expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
+  expect(await readFile(archiveCollision, "utf8")).toBe("occupied\n");
+  await expect(access(directory)).resolves.toBeUndefined();
 });
 
 test("blocked tasks require explicit unblock and both transitions are auditable", async () => {
@@ -248,6 +357,26 @@ async function createReadyTask() {
     actor: "codex",
     reason: "Planning complete",
     now: () => new Date("2026-07-31T08:10:00.000Z"),
+  });
+  return created;
+}
+
+async function createFinishedTask() {
+  const created = await createReadyTask();
+  await transitionTask(paths, created.task.id, "in_progress", {
+    actor: "codex",
+    reason: "Start work",
+    now: () => new Date("2026-07-31T08:11:00.000Z"),
+  });
+  await transitionTask(paths, created.task.id, "checking", {
+    actor: "codex",
+    reason: "Check work",
+    now: () => new Date("2026-07-31T08:12:00.000Z"),
+  });
+  await transitionTask(paths, created.task.id, "finished", {
+    actor: "codex",
+    reason: "Finish work",
+    now: () => new Date("2026-07-31T08:13:00.000Z"),
   });
   return created;
 }

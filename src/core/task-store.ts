@@ -1,5 +1,6 @@
-import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { AmbiguousTaskError, SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
 import { assertNoSymlink, type VineaPaths } from "./paths.js";
@@ -32,7 +33,14 @@ export async function createTaskArtifacts(
   creationEvent: JournalCreationEvent,
 ): Promise<TaskLocation> {
   const directory = join(paths.activeTasks, task.id);
-  await assertNoSymlink(paths.repoRoot, directory);
+  const archivedDirectory = join(paths.archivedTasks, task.id);
+  await Promise.all([
+    assertNoSymlink(paths.repoRoot, directory),
+    assertNoSymlink(paths.repoRoot, archivedDirectory),
+  ]);
+  if (await pathExists(archivedDirectory)) {
+    throw new ValidationError(`Task path already exists for generated ID ${task.id}.`);
+  }
   try {
     await mkdir(directory);
   } catch (error) {
@@ -40,6 +48,17 @@ export async function createTaskArtifacts(
       throw new ValidationError(`Task path already exists for generated ID ${task.id}.`);
     }
     throw new SchemaError(`Unable to create task directory ${directory}`, error);
+  }
+  let archivedCollisionAfterCreate: boolean;
+  try {
+    archivedCollisionAfterCreate = await pathExists(archivedDirectory);
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw new SchemaError(`Unable to verify archived task collision for ${task.id}`, error);
+  }
+  if (archivedCollisionAfterCreate) {
+    await rm(directory, { recursive: true, force: true });
+    throw new ValidationError(`Task path already exists for generated ID ${task.id}.`);
   }
 
   const writes = await Promise.allSettled([
@@ -85,16 +104,40 @@ export async function persistTaskTransition(
   task: TaskRecord,
   event: JournalTransitionEvent,
 ): Promise<TaskLocation> {
-  await writeJsonAtomic(join(location.directory, "task.json"), task, paths.repoRoot);
-  await appendJsonl(join(location.directory, "journal.md"), event, paths.repoRoot);
-  if (task.status !== "archived") return { ...location, task };
-
-  const destination = join(paths.archivedTasks, task.id);
-  await assertNoSymlink(paths.repoRoot, destination);
+  const taskPath = join(location.directory, "task.json");
+  const journalPath = join(location.directory, "journal.md");
+  const destination = task.status === "archived" ? join(paths.archivedTasks, task.id) : undefined;
+  await assertNoSymlink(paths.repoRoot, journalPath);
+  if (destination !== undefined) await assertNoSymlink(paths.repoRoot, destination);
+  let previousJournal: string;
   try {
-    await rename(location.directory, destination);
+    previousJournal = await readFile(journalPath, "utf8");
   } catch (error) {
-    throw new SchemaError(`Unable to archive task ${task.id}`, error);
+    throw new SchemaError(`Unable to read task journal for ${task.id}`, error);
+  }
+
+  try {
+    await writeJsonAtomic(taskPath, task, paths.repoRoot);
+    await appendJsonl(journalPath, event, paths.repoRoot);
+    if (destination === undefined) return { ...location, task };
+    try {
+      await rename(location.directory, destination);
+    } catch (error) {
+      throw new SchemaError(`Unable to archive task ${task.id}`, error);
+    }
+  } catch (error) {
+    const rollback = await Promise.allSettled([
+      writeJsonAtomic(taskPath, location.task, paths.repoRoot),
+      writeTextAtomic(journalPath, previousJournal, paths.repoRoot),
+    ]);
+    const rollbackFailures = rollback.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (rollbackFailures.length > 0) {
+      throw new SchemaError(`Task transition failed and rollback was incomplete for ${task.id}`, {
+        transitionError: error,
+        rollbackErrors: rollbackFailures.map(({ reason }) => reason),
+      });
+    }
+    throw error;
   }
   return { task, directory: destination, scope: "archive" };
 }
@@ -148,6 +191,28 @@ async function isDirectory(path: string): Promise<boolean> {
   } catch (error) {
     if (isCode(error, "ENOENT")) return false;
     throw error;
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
+async function writeTextAtomic(filename: string, contents: string, repoRoot: string): Promise<void> {
+  await assertNoSymlink(repoRoot, filename);
+  const temporary = join(dirname(filename), `.${basename(filename)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx" });
+    await rename(temporary, filename);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw new SchemaError(`Unable to restore ${filename}`, error);
   }
 }
 

@@ -206,12 +206,27 @@ async function assertReadyPrerequisites(location: TaskLocation): Promise<void> {
   const missing: string[] = [];
   if (brief.trim() === "") missing.push("brief.md");
   if (plan.trim() === "") missing.push("plan.md");
-  if (location.task.requirements.length === 0 && location.task.acceptanceCriteria.length === 0) {
-    missing.push("requirement or acceptance criterion");
+  const requirements: unknown[] = Array.isArray(location.task.requirements) ? location.task.requirements : [];
+  const acceptanceCriteria: unknown[] = Array.isArray(location.task.acceptanceCriteria)
+    ? location.task.acceptanceCriteria
+    : [];
+  if (![...requirements, ...acceptanceCriteria].some(isStructurallyValidRequirement)) {
+    missing.push("valid requirement or acceptance criterion");
   }
   if (missing.length > 0) {
     throw new TransitionError(`Task is not ready; missing ${missing.join(", ")}.`);
   }
+}
+
+function isStructurallyValidRequirement(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.schemaVersion !== SCHEMA_VERSION) return false;
+  if (typeof candidate.id !== "string" || candidate.id.trim() === "") return false;
+  if (typeof candidate.text !== "string" || candidate.text.trim() === "") return false;
+  if (typeof candidate.createdAt !== "string") return false;
+  const parsed = new Date(candidate.createdAt);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === candidate.createdAt;
 }
 
 function matchedRules(searchable: string, rules: string[]): string[] {
