@@ -97,6 +97,7 @@ CLI 不生成业务代码，不代替 agent 进行语义判断，也不执行未
 
     .vinea/
       config.json
+      inline-audit.jsonl
       .gitignore
       specs/
         index.md
@@ -119,7 +120,7 @@ CLI 不生成业务代码，不代替 agent 进行语义判断，也不执行未
 
 除 .runtime/ 外，.vinea/ 均纳入 Git。nested .gitignore 只忽略 .runtime/，因此 init 不必覆盖已有 AGENTS.md、CLAUDE.md 或根 .gitignore。config.json 还定义风险规则，以及单个 context manifest 可引用的最大文件数和估算字节数，防止任务上下文无界膨胀。
 
-task.json 至少保存 schemaVersion、task ID、标题、状态、风险等级与建议依据、qualityMode、executionMode、需求 ID、验收状态、可选提交元数据和 inline 跳过理由。
+task.json 至少保存 schemaVersion、task ID、标题、状态、风险等级与建议依据、qualityMode、executionMode、需求 ID、验收状态和可选提交元数据。没有创建 task 的 inline 跳过写入 `inline-audit.jsonl`，记录时间、请求摘要、风险建议和用户给出的简短理由；它是可 Git review 的审计记录，但不进入 active task 队列。
 
 ### 5.1 task 状态机
 
@@ -146,7 +147,7 @@ agent 区分三类请求：
 - 明确且低风险的小修改：可 inline。
 - 行为变更、bug 修复、跨文件或跨模块、外部副作用、安全、数据或部署相关变更：说明风险依据并建议 task。
 
-仅当用户确认后，vinea:propose 创建 task。用户明确要求 inline 时，Vinea 写入简短绕过理由；这是审计信号，不视作失败。
+仅当用户确认后，vinea:propose 创建 task。用户明确要求 inline 时，Vinea 将简短绕过理由写入 `inline-audit.jsonl`；这是审计信号，不视作失败，也不创建 active task。
 
 vinea validate 不依赖宿主或模型，可在本地或 CI 检查 schema、状态转移、manifest 路径、重复引用、文件数与上下文预算。它不运行项目测试，也不替代 vinea:check。
 

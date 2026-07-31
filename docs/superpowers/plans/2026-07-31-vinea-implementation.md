@@ -12,7 +12,7 @@
 
 - Keep Vinea independent at `/Users/lostsheep/programing/projects/vinea`; never modify the consumer repository other than an explicit `vinea init` or Vinea lifecycle command.
 - Treat `.vinea/` (except `.vinea/.runtime/`) as versioned team state. Never read or replay host chat transcripts.
-- All mutations of `task.json`, `context.jsonl`, `evidence.jsonl`, `journal.md`, `check.md`, and long-term specs must pass through the CLI; host skills must not hand-edit those files.
+- All mutations of `task.json`, `inline-audit.jsonl`, `context.jsonl`, `evidence.jsonl`, `journal.md`, `check.md`, and long-term specs must pass through the CLI; host skills must not hand-edit those files.
 - `vinea:propose`, TDD selection, delegated execution, task attachment, and learning promotion require an explicit user confirmation in the conversation. CLI flags record the decision but are not a substitute for obtaining it.
 - The first release uses explicit `vinea:orient` as the reliable new-session entrypoint. A native session ID is optional: Codex uses `CODEX_THREAD_ID` when present; Claude must work without an assumed undocumented session-ID environment variable.
 - Vinea reports and blocks ambiguous or invalid state. It must not silently select a task, invent test results, downgrade delegated mode, or modify Git/production state.
@@ -161,13 +161,13 @@ plugins/vinea/                         # generated, committed public unit
 - [ ] **Step 1: Implement task IDs and initial artifacts.**
   - Create IDs as `t-YYYYMMDD-HHmmss-<slug>` using an injectable clock and deterministic slugification; fail rather than overwrite when a generated path already exists.
   - `createTask()` creates `tasks/active/<id>-<slug>/task.json`, `brief.md`, `plan.md`, `context.jsonl`, `evidence.jsonl`, `check.md`, and `journal.md` in one operation.
-  - Initialize `task.json` as `planning` with title, risk `{ level, reasons }`, `qualityMode`, `executionMode`, empty requirements/acceptance/commit metadata, and optional `inlineSkipReason`.
+  - Initialize `task.json` as `planning` with title, risk `{ level, reasons }`, `qualityMode`, `executionMode`, and empty requirements/acceptance/commit metadata.
   - Seed `journal.md` with a timestamped creation event, not an agent-written claim of implementation.
 
 - [ ] **Step 2: Implement deterministic risk suggestions.**
   - Add `suggestRisk(title, description, changedPaths?)` that normalizes text and matches configured keyword rules; choose `high` over `medium`, otherwise `low`; return every matched reason.
   - Make `vinea propose --title <text> --description <text> --risk auto|low|medium|high --quality standard|tdd --execution single-agent|delegated` print a JSON proposal by default only when `--json` is requested; it must not create a task without `--confirmed`.
-  - `--confirmed` creates the task and records `confirmation: "user"` in the first journal event. `--inline-skip-reason <text>` records a low-risk bypass decision and cannot be combined with `--confirmed`.
+  - `--confirmed` creates the task and records `confirmation: "user"` in the first journal event. `--inline-skip-reason <text>` appends one versioned record to `.vinea/inline-audit.jsonl` containing timestamp, request summary, proposed risk, and the user reason; it does not create a task and cannot be combined with `--confirmed`.
 
 - [ ] **Step 3: Encode allowed transitions and required prerequisites.**
   - Allow `planning -> ready -> in_progress -> checking -> finished -> archived`; allow `planning|ready|in_progress|checking -> blocked`; require explicit `unblock --to ready|in_progress|checking` from `blocked`.
@@ -180,7 +180,7 @@ plugins/vinea/                         # generated, committed public unit
 
 - [ ] **Step 5: Test risk and lifecycle failures, not only happy paths.**
   - Verify `production migration` proposes high risk, a cross-file behavior change proposes medium risk, and a low-risk task remains inline unless explicitly confirmed.
-  - Verify propose without confirmation leaves no task directory, task creation yields all artifacts, invalid state skips fail, a block/unblock transition is auditable, and JSON output parses.
+  - Verify propose without confirmation leaves no task directory, explicit inline skip leaves no task directory but appends an auditable inline record, task creation yields all artifacts, invalid state skips fail, a block/unblock transition is auditable, and JSON output parses.
 
 - [ ] **Step 6: Verify and commit.**
   - Run `npm run typecheck && npm test -- --run tests/core/workflow.test.ts tests/cli/propose.test.ts`.
@@ -317,7 +317,7 @@ plugins/vinea/                         # generated, committed public unit
 - Create: `tests/core/doctor.test.ts`, `tests/core/validate.test.ts`
 
 - [ ] **Step 1: Implement exhaustive read-only validation.**
-  - `vinea validate [--json]` scans `config.json`, every active/archive task, required artifact paths, task-schema versions, allowed states, duplicate context entries, context file counts/estimated bytes, and invalid session binding filenames.
+  - `vinea validate [--json]` scans `config.json`, `inline-audit.jsonl`, every active/archive task, required artifact paths, task-schema versions, allowed states, duplicate context entries, context file counts/estimated bytes, and invalid session binding filenames.
   - Validation must report all detected issues with `{ code, path, message }`, exit `0` only when none exist, and make no write call.
   - It intentionally must not run project tests, inspect external services, or substitute for `vinea check`.
 
