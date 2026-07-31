@@ -588,6 +588,7 @@ async function addRequirementLike(
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
   const id = input.id.trim();
+  const text = input.text.trim();
   const actor = input.actor.trim();
   await executeTaskMutation(paths, location, {
     mutationKind: eventType,
@@ -598,6 +599,7 @@ async function addRequirementLike(
       type: eventType,
       actor,
       requirementId: id,
+      text,
     }),
   }, async (timestamp, recovering) => {
     const current = await findTask(paths, taskId);
@@ -612,7 +614,7 @@ async function addRequirementLike(
     const requirement = {
       schemaVersion: SCHEMA_VERSION,
       id,
-      text: input.text.trim(),
+      text,
       createdAt: timestamp,
     };
     const task: TaskRecord = {

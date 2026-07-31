@@ -2239,6 +2239,7 @@ async function addRequirementLike(paths, taskId, input, collection, eventType, n
   const location = await findTask(paths, taskId);
   assertTaskMutable(location);
   const id = input.id.trim();
+  const text = input.text.trim();
   const actor = input.actor.trim();
   await executeTaskMutation(paths, location, {
     mutationKind: eventType,
@@ -2248,7 +2249,8 @@ async function addRequirementLike(paths, taskId, input, collection, eventType, n
       schemaVersion: SCHEMA_VERSION,
       type: eventType,
       actor,
-      requirementId: id
+      requirementId: id,
+      text
     })
   }, async (timestamp, recovering) => {
     const current = await findTask(paths, taskId);
@@ -2263,7 +2265,7 @@ async function addRequirementLike(paths, taskId, input, collection, eventType, n
     const requirement = {
       schemaVersion: SCHEMA_VERSION,
       id,
-      text: input.text.trim(),
+      text,
       createdAt: timestamp
     };
     const task = {
@@ -2816,7 +2818,10 @@ async function proposeLearningLocked(paths, taskId, input, now) {
       schemaVersion: SCHEMA_VERSION,
       type: "learning_proposed",
       actor,
-      learningCandidateId: id
+      learningCandidateId: id,
+      domain,
+      text,
+      rationale
     })
   }, async (timestamp, recovering) => {
     const current = await findTask(paths, taskId);
@@ -2968,7 +2973,8 @@ async function archiveLearningLocked(paths, taskId, input, now) {
       schemaVersion: SCHEMA_VERSION,
       type: "learning_archived",
       actor,
-      learningCandidateId: id
+      learningCandidateId: id,
+      reason
     })
   }, async (timestamp) => {
     const current = await findTask(paths, taskId);

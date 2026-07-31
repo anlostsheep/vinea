@@ -250,7 +250,7 @@ async function persistTaskMutationLocked(
       mutationKind: event.type,
       actor: event.actor,
       timestamp: event.timestamp,
-      fingerprint: mutationFingerprint(mutationEventRequest(event)),
+      fingerprint: mutationRequestFingerprint(event, task),
     },
     async () => ({
       expected: mutationTargetSummary(paths, [{ filename: taskPath, contents: `${JSON.stringify(task, null, 2)}\n` }], taskMutationIdentity(event, task)),
@@ -469,6 +469,29 @@ export function mutationValueIdentity(
 function mutationEventRequest(event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">): Record<string, unknown> {
   const { timestamp: _timestamp, ...request } = event;
   return request;
+}
+
+function mutationRequestFingerprint(
+  event: Omit<TaskMutationJournalEvent, "operationId" | "mutationKind">,
+  task: TaskRecord,
+): string {
+  const request = mutationEventRequest(event);
+  if (event.requirementId !== undefined) {
+    const collection = event.type === "requirement_added" ? task.requirements : task.acceptanceCriteria;
+    const requirement = collection.find((item) => item.id === event.requirementId);
+    if (requirement !== undefined) request.text = requirement.text;
+  } else if (event.type === "learning_proposed" && event.learningCandidateId !== undefined) {
+    const candidate = task.learningCandidates?.find((item) => item.id === event.learningCandidateId);
+    if (candidate !== undefined) {
+      request.domain = candidate.domain;
+      request.text = candidate.text;
+      request.rationale = candidate.rationale;
+    }
+  } else if (event.type === "learning_archived" && event.learningCandidateId !== undefined) {
+    const candidate = task.learningCandidates?.find((item) => item.id === event.learningCandidateId);
+    if (candidate?.archiveReason !== undefined) request.reason = candidate.archiveReason;
+  }
+  return mutationFingerprint(request);
 }
 
 function isMutationIntent(value: Record<string, unknown>): value is Record<string, unknown> & JournalMutationIntentEvent {

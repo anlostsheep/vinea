@@ -1,7 +1,7 @@
 import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
 import { recordEvidence } from "../../src/core/evidence.js";
 import { SchemaError } from "../../src/core/errors.js";
@@ -25,12 +25,30 @@ import {
 import type { TaskRecord } from "../../src/core/types.js";
 import { createTempRepo, readJson, writeJson } from "../helpers/fixture.js";
 
+const mutationCompletionFailure = vi.hoisted(() => ({ type: null as string | null }));
+
+vi.mock("../../src/core/json.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/core/json.js")>();
+  return {
+    ...actual,
+    appendJsonl: async (...args: Parameters<typeof actual.appendJsonl>) => {
+      const value = args[1] as Record<string, unknown>;
+      if (mutationCompletionFailure.type === value.type) {
+        mutationCompletionFailure.type = null;
+        throw new Error(`Injected ${String(value.type)} completion failure`);
+      }
+      return actual.appendJsonl(...args);
+    },
+  };
+});
+
 const fixedNow = () => new Date("2026-07-31T08:09:10.000Z");
 
 let cwd: string;
 let paths: VineaPaths;
 
 beforeEach(async () => {
+  mutationCompletionFailure.type = null;
   cwd = await createTempRepo();
   paths = resolveVineaPaths(cwd);
   await initializeWorkspace(paths);
@@ -595,6 +613,43 @@ test("requirement retry reuses the pending mutation timestamp after an interrupt
   expect(await validateWorkspace(paths)).toEqual({ issues: [] });
 });
 
+test("requirement retry binds its normalized text before appending a delayed completion", async () => {
+  const { task, directory } = await createReadyTask();
+  const exact = {
+    id: " R2 ",
+    text: "  Preserve the original requirement text.  ",
+    actor: " codex ",
+  };
+  const firstTimestamp = "2026-07-31T08:11:00.000Z";
+  mutationCompletionFailure.type = "requirement_added";
+
+  await expect(addRequirement(paths, task.id, exact, () => new Date(firstTimestamp)))
+    .rejects.toThrow("Injected requirement_added completion failure");
+  expect((await readTask(paths, task.id)).requirements.find(({ id }) => id === "R2")).toMatchObject({
+    text: "Preserve the original requirement text.",
+    createdAt: firstTimestamp,
+  });
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toContain("MUTATION_INTENT_UNCOMMITTED");
+  const journalWithPendingIntent = await readFile(join(directory, "journal.md"), "utf8");
+  expect(journalWithPendingIntent).not.toContain("Preserve the original requirement text.");
+
+  await expect(addRequirement(paths, task.id, {
+    id: "R2",
+    text: "Different text must not resume the pending request.",
+    actor: "codex",
+  }, () => new Date("2026-07-31T08:12:00.000Z"))).rejects.toMatchObject({ code: "VINEA_TRANSITION_INVALID" });
+  expect(await readFile(join(directory, "journal.md"), "utf8")).toBe(journalWithPendingIntent);
+
+  const recovered = await addRequirement(paths, task.id, exact, () => new Date("2026-07-31T08:13:00.000Z"));
+  expect(recovered.updatedAt).toBe(firstTimestamp);
+  const journal = parseJournal(await readFile(join(directory, "journal.md"), "utf8")) as Array<Record<string, unknown>>;
+  const intent = journal.find((entry) => entry.type === "mutation_intent" && entry.mutationKind === "requirement_added")!;
+  const completion = journal.find((entry) => entry.type === "requirement_added" && entry.requirementId === "R2")!;
+  expect(completion.operationId).toBe(intent.operationId);
+  expect(completion.timestamp).toBe(firstTimestamp);
+  expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+});
+
 test("task mutation recovery rejects a forged pending intent outside managed targets", async () => {
   const { task, directory } = await createReadyTask();
   const location = await findTask(paths, task.id);
@@ -631,6 +686,7 @@ test("task mutation recovery rejects a forged pending intent outside managed tar
       type: "requirement_added",
       actor: "codex",
       requirementId: "R2",
+      text: "Reject forged journal targets",
     }),
     expected: {
       identity: { requirementId: "R2", valueSha256: "a".repeat(64) },

@@ -93,6 +93,9 @@ async function proposeLearningLocked(
       type: "learning_proposed",
       actor,
       learningCandidateId: id,
+      domain,
+      text,
+      rationale,
     }),
   }, async (timestamp, recovering) => {
     const current = await findTask(paths, taskId);
@@ -274,6 +277,7 @@ async function archiveLearningLocked(
       type: "learning_archived",
       actor,
       learningCandidateId: id,
+      reason,
     }),
   }, async (timestamp) => {
     const current = await findTask(paths, taskId);
