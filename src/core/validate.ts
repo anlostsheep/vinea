@@ -424,6 +424,7 @@ async function validateJournalArtifact(
   let currentStatus: TaskStatus | null = null;
   let replayIsValid = true;
   let lastTransition: { oldStatus: TaskStatus; newStatus: TaskStatus } | null = null;
+  let lastValidEventType: string | null = null;
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
     if (value === null) continue;
@@ -439,6 +440,7 @@ async function validateJournalArtifact(
       replayIsValid = false;
       continue;
     }
+    lastValidEventType = value.type;
     if (value.type === "created") {
       creationCount += 1;
       if (!firstEvent) {
@@ -503,7 +505,11 @@ async function validateJournalArtifact(
     && task !== null
     && isTaskStatus(task.status)
     && task.status !== currentStatus
-    && (lastTransition === null || task.status !== lastTransition.oldStatus)
+    && (
+      lastValidEventType !== "transition_intent"
+      || lastTransition === null
+      || task.status !== lastTransition.oldStatus
+    )
   ) {
     add(
       "JOURNAL_TASK_STATUS_MISMATCH",
@@ -725,7 +731,7 @@ function isTaskStatus(value: unknown): value is TaskStatus {
   return typeof value === "string" && ALL_STATUSES.has(value);
 }
 
-function isJournalEvent(value: unknown): value is Record<string, unknown> {
+function isJournalEvent(value: unknown): value is Record<string, unknown> & { type: string } {
   if (!isRecord(value)
     || value.schemaVersion !== SCHEMA_VERSION
     || !isIsoTimestamp(value.timestamp)

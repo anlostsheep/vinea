@@ -342,12 +342,21 @@ test("validate replays journal state before accepting task lifecycle artifacts",
     [
       JSON.stringify(creation(createdAt)),
       JSON.stringify(transition("op-mismatch", "planning", "ready", "2026-07-31T08:10:05.000Z")),
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "continued",
+        timestamp: "2026-07-31T08:10:06.000Z",
+        actor: "cli",
+        confirmation: "user",
+        host: "codex",
+        sessionBound: false,
+        started: false,
+        status: "ready",
+      }),
       "",
     ].join("\n"),
     "utf8",
   );
-  const mismatchedTask = await readJson<TaskRecord>(join(mismatchedStatus.directory, "task.json"));
-  await writeJson(join(mismatchedStatus.directory, "task.json"), { ...mismatchedTask, status: "blocked" });
 
   const before = await snapshotFiles(paths.vineaRoot);
   const result = await runCli(["validate", "--json"], cwd);
@@ -362,6 +371,53 @@ test("validate replays journal state before accepting task lifecycle artifacts",
   ]));
   expect(output.issues.filter(({ code }) => code === "JOURNAL_TRANSITION_INVALID")).toHaveLength(2);
   expect(await snapshotFiles(paths.vineaRoot)).toEqual(before);
+});
+
+test("validate preserves the old-status window only for a final transition intent", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const task = await createTask(
+    paths,
+    {
+      title: "Pending transition intent",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:11:00.000Z"),
+  );
+  await writeFile(
+    join(task.directory, "journal.md"),
+    [
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "created",
+        timestamp: "2026-07-31T08:11:00.000Z",
+        actor: "cli",
+        confirmation: "user",
+        status: "planning",
+      }),
+      JSON.stringify({
+        schemaVersion: 1,
+        type: "transition_intent",
+        operationId: "op-pending",
+        timestamp: "2026-07-31T08:11:01.000Z",
+        actor: "cli",
+        reason: "pending status commit",
+        oldStatus: "planning",
+        newStatus: "ready",
+      }),
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const result = await runCli(["validate", "--json"], cwd);
+
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ issues: [] });
 });
 
 async function snapshotFiles(root: string): Promise<Record<string, { contents: string; mtimeMs: number }>> {
