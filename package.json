@@ -1,0 +1,24 @@
+{
+  "name": "vinea",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package:plugin": "npm run build",
+    "check:plugin": "npm run build",
+    "check": "npm run typecheck && npm test && npm run build",
+    "test:e2e:manual": "node dist/vinea.mjs --help"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.76",
+    "esbuild": "^0.25.2",
+    "typescript": "^5.8.3",
+    "vitest": "^2.1.9"
+  }
+}
