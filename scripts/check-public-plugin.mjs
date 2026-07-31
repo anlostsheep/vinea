@@ -20,10 +20,9 @@ const version = requiredString(rootPackage.version, "package.json version");
 
 const codexManifest = await readJson(join(publicRoot, ".codex-plugin", "plugin.json"));
 const claudeManifest = await readJson(join(publicRoot, ".claude-plugin", "plugin.json"));
-for (const [name, manifest] of [["Codex", codexManifest], ["Claude", claudeManifest]]) {
-  if (manifest.version !== version) throw new Error(`${name} manifest version does not match package.json.`);
-  if (manifest.skills !== "./skills/") throw new Error(`${name} manifest must expose ./skills/.`);
-}
+assertHostManifest("Codex", codexManifest, version);
+assertHostManifest("Claude", claudeManifest, version);
+assertCodexInterface(codexManifest.interface);
 
 const cliPath = join(publicRoot, "bin", "vinea.mjs");
 await access(cliPath);
@@ -41,18 +40,11 @@ for (const skill of expectedSkills) await access(join(publicRoot, "skills", skil
 
 const codexMarketplace = await readJson(join(projectRoot, ".agents", "plugins", "marketplace.json"));
 const claudeMarketplace = await readJson(join(projectRoot, ".claude-plugin", "marketplace.json"));
-if (codexMarketplace.version !== version || codexMarketplace.plugins?.[0]?.version !== version) {
-  throw new Error("Codex marketplace version does not match package.json.");
-}
-if (codexMarketplace.plugins?.[0]?.source?.path !== "./plugins/vinea") {
-  throw new Error("Codex marketplace must point to ./plugins/vinea.");
-}
-if (claudeMarketplace.metadata?.version !== version || claudeMarketplace.plugins?.[0]?.version !== version) {
-  throw new Error("Claude marketplace version does not match package.json.");
-}
-if (claudeMarketplace.plugins?.[0]?.source !== "./plugins/vinea") {
-  throw new Error("Claude marketplace must point to ./plugins/vinea.");
-}
+assertCodexMarketplace(codexMarketplace, version);
+assertClaudeMarketplace(claudeMarketplace, version);
+
+const publicReadme = await readFile(join(publicRoot, "README.md"), "utf8");
+assertPublicReadme(publicReadme);
 
 const publicTextPaths = [
   ...(await walkFiles(publicRoot)),
@@ -80,6 +72,80 @@ async function readJson(path) {
 function requiredString(value, name) {
   if (typeof value !== "string" || value.trim() === "") throw new Error(`${name} must be a nonempty string.`);
   return value;
+}
+
+function assertHostManifest(host, manifest, expectedVersion) {
+  if (manifest.name !== "vinea") throw new Error(`${host} manifest must identify vinea.`);
+  if (manifest.version !== expectedVersion) throw new Error(`${host} manifest version does not match package.json.`);
+  if (typeof manifest.description !== "string" || !/shared task state.*Codex.*Claude Code/i.test(manifest.description)) {
+    throw new Error(`${host} manifest must describe shared task state for Codex and Claude Code.`);
+  }
+  if (manifest.author?.name !== "dengzhen") throw new Error(`${host} manifest must declare the Vinea author.`);
+  if (manifest.skills !== "./skills/") throw new Error(`${host} manifest must expose ./skills/.`);
+  for (const unsupported of ["mcpServers", "hooks", "apps"]) {
+    if (unsupported in manifest) throw new Error(`${host} manifest must not declare ${unsupported}.`);
+  }
+}
+
+function assertCodexInterface(value) {
+  if (value === null || typeof value !== "object") throw new Error("Codex manifest must include interface metadata.");
+  const interfaceMetadata = value;
+  for (const [field, expected] of Object.entries({
+    displayName: "Vinea",
+    shortDescription: "Shared AI-coding task workflows",
+    developerName: "dengzhen",
+    category: "Developer Tools",
+  })) {
+    if (interfaceMetadata[field] !== expected) throw new Error(`Codex interface ${field} is invalid.`);
+  }
+  if (typeof interfaceMetadata.longDescription !== "string" || interfaceMetadata.longDescription.trim() === "") {
+    throw new Error("Codex interface longDescription is required.");
+  }
+  if (!Array.isArray(interfaceMetadata.capabilities) || interfaceMetadata.capabilities.length === 0) {
+    throw new Error("Codex interface capabilities are required.");
+  }
+  if (!Array.isArray(interfaceMetadata.defaultPrompt) || interfaceMetadata.defaultPrompt.length === 0) {
+    throw new Error("Codex interface defaultPrompt is required.");
+  }
+}
+
+function assertCodexMarketplace(marketplace, expectedVersion) {
+  const entry = marketplace.plugins?.[0];
+  if (marketplace.name !== "vinea" || marketplace.version !== expectedVersion || entry?.name !== "vinea" || entry.version !== expectedVersion) {
+    throw new Error("Codex marketplace identity or version is invalid.");
+  }
+  if (entry.source?.source !== "local" || entry.source.path !== "./plugins/vinea") {
+    throw new Error("Codex marketplace must use the local ./plugins/vinea source.");
+  }
+  if (entry.policy?.installation !== "AVAILABLE" || entry.policy.authentication !== "ON_INSTALL") {
+    throw new Error("Codex marketplace policy is invalid.");
+  }
+  if (entry.category !== "Developer Tools") throw new Error("Codex marketplace category is invalid.");
+}
+
+function assertClaudeMarketplace(marketplace, expectedVersion) {
+  const entry = marketplace.plugins?.[0];
+  if (marketplace.name !== "vinea" || marketplace.owner?.name !== "dengzhen") {
+    throw new Error("Claude marketplace identity is invalid.");
+  }
+  if (typeof marketplace.metadata?.description !== "string" || marketplace.metadata.version !== expectedVersion) {
+    throw new Error("Claude marketplace metadata is invalid.");
+  }
+  if (entry?.name !== "vinea" || entry.version !== expectedVersion || entry.author?.name !== "dengzhen" || entry.source !== "./plugins/vinea") {
+    throw new Error("Claude marketplace plugin entry is invalid.");
+  }
+}
+
+function assertPublicReadme(readme) {
+  if (!readme.includes("node bin/vinea.mjs --help")) {
+    throw new Error("Public README must invoke the bundled CLI from the plugin root.");
+  }
+  if (!/Codex/.test(readme) || !/Claude Code/.test(readme) || !/install/i.test(readme)) {
+    throw new Error("Public README must give host installation guidance.");
+  }
+  if (/\bnpm\b|\bdist\/|\bpackage\.json\b|plugins\/vinea\b/.test(readme)) {
+    throw new Error("Public README must not contain development-root commands or paths.");
+  }
 }
 
 async function walkFiles(directory) {
