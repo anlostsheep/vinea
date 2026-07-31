@@ -114,6 +114,9 @@ function assertCodexMarketplace(marketplace, expectedVersion) {
   if (marketplace.name !== "vinea" || marketplace.version !== expectedVersion || entry?.name !== "vinea" || entry.version !== expectedVersion) {
     throw new Error("Codex marketplace identity or version is invalid.");
   }
+  if (marketplace.interface?.displayName !== "Vinea") {
+    throw new Error("Codex marketplace interface displayName is invalid.");
+  }
   if (entry.source?.source !== "local" || entry.source.path !== "./plugins/vinea") {
     throw new Error("Codex marketplace must use the local ./plugins/vinea source.");
   }

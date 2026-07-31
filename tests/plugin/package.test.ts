@@ -63,6 +63,7 @@ test("packages parity manifests, all public skills, and one host-independent CLI
   expect(codexMarketplace).toMatchObject({
     name: "vinea",
     version: rootPackage.version,
+    interface: { displayName: "Vinea" },
     plugins: [{
       name: "vinea",
       version: rootPackage.version,
