@@ -48,6 +48,7 @@ export interface TaskRecord {
   executionMode: ExecutionMode;
   requirements: Requirement[];
   acceptanceCriteria: Requirement[];
+  learningCandidates?: LearningCandidate[];
   commit: CommitMetadata | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
@@ -99,7 +100,10 @@ export type TaskMutationKind =
   | "brief_set"
   | "plan_set"
   | "context_added"
-  | "evidence_recorded";
+  | "evidence_recorded"
+  | "learning_proposed"
+  | "learning_accepted"
+  | "learning_archived";
 
 export interface TaskMutationJournalEvent {
   schemaVersion: typeof SCHEMA_VERSION;
@@ -113,6 +117,8 @@ export interface TaskMutationJournalEvent {
   path?: string;
   evidenceId?: string;
   evidenceKind?: EvidenceRecord["kind"];
+  learningCandidateId?: string;
+  confirmedBy?: "user";
 }
 
 export type JournalEvent =

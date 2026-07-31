@@ -503,6 +503,7 @@ function isTaskRecordShape(value: unknown): value is TaskRecord {
   if (!isTaskRecordBaseShape(value)) return false;
   return value.requirements.every(isRequirement)
     && value.acceptanceCriteria.every(isRequirement)
+    && isLearningCandidateCollection(value.learningCandidates)
     && isCommitMetadata(value.commit);
 }
 
@@ -540,6 +541,43 @@ function isRequirement(value: unknown): boolean {
     && typeof value.text === "string"
     && value.text.trim() !== ""
     && isIsoTimestamp(value.createdAt);
+}
+
+function isLearningCandidateCollection(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  const ids = new Set<string>();
+  for (const candidate of value) {
+    if (!isRecord(candidate)
+      || candidate.schemaVersion !== SCHEMA_VERSION
+      || typeof candidate.id !== "string"
+      || candidate.id.trim() === ""
+      || ids.has(candidate.id)
+      || typeof candidate.domain !== "string"
+      || candidate.domain.trim() === ""
+      || typeof candidate.text !== "string"
+      || candidate.text.trim() === ""
+      || typeof candidate.rationale !== "string"
+      || candidate.rationale.trim() === ""
+      || !isIsoTimestamp(candidate.proposedAt)) {
+      return false;
+    }
+    ids.add(candidate.id);
+    if (candidate.status === "proposed") continue;
+    if (candidate.status === "accepted"
+      && candidate.confirmedBy === "user"
+      && isIsoTimestamp(candidate.acceptedAt)) {
+      continue;
+    }
+    if (candidate.status === "archived"
+      && typeof candidate.archiveReason === "string"
+      && candidate.archiveReason.trim() !== ""
+      && isIsoTimestamp(candidate.archivedAt)) {
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 function isCommitMetadata(value: unknown): boolean {

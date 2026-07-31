@@ -699,7 +699,7 @@ function assertHost(value: string): asserts value is Host {
 }
 
 function assertLearningCandidatesClassified(task: TaskRecord): void {
-  const candidates = (task as TaskRecord & { learningCandidates?: unknown }).learningCandidates;
+  const candidates: unknown = task.learningCandidates;
   if (candidates === undefined) return;
   if (!Array.isArray(candidates)) {
     throw new FinishGateError("Finish learning candidate data is malformed.");

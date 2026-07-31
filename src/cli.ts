@@ -12,6 +12,11 @@ import {
 } from "./core/context.js";
 import { recordEvidence } from "./core/evidence.js";
 import { VineaError } from "./core/errors.js";
+import {
+  acceptLearning,
+  archiveLearning,
+  proposeLearning,
+} from "./core/learning.js";
 import { resolveVineaPaths } from "./core/paths.js";
 import { inspectWorkspace } from "./core/schema.js";
 import {
@@ -64,6 +69,9 @@ Commands:
   context add
   context list
   evidence record
+  learning propose
+  learning accept
+  learning archive
 `;
 
 class UsageError extends Error {
@@ -153,6 +161,14 @@ export async function main(args: string[]): Promise<number> {
   if (command === "evidence") {
     try {
       return await handleEvidence(args.slice(1));
+    } catch (error) {
+      return reportError(error, json);
+    }
+  }
+
+  if (command === "learning") {
+    try {
+      return await handleLearning(args.slice(1));
     } catch (error) {
       return reportError(error, json);
     }
@@ -434,6 +450,62 @@ async function handleEvidence(args: string[]): Promise<number> {
   });
   writeOutput(evidence, options.has("--json"), renderEvidence(evidence));
   return 0;
+}
+
+async function handleLearning(args: string[]): Promise<number> {
+  const subcommand = args[0];
+  const taskId = requiredTaskId(args[1]);
+  const paths = resolveVineaPaths(process.cwd());
+  if (subcommand === "propose") {
+    const options = parseOptions(
+      args.slice(2),
+      new Set(["--id", "--domain", "--text", "--rationale"]),
+      new Set(["--json"]),
+    );
+    const task = await proposeLearning(paths, taskId, {
+      id: requiredOption(options, "--id"),
+      domain: requiredOption(options, "--domain"),
+      text: requiredOption(options, "--text"),
+      rationale: requiredOption(options, "--rationale"),
+      actor: "cli",
+    });
+    writeOutput(task, options.has("--json"), renderTask(task));
+    return 0;
+  }
+  if (subcommand === "accept") {
+    const options = parseOptions(
+      args.slice(2),
+      new Set(["--id", "--confirmed-by"]),
+      new Set(["--json"]),
+    );
+    const confirmedBy = oneOf(
+      requiredOption(options, "--confirmed-by"),
+      ["user"] as const,
+      "--confirmed-by",
+    );
+    const task = await acceptLearning(paths, taskId, {
+      id: requiredOption(options, "--id"),
+      confirmedBy,
+      actor: "cli",
+    });
+    writeOutput(task, options.has("--json"), renderTask(task));
+    return 0;
+  }
+  if (subcommand === "archive") {
+    const options = parseOptions(
+      args.slice(2),
+      new Set(["--id", "--reason"]),
+      new Set(["--json"]),
+    );
+    const task = await archiveLearning(paths, taskId, {
+      id: requiredOption(options, "--id"),
+      reason: requiredOption(options, "--reason"),
+      actor: "cli",
+    });
+    writeOutput(task, options.has("--json"), renderTask(task));
+    return 0;
+  }
+  throw new UsageError(`Unknown learning command: ${subcommand ?? "(none)"}`);
 }
 
 async function handleCheck(args: string[]): Promise<number> {
