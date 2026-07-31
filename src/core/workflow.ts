@@ -299,6 +299,9 @@ export async function continueTask(
   if (location.scope === "archive" || location.task.status === "archived") {
     throw new ValidationError(`Task is archived and cannot be continued: ${taskId}`);
   }
+  if (location.task.status === "finished") {
+    throw new ValidationError(`Task is finished and cannot be continued: ${taskId}`);
+  }
   if (input.start === true && location.task.status !== "ready") {
     throw new ValidationError(
       `Only a ready task can be started during continuation; ${taskId} is ${location.task.status}.`,

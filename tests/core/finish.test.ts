@@ -250,6 +250,45 @@ test("archive cleanup failure leaves the finished task and all bindings recovera
   expect((await readJson<{ taskId: string }>(join(sessionDirectory, bindingsAfterRetry[0]!))).taskId).toBe(other.id);
 });
 
+test("finished tasks cannot continue and archive removes their preexisting binding", async () => {
+  const fixture = await createCheckingTask();
+  await coverTask(fixture);
+  const other = await createTask(fixture.cwd, "Unrelated active task", "standard");
+  await bindTask(fixture.cwd, fixture.task.id, "target-before-finish");
+  await bindTask(fixture.cwd, other.id, "unrelated-before-finish");
+  expect((await finish(fixture.cwd, fixture.task.id)).exitCode).toBe(0);
+
+  const activeDirectory = taskDirectory(fixture.cwd, fixture.task.id, "active");
+  const journalPath = join(activeDirectory, "journal.md");
+  const sessionsDirectory = join(fixture.cwd, ".vinea", ".runtime", "sessions");
+  const journalBeforeContinue = await readFile(journalPath, "utf8");
+  const bindingsBeforeContinue = (await readdir(sessionsDirectory)).sort();
+
+  const continued = await runCli([
+    "continue", fixture.task.id,
+    "--host", "codex",
+    "--session-id", "recreated-after-finish",
+    "--confirmed",
+    "--json",
+  ], fixture.cwd);
+
+  expect(continued.exitCode).toBe(1);
+  expect(JSON.parse(continued.stdout)).toEqual({
+    error: {
+      code: "VINEA_VALIDATION_INVALID",
+      message: `Task is finished and cannot be continued: ${fixture.task.id}`,
+    },
+  });
+  expect(await readFile(journalPath, "utf8")).toBe(journalBeforeContinue);
+  expect((await readdir(sessionsDirectory)).sort()).toEqual(bindingsBeforeContinue);
+
+  const archived = await runCli(["archive", fixture.task.id, "--confirmed", "--json"], fixture.cwd);
+  expect(archived.exitCode).toBe(0);
+  const remainingBindings = await readdir(sessionsDirectory);
+  expect(remainingBindings).toHaveLength(1);
+  expect((await readJson<{ taskId: string }>(join(sessionsDirectory, remainingBindings[0]!))).taskId).toBe(other.id);
+});
+
 test("terminal tasks reject all task-local writers before archive and cannot gain uncovered requirements", async () => {
   const fixture = await createCheckingTask();
   await coverTask(fixture);
