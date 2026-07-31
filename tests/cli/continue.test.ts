@@ -37,7 +37,7 @@ test("continue binds only after confirmation and --start is required to move rea
   expect((JSON.parse(continued.stdout) as { task: TaskRecord }).task.status).toBe("ready");
   expect((await readJson<TaskRecord>(taskPath)).status).toBe("ready");
   expect(await readJson<SessionBinding>(
-    join(cwd, ".vinea", ".runtime", "sessions", "codex-sid-dGhyZWFkLTEyMw.json"),
+    join(cwd, ".vinea", ".runtime", "sessions", "codex-sid-7468726561642d313233.json"),
   )).toMatchObject({
     schemaVersion: 1,
     taskId: task.id,

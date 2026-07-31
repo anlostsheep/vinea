@@ -396,10 +396,10 @@ function safeSessionFilenamePart(sessionId: string): string {
   if (!isWellFormedUnicode(sessionId)) {
     throw new ValidationError("Session ID must contain well-formed Unicode.");
   }
-  if (Buffer.byteLength(sessionId, "utf8") > 176) {
-    throw new ValidationError("Session ID exceeds the 176-byte local binding limit.");
+  if (Buffer.byteLength(sessionId, "utf8") > 119) {
+    throw new ValidationError("Session ID exceeds the 119-byte local binding limit.");
   }
-  return `sid-${Buffer.from(sessionId, "utf8").toString("base64url")}`;
+  return `sid-${Buffer.from(sessionId, "utf8").toString("hex")}`;
 }
 
 function isWellFormedUnicode(value: string): boolean {

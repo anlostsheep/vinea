@@ -158,7 +158,7 @@ test("orient reports a stale local binding and still requires confirmation for t
     },
     fixedNow,
   );
-  await writeJson(join(paths.sessions, "codex-sid-c3RhbGUtc2Vzc2lvbg.json"), {
+  await writeJson(join(paths.sessions, "codex-sid-7374616c652d73657373696f6e.json"), {
     schemaVersion: 1,
     taskId: "t-20260730-010203-missing-task",
     boundAt: "2026-07-31T08:00:00.000Z",
@@ -187,7 +187,7 @@ test("orient surfaces a malformed local binding without repairing or following i
     },
     fixedNow,
   );
-  const bindingPath = join(paths.sessions, "claude-sid-YnJva2VuLXNlc3Npb24.json");
+  const bindingPath = join(paths.sessions, "claude-sid-62726f6b656e2d73657373696f6e.json");
   await writeFile(bindingPath, "{broken json}\n", "utf8");
 
   const summary = await orient(paths, { host: "claude", sessionId: "broken-session" });
@@ -290,6 +290,17 @@ test("session IDs with ill-formed Unicode are rejected instead of collapsing dur
   });
 });
 
+test("overlong session IDs are rejected before filesystem resolution", async () => {
+  const beforeEntries = await readdir(paths.sessions);
+
+  await expect(orient(paths, { host: "claude", sessionId: "a".repeat(120) })).rejects.toMatchObject({
+    code: "VINEA_VALIDATION_INVALID",
+    message: expect.stringContaining("119-byte"),
+  });
+
+  expect(await readdir(paths.sessions)).toEqual(beforeEntries);
+});
+
 test("distinct valid session IDs persist to distinct binding files without overwriting each other", async () => {
   const first = await createTask(
     paths,
@@ -335,6 +346,54 @@ test("distinct valid session IDs persist to distinct binding files without overw
   expect((await orient(paths, { host: "codex", sessionId: "b64-Pw" })).binding).toMatchObject({
     status: "bound",
     taskId: second.task.id,
+  });
+});
+
+test("binding filenames remain distinct after filesystem case folding", async () => {
+  const upper = await createTask(
+    paths,
+    {
+      title: "Uppercase base64 suffix",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:09:10.000Z"),
+  );
+  const lower = await createTask(
+    paths,
+    {
+      title: "Lowercase base64 suffix",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:09:11.000Z"),
+  );
+
+  await continueTask(paths, upper.task.id, {
+    host: "codex",
+    sessionId: "AAG",
+    confirmed: true,
+  });
+  await continueTask(paths, lower.task.id, {
+    host: "codex",
+    sessionId: "AAa",
+    confirmed: true,
+  });
+
+  const bindingFiles = (await readdir(paths.sessions)).sort();
+  expect(bindingFiles).toHaveLength(2);
+  expect(new Set(bindingFiles.map((filename) => filename.toLowerCase())).size).toBe(2);
+  expect((await orient(paths, { host: "codex", sessionId: "AAG" })).binding).toMatchObject({
+    status: "bound",
+    taskId: upper.task.id,
+  });
+  expect((await orient(paths, { host: "codex", sessionId: "AAa" })).binding).toMatchObject({
+    status: "bound",
+    taskId: lower.task.id,
   });
 });
 
