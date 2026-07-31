@@ -29,6 +29,7 @@ const ARTIFACTS = [
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const TASK_LOCK_RETRY_MILLISECONDS = 25;
 const TASK_LOCK_TIMEOUT_MILLISECONDS = 5000;
+const TEST_TASK_LOCK_OBSERVATION = "enabled";
 const taskLockContext = new AsyncLocalStorage<Set<string>>();
 
 export interface TaskLocation {
@@ -574,6 +575,7 @@ async function acquireTaskLock(paths: VineaPaths, taskId: string): Promise<TaskL
       if (!isCode(error, "EEXIST")) {
         throw new SchemaError(`Unable to acquire task lock for ${taskId}`, error);
       }
+      await recordTestTaskLockContention(taskId);
       if (Date.now() >= deadline) {
         throw new ValidationError(
           `Task ${taskId} is busy in another Vinea process; wait for it to finish and retry. Vinea will not remove a lock it does not own.`,
@@ -602,6 +604,16 @@ async function acquireTaskLock(paths: VineaPaths, taskId: string): Promise<TaskL
     }
     return { directory, ownerPath, token };
   }
+}
+
+// This observation is deliberately inert unless an integration test enables
+// both gates. It never changes lock acquisition, normal CLI output, or data.
+async function recordTestTaskLockContention(taskId: string): Promise<void> {
+  const marker = process.env.VINEA_TEST_TASK_LOCK_CONTENDED_MARKER;
+  if (process.env.NODE_ENV !== "test" || process.env.VINEA_TEST_TASK_LOCK_OBSERVATION !== TEST_TASK_LOCK_OBSERVATION || !marker) {
+    return;
+  }
+  await writeFile(marker, `${taskId}\n`, { encoding: "utf8", flag: "w" });
 }
 
 async function releaseTaskLock(paths: VineaPaths, lock: TaskLock): Promise<void> {

@@ -455,6 +455,7 @@ var ARTIFACTS = [
 var TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 var TASK_LOCK_RETRY_MILLISECONDS = 25;
 var TASK_LOCK_TIMEOUT_MILLISECONDS = 5e3;
+var TEST_TASK_LOCK_OBSERVATION = "enabled";
 var taskLockContext = new AsyncLocalStorage();
 function assertTaskMutable(location) {
   if (location.scope === "archive" || location.task.status === "finished" || location.task.status === "archived") {
@@ -821,6 +822,7 @@ async function acquireTaskLock(paths, taskId) {
       if (!isCode(error, "EEXIST")) {
         throw new SchemaError(`Unable to acquire task lock for ${taskId}`, error);
       }
+      await recordTestTaskLockContention(taskId);
       if (Date.now() >= deadline) {
         throw new ValidationError(
           `Task ${taskId} is busy in another Vinea process; wait for it to finish and retry. Vinea will not remove a lock it does not own.`
@@ -850,6 +852,14 @@ async function acquireTaskLock(paths, taskId) {
     }
     return { directory, ownerPath, token };
   }
+}
+async function recordTestTaskLockContention(taskId) {
+  const marker = process.env.VINEA_TEST_TASK_LOCK_CONTENDED_MARKER;
+  if (process.env.NODE_ENV !== "test" || process.env.VINEA_TEST_TASK_LOCK_OBSERVATION !== TEST_TASK_LOCK_OBSERVATION || !marker) {
+    return;
+  }
+  await writeFile3(marker, `${taskId}
+`, { encoding: "utf8", flag: "w" });
 }
 async function releaseTaskLock(paths, lock) {
   await assertNoSymlink(paths.repoRoot, lock.ownerPath);

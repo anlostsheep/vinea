@@ -41,12 +41,21 @@ test("public CLI serializes two processes and preserves one retried archive inte
   ], cwd);
   await waitForFile(join(runtime, "task-locks", `${task.id}.lock`, "owner.json"));
 
-  const startedMarker = join(runtime, "second-process-started");
-  const second = startMarkedPublic(startedMarker, [
+  const contentionMarker = join(runtime, "second-process-contended");
+  const second = startPublic([
     "task", "require", task.id, "--id", "R1", "--text", "The task remains recoverable", "--json",
-  ], cwd);
-  await waitForFile(startedMarker);
-  await rm(promotionLock, { recursive: true, force: true });
+  ], cwd, {
+    NODE_ENV: "test",
+    VINEA_TEST_TASK_LOCK_OBSERVATION: "enabled",
+    VINEA_TEST_TASK_LOCK_CONTENDED_MARKER: contentionMarker,
+  });
+  try {
+    await waitForFile(contentionMarker);
+    const beforeReleaseEvents = jsonl(await readFile(join(cwd, ".vinea", "tasks", "active", task.id, "journal.md"), "utf8"));
+    expect(beforeReleaseEvents.some(({ type }) => type === "requirement_added")).toBe(false);
+  } finally {
+    await rm(promotionLock, { recursive: true, force: true });
+  }
 
   expect((await accepted).exitCode).toBe(0);
   expect((await second).exitCode).toBe(0);
@@ -97,29 +106,22 @@ async function runPublic(args: string[], cwd: string, expectSuccess = true): Pro
   return result;
 }
 
-function startPublic(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return runProcess(process.execPath, [publicCli, ...args], cwd);
-}
-
-function startMarkedPublic(
-  marker: string,
+function startPublic(
   args: string[],
   cwd: string,
+  environment: NodeJS.ProcessEnv = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const launcher = join(cwd, ".vinea", ".runtime", "launch-public-cli.mjs");
-  const source = [
-    "import { spawn } from 'node:child_process';",
-    "import { writeFileSync } from 'node:fs';",
-    "const child = spawn(process.execPath, [process.argv[3], ...process.argv.slice(4)], { stdio: 'inherit' });",
-    "writeFileSync(process.argv[2], 'started');",
-    "child.on('exit', (code) => process.exitCode = code ?? 1);",
-  ].join("\n");
-  return writeFile(launcher, source, "utf8").then(() => runProcess(process.execPath, [launcher, marker, publicCli, ...args], cwd));
+  return runProcess(process.execPath, [publicCli, ...args], cwd, environment);
 }
 
-function runProcess(command: string, args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+function runProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  environment: NodeJS.ProcessEnv = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd });
+    const child = spawn(command, args, { cwd, env: { ...process.env, ...environment } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
