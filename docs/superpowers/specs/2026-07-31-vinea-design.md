@@ -104,7 +104,7 @@ CLI 不生成业务代码，不代替 agent 进行语义判断，也不执行未
         <domain>.md
       tasks/
         active/
-          <task-id>-<slug>/
+          <task-id>/
             task.json
             brief.md
             plan.md
@@ -113,7 +113,7 @@ CLI 不生成业务代码，不代替 agent 进行语义判断，也不执行未
             check.md
             journal.md
         archive/
-          <task-id>-<slug>/
+          <task-id>/
       .runtime/
         sessions/
           <host>-<session>.json

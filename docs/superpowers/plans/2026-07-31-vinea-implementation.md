@@ -160,7 +160,7 @@ plugins/vinea/                         # generated, committed public unit
 
 - [ ] **Step 1: Implement task IDs and initial artifacts.**
   - Create IDs as `t-YYYYMMDD-HHmmss-<slug>` using an injectable clock and deterministic slugification; fail rather than overwrite when a generated path already exists.
-  - `createTask()` creates `tasks/active/<id>-<slug>/task.json`, `brief.md`, `plan.md`, `context.jsonl`, `evidence.jsonl`, `check.md`, and `journal.md` in one operation.
+  - `createTask()` creates `tasks/active/<id>/task.json`, `brief.md`, `plan.md`, `context.jsonl`, `evidence.jsonl`, `check.md`, and `journal.md` in one operation. The `<id>` itself is `t-YYYYMMDD-HHmmss-<slug>`, so the directory does not append a second slug.
   - Initialize `task.json` as `planning` with title, risk `{ level, reasons }`, `qualityMode`, `executionMode`, and empty requirements/acceptance/commit metadata.
   - Seed `journal.md` with a timestamped creation event, not an agent-written claim of implementation.
 
