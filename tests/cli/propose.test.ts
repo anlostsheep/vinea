@@ -229,8 +229,22 @@ test("task transition rejects skips and task unblock is the only blocked exit", 
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   expect(journal.slice(-2)).toMatchObject([
-    { type: "transition", oldStatus: "planning", newStatus: "blocked", actor: "cli", reason: "Waiting for access" },
-    { type: "transition", oldStatus: "blocked", newStatus: "ready", actor: "cli", reason: "Access arrived" },
+    {
+      type: "transition_intent",
+      operationId: expect.any(String),
+      oldStatus: "planning",
+      newStatus: "blocked",
+      actor: "cli",
+      reason: "Waiting for access",
+    },
+    {
+      type: "transition_intent",
+      operationId: expect.any(String),
+      oldStatus: "blocked",
+      newStatus: "ready",
+      actor: "cli",
+      reason: "Access arrived",
+    },
   ]);
 });
 

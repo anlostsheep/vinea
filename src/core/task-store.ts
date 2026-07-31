@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { AmbiguousTaskError, SchemaError, ValidationError } from "./errors.js";
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
 import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import {
   SCHEMA_VERSION,
   type JournalCreationEvent,
-  type JournalTransitionEvent,
+  type JournalTransitionDetails,
+  type JournalTransitionIntentEvent,
   type TaskRecord,
 } from "./types.js";
 
@@ -26,6 +27,20 @@ export interface TaskLocation {
   directory: string;
   scope: "active" | "archive";
 }
+
+export interface TransitionPersistenceOperations {
+  createOperationId(): string;
+  appendJournal(filename: string, value: unknown, repoRoot: string): Promise<void>;
+  moveDirectory(source: string, destination: string): Promise<void>;
+  writeTask(filename: string, value: unknown, repoRoot: string): Promise<void>;
+}
+
+const DEFAULT_TRANSITION_OPERATIONS: TransitionPersistenceOperations = {
+  createOperationId: randomUUID,
+  appendJournal: appendJsonl,
+  moveDirectory: rename,
+  writeTask: writeJsonAtomic,
+};
 
 export async function createTaskArtifacts(
   paths: VineaPaths,
@@ -102,44 +117,43 @@ export async function persistTaskTransition(
   paths: VineaPaths,
   location: TaskLocation,
   task: TaskRecord,
-  event: JournalTransitionEvent,
+  transition: JournalTransitionDetails,
+  operationOverrides: Partial<TransitionPersistenceOperations> = {},
 ): Promise<TaskLocation> {
-  const taskPath = join(location.directory, "task.json");
+  // The append-only intent is the audit record; task.json's atomic status write is
+  // the commit marker. Archive moves happen while the old status is still stored,
+  // so any returned failure is either old-state + intent or new-state + no later failure.
+  const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
   const journalPath = join(location.directory, "journal.md");
-  const destination = task.status === "archived" ? join(paths.archivedTasks, task.id) : undefined;
+  const shouldMoveToArchive = task.status === "archived" && location.scope === "active";
+  const destination = shouldMoveToArchive ? join(paths.archivedTasks, task.id) : undefined;
   await assertNoSymlink(paths.repoRoot, journalPath);
   if (destination !== undefined) await assertNoSymlink(paths.repoRoot, destination);
-  let previousJournal: string;
-  try {
-    previousJournal = await readFile(journalPath, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read task journal for ${task.id}`, error);
+  const intent: JournalTransitionIntentEvent = {
+    ...transition,
+    type: "transition_intent",
+    operationId: operations.createOperationId(),
+  };
+  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+
+  let targetDirectory = location.directory;
+  let targetScope = location.scope;
+  if (destination !== undefined) {
+    try {
+      await operations.moveDirectory(location.directory, destination);
+    } catch (error) {
+      throw new SchemaError(`Unable to archive task ${task.id}; transition intent remains pending for retry`, error);
+    }
+    targetDirectory = destination;
+    targetScope = "archive";
   }
 
   try {
-    await writeJsonAtomic(taskPath, task, paths.repoRoot);
-    await appendJsonl(journalPath, event, paths.repoRoot);
-    if (destination === undefined) return { ...location, task };
-    try {
-      await rename(location.directory, destination);
-    } catch (error) {
-      throw new SchemaError(`Unable to archive task ${task.id}`, error);
-    }
+    await operations.writeTask(join(targetDirectory, "task.json"), task, paths.repoRoot);
   } catch (error) {
-    const rollback = await Promise.allSettled([
-      writeJsonAtomic(taskPath, location.task, paths.repoRoot),
-      writeTextAtomic(journalPath, previousJournal, paths.repoRoot),
-    ]);
-    const rollbackFailures = rollback.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (rollbackFailures.length > 0) {
-      throw new SchemaError(`Task transition failed and rollback was incomplete for ${task.id}`, {
-        transitionError: error,
-        rollbackErrors: rollbackFailures.map(({ reason }) => reason),
-      });
-    }
-    throw error;
+    throw new SchemaError(`Unable to commit task transition for ${task.id}; transition intent remains pending for retry`, error);
   }
-  return { task, directory: destination, scope: "archive" };
+  return { task, directory: targetDirectory, scope: targetScope };
 }
 
 async function findInScope(
@@ -201,18 +215,6 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (error) {
     if (isCode(error, "ENOENT")) return false;
     throw error;
-  }
-}
-
-async function writeTextAtomic(filename: string, contents: string, repoRoot: string): Promise<void> {
-  await assertNoSymlink(repoRoot, filename);
-  const temporary = join(dirname(filename), `.${basename(filename)}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, contents, { encoding: "utf8", flag: "wx" });
-    await rename(temporary, filename);
-  } catch (error) {
-    await rm(temporary, { force: true });
-    throw new SchemaError(`Unable to restore ${filename}`, error);
   }
 }
 

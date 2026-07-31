@@ -67,9 +67,8 @@ export interface JournalCreationEvent {
   status: "planning";
 }
 
-export interface JournalTransitionEvent {
+export interface JournalTransitionDetails {
   schemaVersion: typeof SCHEMA_VERSION;
-  type: "transition";
   timestamp: IsoTimestamp;
   actor: string;
   reason: string;
@@ -77,7 +76,12 @@ export interface JournalTransitionEvent {
   newStatus: TaskStatus;
 }
 
-export type JournalEvent = JournalCreationEvent | JournalTransitionEvent;
+export interface JournalTransitionIntentEvent extends JournalTransitionDetails {
+  type: "transition_intent";
+  operationId: string;
+}
+
+export type JournalEvent = JournalCreationEvent | JournalTransitionIntentEvent;
 
 export interface InlineAuditRecord {
   schemaVersion: typeof SCHEMA_VERSION;

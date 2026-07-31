@@ -15,7 +15,7 @@ import {
   type ExecutionMode,
   type InlineAuditRecord,
   type JournalCreationEvent,
-  type JournalTransitionEvent,
+  type JournalTransitionDetails,
   type QualityMode,
   type RiskSuggestion,
   type TaskRecord,
@@ -163,16 +163,15 @@ export async function transitionTask(
 
   const timestamp = (options.now ?? (() => new Date()))().toISOString();
   const task: TaskRecord = { ...location.task, status: newStatus, updatedAt: timestamp };
-  const event: JournalTransitionEvent = {
+  const transition: JournalTransitionDetails = {
     schemaVersion: SCHEMA_VERSION,
-    type: "transition",
     timestamp,
     actor: options.actor.trim(),
     reason: options.reason.trim(),
     oldStatus,
     newStatus,
   };
-  return (await persistTaskTransition(paths, location, task, event)).task;
+  return (await persistTaskTransition(paths, location, task, transition)).task;
 }
 
 export function nextGate(task: TaskRecord): string {

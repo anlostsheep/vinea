@@ -2,7 +2,9 @@ import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/prom
 import { join } from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
+import { SchemaError } from "../../src/core/errors.js";
 import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
+import { findTask, persistTaskTransition } from "../../src/core/task-store.js";
 import {
   createTask,
   readTask,
@@ -262,7 +264,7 @@ test("journal append failure restores the prior task state and updatedAt", async
   expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
 });
 
-test("archive move failure restores task state and removes the appended transition", async () => {
+test("archive move failure leaves the task active with a pending audit intent", async () => {
   const { task, directory } = await createFinishedTask();
   const taskPath = join(directory, "task.json");
   const journalPath = join(directory, "journal.md");
@@ -280,9 +282,74 @@ test("archive move failure restores task state and removes the appended transiti
   ).rejects.toMatchObject({ code: "VINEA_SCHEMA_INVALID" });
 
   expect(await readJson<TaskRecord>(taskPath)).toEqual(beforeTask);
-  expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
+  const afterJournal = await readFile(journalPath, "utf8");
+  expect(afterJournal.startsWith(beforeJournal)).toBe(true);
+  expect((parseJournal(afterJournal).at(-1) as Record<string, unknown>)).toMatchObject({
+    type: "transition_intent",
+    oldStatus: "finished",
+    newStatus: "archived",
+    actor: "codex",
+    reason: "Archive task",
+  });
   expect(await readFile(archiveCollision, "utf8")).toBe("occupied\n");
   await expect(access(directory)).resolves.toBeUndefined();
+});
+
+test("late archive commit failure leaves only an intent and is recoverable by retry", async () => {
+  const { task, directory } = await createFinishedTask();
+  const location = await findTask(paths, task.id);
+  const archivedTask: TaskRecord = {
+    ...location.task,
+    status: "archived",
+    updatedAt: "2026-07-31T08:14:00.000Z",
+  };
+
+  await expect(
+    persistTaskTransition(
+      paths,
+      location,
+      archivedTask,
+      {
+        schemaVersion: 1,
+        timestamp: "2026-07-31T08:14:00.000Z",
+        actor: "codex",
+        reason: "Archive task",
+        oldStatus: "finished",
+        newStatus: "archived",
+      },
+      {
+        createOperationId: () => "op-injected-archive",
+        writeTask: async () => {
+          throw new SchemaError("Injected task commit failure");
+        },
+      },
+    ),
+  ).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("transition intent remains pending for retry"),
+  });
+
+  const archivedDirectory = join(paths.archivedTasks, task.id);
+  await expect(access(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  expect((await readJson<TaskRecord>(join(archivedDirectory, "task.json"))).status).toBe("finished");
+  const failedJournal = parseJournal(await readFile(join(archivedDirectory, "journal.md"), "utf8")) as Array<
+    Record<string, unknown>
+  >;
+  expect(failedJournal.at(-1)).toMatchObject({
+    type: "transition_intent",
+    operationId: "op-injected-archive",
+    oldStatus: "finished",
+    newStatus: "archived",
+  });
+  expect(failedJournal.some((event) => event.type === "transition")).toBe(false);
+
+  const recovered = await transitionTask(paths, task.id, "archived", {
+    actor: "codex",
+    reason: "Retry archive task",
+    now: () => new Date("2026-07-31T08:15:00.000Z"),
+  });
+  expect(recovered.status).toBe("archived");
+  expect((await readJson<TaskRecord>(join(archivedDirectory, "task.json"))).status).toBe("archived");
 });
 
 test("blocked tasks require explicit unblock and both transitions are auditable", async () => {
@@ -309,10 +376,10 @@ test("blocked tasks require explicit unblock and both transitions are auditable"
   });
 
   expect(unblocked.status).toBe("in_progress");
-  expect(parseJournal(await readFile(join(directory, "journal.md"), "utf8")).slice(-2)).toEqual([
+  expect(parseJournal(await readFile(join(directory, "journal.md"), "utf8")).slice(-2)).toMatchObject([
     {
       schemaVersion: 1,
-      type: "transition",
+      type: "transition_intent",
       timestamp: "2026-07-31T08:11:00.000Z",
       actor: "codex",
       reason: "Waiting for access",
@@ -321,7 +388,7 @@ test("blocked tasks require explicit unblock and both transitions are auditable"
     },
     {
       schemaVersion: 1,
-      type: "transition",
+      type: "transition_intent",
       timestamp: "2026-07-31T08:12:00.000Z",
       actor: "codex",
       reason: "Access arrived",
