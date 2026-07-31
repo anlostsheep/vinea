@@ -1,5 +1,6 @@
-import { access, readFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { expect, test } from "vitest";
 
 const skillNames = [
@@ -15,33 +16,67 @@ const skillNames = [
 
 const repositoryRoot = process.cwd();
 
-async function readSkill(name: typeof skillNames[number]): Promise<string> {
-  const skillPath = join(repositoryRoot, "skills", name, "SKILL.md");
-  await access(skillPath);
-  return readFile(skillPath, "utf8");
+interface SkillInventory {
+  directories: string[];
+  skills: Array<{ directory: string; source: string }>;
+}
+
+async function readSkillInventory(skillsRoot = join(repositoryRoot, "skills")): Promise<SkillInventory> {
+  const entries = await readdir(skillsRoot, { withFileTypes: true });
+  const directories = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  const nonDirectories = entries.filter((entry) => !entry.isDirectory()).map((entry) => entry.name);
+  expect(nonDirectories).toEqual([]);
+  const skills = await Promise.all(directories.map(async (directory) => {
+    const contents = await readdir(join(skillsRoot, directory));
+    expect(contents.sort()).toEqual(["SKILL.md"]);
+    const skillPath = join(skillsRoot, directory, "SKILL.md");
+    await access(skillPath);
+    return { directory, source: await readFile(skillPath, "utf8") };
+  }));
+  return { directories, skills };
+}
+
+function assertExactSkillInventory(inventory: SkillInventory): void {
+  expect(inventory.directories).toEqual([...skillNames].sort());
+  const publishedNames = inventory.skills.map(({ source }) => {
+    const match = source.match(/^---\nname: ([a-z0-9-]+)\n/m);
+    return match?.[1];
+  }).sort();
+  expect(publishedNames).toEqual([...skillNames].sort());
 }
 
 test("ships exactly the eight logical Vinea skill names for host prefixing", async () => {
-  const skills = await Promise.all(skillNames.map(async (name) => ({ name, source: await readSkill(name) })));
+  const inventory = await readSkillInventory();
+  assertExactSkillInventory(inventory);
 
-  expect(skills.map(({ name }) => name)).toEqual(skillNames);
-  for (const { name, source } of skills) {
-    expect(source).toMatch(new RegExp(`^---\\nname: ${name}\\n`, "m"));
+  for (const { directory, source } of inventory.skills) {
+    expect(source).toMatch(new RegExp(`^---\\nname: ${directory}\\n`, "m"));
     expect(source).toContain("bin/vinea.mjs");
-    expect(source).toContain("vinea:" + name);
+    expect(source).toContain("vinea:" + directory);
   }
 });
 
-test("uses the bundled CLI root contract without bare aliases or host automation claims", async () => {
-  const sources = await Promise.all(skillNames.map(readSkill));
-  const combined = sources.join("\n");
-  const publishedNames = [...combined.matchAll(/^name: ([a-z0-9-]+)$/gm)].map((match) => match[1]);
+test("rejects an added bare alias from the skill inventory", async () => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "vinea-skills-"));
+  try {
+    await Promise.all([...skillNames, "start"].map(async (name) => {
+      await mkdir(join(fixtureRoot, name));
+      await writeFile(join(fixtureRoot, name, "SKILL.md"), `---\nname: ${name}\n---\n`, "utf8");
+    }));
+
+    await expect(readSkillInventory(fixtureRoot).then(assertExactSkillInventory)).rejects.toThrow();
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("uses the bundled CLI root contract without host automation claims", async () => {
+  const inventory = await readSkillInventory();
+  const combined = inventory.skills.map(({ source }) => source).join("\n");
 
   expect(combined).toContain("${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs");
   expect(combined).toContain("/skills/<current-skill>/SKILL.md");
   expect(combined).toContain("node <plugin-root>/bin/vinea.mjs");
-  expect(publishedNames).toEqual(skillNames);
-  expect(publishedNames).not.toContain("start");
   expect(combined).not.toContain("MCP");
   expect(combined).not.toContain("daemon");
   expect(combined).not.toContain("host hook");
@@ -50,7 +85,8 @@ test("uses the bundled CLI root contract without bare aliases or host automation
 });
 
 test("brainstorming is selective and preserves user approval", async () => {
-  const source = await readSkill("brainstorm");
+  const inventory = await readSkillInventory();
+  const source = inventory.skills.find(({ directory }) => directory === "brainstorm")?.source;
 
   expect(source).toMatch(/exactly one .*question/i);
   expect(source).toMatch(/2[–-]3 options/i);
