@@ -30,15 +30,8 @@ const ARTIFACTS = [
   "check.md",
   "journal.md",
 ] as const;
-const MUTATION_TASK_ARTIFACTS = new Set([
-  "task.json",
-  "brief.md",
-  "plan.md",
-  "context.jsonl",
-  "evidence.jsonl",
-  "check.md",
-]);
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LEARNING_DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const TASK_LOCK_RETRY_MILLISECONDS = 25;
 const TASK_LOCK_TIMEOUT_MILLISECONDS = 5000;
 const taskLockContext = new AsyncLocalStorage<Set<string>>();
@@ -47,6 +40,13 @@ export interface TaskLocation {
   task: TaskRecord;
   directory: string;
   scope: "active" | "archive";
+}
+
+export interface MutationTargetOwner {
+  directory: string;
+  scope: "active" | "archive";
+  taskId: string;
+  learningCandidateDomains: Readonly<Record<string, string>>;
 }
 
 export function assertTaskMutable(location: TaskLocation): void {
@@ -321,7 +321,10 @@ async function executeTaskMutationLocked(
         `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`,
       );
     }
-    if (await mutationTargetsMatch(paths, location, pending.expected)) {
+    if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), pending.mutationKind, pending.expected)) {
+      throw new SchemaError(`Pending mutation ${pending.operationId} has targets outside its exact managed ownership.`);
+    }
+    if (await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
       await appendMutationCompletion(paths, journalPath, pending, operations);
       return pending;
     }
@@ -330,7 +333,7 @@ async function executeTaskMutationLocked(
       throw new SchemaError(`Pending mutation ${pending.operationId} no longer matches the requested target; inspect it before retrying.`);
     }
     await prepared.apply();
-    if (!await mutationTargetsMatch(paths, location, pending.expected)) {
+    if (!await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
       throw new SchemaError(`Mutation ${pending.operationId} did not produce its expected managed targets; journal intent remains pending.`);
     }
     await appendMutationCompletion(paths, journalPath, pending, operations);
@@ -338,6 +341,9 @@ async function executeTaskMutationLocked(
   }
 
   const prepared = await prepare(request.timestamp, false, null);
+  if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), request.mutationKind, prepared.expected)) {
+    throw new SchemaError(`Prepared ${request.mutationKind} mutation has targets outside its exact managed ownership.`);
+  }
   const intent: JournalMutationIntentEvent = {
     schemaVersion: SCHEMA_VERSION,
     type: "mutation_intent",
@@ -351,7 +357,7 @@ async function executeTaskMutationLocked(
   };
   await operations.appendJournal(journalPath, intent, paths.repoRoot);
   await prepared.apply();
-  if (!await mutationTargetsMatch(paths, location, intent.expected)) {
+  if (!await mutationTargetsMatch(paths, location, intent.mutationKind, intent.expected)) {
     throw new SchemaError(`Mutation ${intent.operationId} did not produce its expected managed targets; journal intent remains pending.`);
   }
   await appendMutationCompletion(paths, journalPath, intent, operations);
@@ -405,10 +411,11 @@ async function readPendingTaskMutationIntent(
 async function mutationTargetsMatch(
   paths: VineaPaths,
   location: TaskLocation,
+  mutationKind: MutationKind,
   expected: MutationTargetSummary,
 ): Promise<boolean> {
+  if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), mutationKind, expected)) return false;
   for (const target of expected.files) {
-    if (!isManagedMutationTarget(paths, location, target.path)) return false;
     const filename = assertInside(paths.repoRoot, resolve(paths.repoRoot, target.path));
     try {
       await assertNoSymlink(paths.repoRoot, filename);
@@ -421,13 +428,83 @@ async function mutationTargetsMatch(
   return true;
 }
 
-function isManagedMutationTarget(paths: VineaPaths, location: TaskLocation, target: string): boolean {
+export function mutationTargetsAreOwned(
+  paths: VineaPaths,
+  owner: MutationTargetOwner,
+  mutationKind: string,
+  expected: MutationTargetSummary,
+): boolean {
+  const taskDirectory = relative(paths.repoRoot, owner.directory).split("\\").join("/");
+  const expectedDirectory = `.vinea/tasks/${owner.scope}/${owner.taskId}`;
+  if (taskDirectory !== expectedDirectory || !TASK_ID_PATTERN.test(owner.taskId)) return false;
+  const currentTargets = mutationTargetPaths(taskDirectory, owner, mutationKind, expected.identity);
+  if (currentTargets === null) return false;
+  if (sameMutationTargetSet(expected.files.map(({ path }) => path), currentTargets)) return true;
+  if (owner.scope !== "archive") return false;
+  const historicDirectory = `.vinea/tasks/active/${owner.taskId}`;
+  return sameMutationTargetSet(
+    expected.files.map(({ path }) => path),
+    mutationTargetPaths(historicDirectory, owner, mutationKind, expected.identity)!,
+  );
+}
+
+function mutationTargetOwner(location: TaskLocation): MutationTargetOwner {
+  const domains: Record<string, string> = {};
+  for (const candidate of location.task.learningCandidates ?? []) {
+    if (typeof candidate.id === "string" && typeof candidate.domain === "string") {
+      domains[candidate.id] = candidate.domain;
+    }
+  }
+  return {
+    directory: location.directory,
+    scope: location.scope,
+    taskId: location.task.id,
+    learningCandidateDomains: domains,
+  };
+}
+
+function mutationTargetPaths(
+  taskDirectory: string,
+  owner: MutationTargetOwner,
+  mutationKind: string,
+  identity: Record<string, string>,
+): string[] | null {
+  const taskArtifact = (artifact: string): string[] => [`${taskDirectory}/${artifact}`];
+  if (mutationKind === "brief_set") return taskArtifact("brief.md");
+  if (mutationKind === "plan_set") return taskArtifact("plan.md");
+  if (mutationKind === "context_added") return taskArtifact("context.jsonl");
+  if (mutationKind === "evidence_recorded") return taskArtifact("evidence.jsonl");
+  if (mutationKind === "check_upsert") return taskArtifact("check.md");
+  if (mutationKind === "requirement_added"
+    || mutationKind === "acceptance_criterion_added"
+    || mutationKind === "learning_proposed"
+    || mutationKind === "learning_archived") {
+    return taskArtifact("task.json");
+  }
+  if (mutationKind !== "learning_accepted") return null;
+  const candidateId = identity.learningCandidateId;
+  if (candidateId === undefined) return null;
+  const domain = owner.learningCandidateDomains[candidateId];
+  if (domain === undefined || !LEARNING_DOMAIN_PATTERN.test(domain) || domain === "index") return null;
+  return [
+    `${taskDirectory}/task.json`,
+    ".vinea/specs/index.md",
+    `.vinea/specs/${domain}.md`,
+  ];
+}
+
+function sameMutationTargetSet(actual: string[], expected: string[]): boolean {
+  return actual.length === expected.length
+    && new Set(actual).size === actual.length
+    && new Set(expected).size === expected.length
+    && actual.every((path) => expected.includes(path));
+}
+
+function isPotentialMutationTarget(paths: VineaPaths, location: TaskLocation, target: string): boolean {
   const taskDirectory = relative(paths.repoRoot, location.directory).split("\\").join("/");
-  const taskArtifact = target.startsWith(`${taskDirectory}/`)
-    ? target.slice(taskDirectory.length + 1)
-    : "";
-  if (MUTATION_TASK_ARTIFACTS.has(taskArtifact)) return true;
-  return target === ".vinea/specs/index.md"
+  const artifact = target.startsWith(`${taskDirectory}/`) ? target.slice(taskDirectory.length + 1) : "";
+  return ["task.json", "brief.md", "plan.md", "context.jsonl", "evidence.jsonl", "check.md"].includes(artifact)
+    || target === ".vinea/specs/index.md"
     || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
 }
 
@@ -438,7 +515,7 @@ export async function writeManagedMutationTarget(
   contents: string,
 ): Promise<void> {
   const target = relative(paths.repoRoot, filename).split("\\").join("/");
-  if (!isManagedMutationTarget(paths, location, target)) {
+  if (!isPotentialMutationTarget(paths, location, target)) {
     throw new ValidationError(`Mutation target is not managed for task ${location.task.id}: ${target}`);
   }
   await assertNoSymlink(paths.repoRoot, filename);
@@ -726,44 +803,6 @@ export async function readLatestCheckEvent(
     if (event.type === "check_recorded" || event.type === "check_updated") return event;
   }
   return null;
-}
-
-export async function writeTaskArtifact(
-  paths: VineaPaths,
-  location: TaskLocation,
-  artifact: "brief.md" | "plan.md",
-  contents: string,
-): Promise<void> {
-  return withTaskLock(paths, location.task.id, () => writeTaskArtifactLocked(paths, location, artifact, contents));
-}
-
-async function writeTaskArtifactLocked(
-  paths: VineaPaths,
-  location: TaskLocation,
-  artifact: "brief.md" | "plan.md",
-  contents: string,
-): Promise<void> {
-  await assertNoPendingTaskTransition(paths, location);
-  await assertNoPendingTaskMutation(paths, location);
-  await writeManagedMutationTarget(paths, location, join(location.directory, artifact), contents);
-}
-
-export async function writeCheckArtifact(
-  paths: VineaPaths,
-  location: TaskLocation,
-  contents: string,
-): Promise<void> {
-  return withTaskLock(paths, location.task.id, () => writeCheckArtifactLocked(paths, location, contents));
-}
-
-async function writeCheckArtifactLocked(
-  paths: VineaPaths,
-  location: TaskLocation,
-  contents: string,
-): Promise<void> {
-  await assertNoPendingTaskTransition(paths, location);
-  await assertNoPendingTaskMutation(paths, location);
-  await writeManagedMutationTarget(paths, location, join(location.directory, "check.md"), contents);
 }
 
 export async function removeTaskSessionBindings(

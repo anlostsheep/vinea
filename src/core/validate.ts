@@ -5,8 +5,9 @@ import { parseCheckDocument } from "./check.js";
 import { validateEvidenceRecord } from "./evidence.js";
 import { normalizeSpecTarget, parseSpecIndexTarget } from "./learning.js";
 import type { VineaPaths } from "./paths.js";
+import { mutationTargetsAreOwned, type MutationTargetOwner } from "./task-store.js";
 import { inspectTaskLocks } from "./task-locks.js";
-import { SCHEMA_VERSION, type EvidenceRecord, type TaskStatus } from "./types.js";
+import { SCHEMA_VERSION, type EvidenceRecord, type MutationTargetSummary, type TaskStatus } from "./types.js";
 
 const REQUIRED_TASK_ARTIFACTS = [
   "brief.md",
@@ -622,12 +623,27 @@ async function validateJournalArtifact(
       `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`,
     );
   }
+  const mutationOwner = mutationTargetOwnerForValidation(taskDirectory, scope, task);
   for (const intent of pendingMutationIntents.values()) {
     add(
       "MUTATION_INTENT_UNCOMMITTED",
       filename,
       `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`,
     );
+    const expected = intent.expected;
+    if (!isMutationTargetSummary(expected)
+      || !mutationTargetsAreOwned(
+        paths,
+        mutationOwner,
+        String(intent.mutationKind),
+        expected as unknown as MutationTargetSummary,
+      )) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Pending mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} has targets outside its exact managed ownership.`,
+      );
+    }
   }
   const pendingTargetFiles = new Set<string>();
   for (const intent of pendingMutationIntents.values()) {
@@ -665,7 +681,12 @@ async function validateJournalArtifact(
   }
   for (const [path, intent] of latestIntentByFile) {
     if (pendingTargetFiles.has(path)) continue;
-    if (!await mutationFilesMatch(paths, taskDirectory, scope, intent.expected as Record<string, unknown>)) {
+    if (!await mutationFilesMatch(
+      paths,
+      mutationOwner,
+      String(intent.mutationKind),
+      intent.expected as Record<string, unknown>,
+    )) {
       add(
         "MUTATION_TARGET_MISMATCH",
         filename,
@@ -701,16 +722,17 @@ function mutationSemanticIdentityKey(intent: Record<string, unknown>): string {
 
 async function mutationFilesMatch(
   paths: VineaPaths,
-  taskDirectory: string,
-  scope: "active" | "archive",
+  owner: MutationTargetOwner,
+  mutationKind: string,
   expected: Record<string, unknown>,
 ): Promise<boolean> {
   if (!isMutationTargetSummary(expected)) return false;
+  if (!mutationTargetsAreOwned(paths, owner, mutationKind, expected as unknown as MutationTargetSummary)) {
+    return false;
+  }
   for (const target of expected.files as Array<Record<string, unknown>>) {
     const path = target.path as string;
-    if (!isManagedMutationTarget(path)) return false;
-    const filename = resolveMutationTargetFilename(paths, taskDirectory, scope, path);
-    if (filename === null) return false;
+    const filename = resolveMutationTargetFilename(paths, owner, path);
     if (path.endsWith("/task.json")) continue;
     if (await entryKind(filename) !== "file") return false;
     try {
@@ -725,25 +747,37 @@ async function mutationFilesMatch(
 
 function resolveMutationTargetFilename(
   paths: VineaPaths,
-  taskDirectory: string,
-  scope: "active" | "archive",
+  owner: MutationTargetOwner,
   target: string,
-): string | null {
-  if (target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target)) {
-    return resolve(paths.repoRoot, target);
+): string {
+  const taskPrefix = relative(paths.repoRoot, owner.directory).split("\\").join("/");
+  if (target.startsWith(`${taskPrefix}/`)) return join(owner.directory, target.slice(taskPrefix.length + 1));
+  const historicPrefix = `.vinea/tasks/active/${owner.taskId}`;
+  if (owner.scope === "archive" && target.startsWith(`${historicPrefix}/`)) {
+    return join(owner.directory, target.slice(historicPrefix.length + 1));
   }
-  const taskPrefix = relative(paths.repoRoot, taskDirectory).split("\\").join("/");
-  const artifact = target.startsWith(`${taskPrefix}/`) ? target.slice(taskPrefix.length + 1) : null;
-  if (artifact !== null && isMutationTaskArtifact(artifact)) return join(taskDirectory, artifact);
-  if (scope !== "archive") return null;
-  const activePrefix = taskPrefix.replace(/^\.vinea\/tasks\/archive\//u, ".vinea/tasks/active/");
-  if (activePrefix === taskPrefix || !target.startsWith(`${activePrefix}/`)) return null;
-  const legacyArtifact = target.slice(activePrefix.length + 1);
-  return isMutationTaskArtifact(legacyArtifact) ? join(taskDirectory, legacyArtifact) : null;
+  return resolve(paths.repoRoot, target);
 }
 
-function isMutationTaskArtifact(value: string): boolean {
-  return /^(?:task\.json|brief\.md|plan\.md|context\.jsonl|evidence\.jsonl|check\.md)$/u.test(value);
+function mutationTargetOwnerForValidation(
+  directory: string,
+  scope: "active" | "archive",
+  task: Record<string, unknown> | null,
+): MutationTargetOwner {
+  const learningCandidateDomains: Record<string, string> = {};
+  if (Array.isArray(task?.learningCandidates)) {
+    for (const candidate of task.learningCandidates) {
+      if (isRecord(candidate) && typeof candidate.id === "string" && typeof candidate.domain === "string") {
+        learningCandidateDomains[candidate.id] = candidate.domain;
+      }
+    }
+  }
+  return {
+    directory,
+    scope,
+    taskId: typeof task?.id === "string" ? task.id : "",
+    learningCandidateDomains,
+  };
 }
 
 function semanticMutationTargetMatches(task: Record<string, unknown> | null, intent: Record<string, unknown>): boolean {
@@ -1098,8 +1132,6 @@ function isMutationCompletionEvent(value: Record<string, unknown>): boolean {
 
 function isMutationKind(value: unknown): boolean {
   return typeof value === "string" && (TASK_MUTATION_KINDS.has(value)
-    || value === "check_recorded"
-    || value === "check_updated"
     || value === "check_upsert");
 }
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
@@ -6,7 +7,9 @@ import { initializeWorkspace } from "../../src/core/config.js";
 import { addContextReference } from "../../src/core/context.js";
 import { recordEvidence } from "../../src/core/evidence.js";
 import { acceptLearning, proposeLearning } from "../../src/core/learning.js";
+import { appendJsonl } from "../../src/core/json.js";
 import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
+import { mutationFingerprint } from "../../src/core/task-store.js";
 import { validateWorkspace } from "../../src/core/validate.js";
 import {
   addRequirement,
@@ -242,6 +245,97 @@ test("learning acceptance resumes partial spec writes and completed targets with
   expect(intent).toMatchObject({ fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) });
   expect(JSON.stringify(intent)).not.toContain("Complete all targets before semantic acknowledgement.");
   expect(await validateWorkspace(paths)).toEqual({ issues: [] });
+});
+
+test("context and brief recovery reject forged but otherwise valid spec targets", async () => {
+  const contextTask = await createMutableTask("Reject forged context target");
+  const contextSource = join(paths.repoRoot, "forged-context.md");
+  await writeFile(contextSource, "context\n", "utf8");
+  const contextTimestamp = "2026-07-31T09:30:00.000Z";
+  const indexSha256 = createHash("sha256").update(await readFile(paths.specIndex)).digest("hex");
+  const contextInput = {
+    path: "forged-context.md",
+    purpose: "Reject target substitution",
+    actor: "codex",
+  };
+  await appendJsonl(join(contextTask.directory, "journal.md"), {
+    schemaVersion: 1,
+    type: "mutation_intent",
+    operationId: "op-forged-context-target",
+    timestamp: contextTimestamp,
+    actor: "codex",
+    mutationKind: "context_added",
+    fingerprint: mutationFingerprint({
+      schemaVersion: 1,
+      type: "context_added",
+      actor: "codex",
+      path: contextInput.path,
+      purpose: contextInput.purpose,
+      estimatedBytes: Buffer.byteLength("context\n"),
+    }),
+    expected: {
+      identity: { path: contextInput.path },
+      files: [{ path: ".vinea/specs/index.md", sha256: indexSha256 }],
+    },
+    completion: {
+      schemaVersion: 1,
+      type: "context_added",
+      mutationKind: "context_added",
+      timestamp: contextTimestamp,
+      actor: "codex",
+      path: contextInput.path,
+    },
+  }, paths.repoRoot);
+  await expect(addContextReference(paths, contextTask.id, contextInput, at("2026-07-31T09:31:00.000Z")))
+    .rejects.toMatchObject({
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("exact managed ownership"),
+    });
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toEqual(expect.arrayContaining([
+    "MUTATION_INTENT_UNCOMMITTED",
+    "MUTATION_TARGET_MISMATCH",
+  ]));
+
+  const briefTask = await createMutableTask("Reject forged brief target");
+  const briefSource = join(paths.repoRoot, "forged-brief.md");
+  const briefContents = "# Brief\n\nReject target substitution.\n";
+  const briefTimestamp = "2026-07-31T09:32:00.000Z";
+  await writeFile(briefSource, briefContents, "utf8");
+  await appendJsonl(join(briefTask.directory, "journal.md"), {
+    schemaVersion: 1,
+    type: "mutation_intent",
+    operationId: "op-forged-brief-target",
+    timestamp: briefTimestamp,
+    actor: "codex",
+    mutationKind: "brief_set",
+    fingerprint: mutationFingerprint({
+      schemaVersion: 1,
+      type: "brief_set",
+      actor: "codex",
+      artifact: "brief.md",
+      contentsSha256: mutationFingerprint(briefContents),
+    }),
+    expected: {
+      identity: { artifact: "brief.md", valueSha256: mutationFingerprint(briefContents) },
+      files: [{ path: ".vinea/specs/index.md", sha256: indexSha256 }],
+    },
+    completion: {
+      schemaVersion: 1,
+      type: "brief_set",
+      mutationKind: "brief_set",
+      timestamp: briefTimestamp,
+      actor: "codex",
+      artifact: "brief.md",
+    },
+  }, paths.repoRoot);
+  await expect(setTaskBrief(paths, briefTask.id, briefSource, "codex", at("2026-07-31T09:33:00.000Z")))
+    .rejects.toMatchObject({
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("exact managed ownership"),
+    });
+  expect((await validateWorkspace(paths)).issues.map(({ code }) => code)).toEqual(expect.arrayContaining([
+    "MUTATION_TARGET_MISMATCH",
+  ]));
 });
 
 async function createMutableTask(title: string) {

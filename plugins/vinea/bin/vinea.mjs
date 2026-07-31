@@ -451,15 +451,8 @@ var ARTIFACTS = [
   "check.md",
   "journal.md"
 ];
-var MUTATION_TASK_ARTIFACTS = /* @__PURE__ */ new Set([
-  "task.json",
-  "brief.md",
-  "plan.md",
-  "context.jsonl",
-  "evidence.jsonl",
-  "check.md"
-]);
 var TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+var LEARNING_DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 var TASK_LOCK_RETRY_MILLISECONDS = 25;
 var TASK_LOCK_TIMEOUT_MILLISECONDS = 5e3;
 var taskLockContext = new AsyncLocalStorage();
@@ -601,7 +594,10 @@ async function executeTaskMutationLocked(paths, location, request, prepare, oper
         `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`
       );
     }
-    if (await mutationTargetsMatch(paths, location, pending.expected)) {
+    if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), pending.mutationKind, pending.expected)) {
+      throw new SchemaError(`Pending mutation ${pending.operationId} has targets outside its exact managed ownership.`);
+    }
+    if (await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
       await appendMutationCompletion(paths, journalPath, pending, operations);
       return pending;
     }
@@ -610,13 +606,16 @@ async function executeTaskMutationLocked(paths, location, request, prepare, oper
       throw new SchemaError(`Pending mutation ${pending.operationId} no longer matches the requested target; inspect it before retrying.`);
     }
     await prepared2.apply();
-    if (!await mutationTargetsMatch(paths, location, pending.expected)) {
+    if (!await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
       throw new SchemaError(`Mutation ${pending.operationId} did not produce its expected managed targets; journal intent remains pending.`);
     }
     await appendMutationCompletion(paths, journalPath, pending, operations);
     return pending;
   }
   const prepared = await prepare(request.timestamp, false, null);
+  if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), request.mutationKind, prepared.expected)) {
+    throw new SchemaError(`Prepared ${request.mutationKind} mutation has targets outside its exact managed ownership.`);
+  }
   const intent = {
     schemaVersion: SCHEMA_VERSION,
     type: "mutation_intent",
@@ -630,7 +629,7 @@ async function executeTaskMutationLocked(paths, location, request, prepare, oper
   };
   await operations.appendJournal(journalPath, intent, paths.repoRoot);
   await prepared.apply();
-  if (!await mutationTargetsMatch(paths, location, intent.expected)) {
+  if (!await mutationTargetsMatch(paths, location, intent.mutationKind, intent.expected)) {
     throw new SchemaError(`Mutation ${intent.operationId} did not produce its expected managed targets; journal intent remains pending.`);
   }
   await appendMutationCompletion(paths, journalPath, intent, operations);
@@ -670,9 +669,9 @@ async function readPendingTaskMutationIntent(paths, journalPath) {
   }
   return pending;
 }
-async function mutationTargetsMatch(paths, location, expected) {
+async function mutationTargetsMatch(paths, location, mutationKind, expected) {
+  if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), mutationKind, expected)) return false;
   for (const target of expected.files) {
-    if (!isManagedMutationTarget(paths, location, target.path)) return false;
     const filename = assertInside(paths.repoRoot, resolve2(paths.repoRoot, target.path));
     try {
       await assertNoSymlink(paths.repoRoot, filename);
@@ -684,15 +683,66 @@ async function mutationTargetsMatch(paths, location, expected) {
   }
   return true;
 }
-function isManagedMutationTarget(paths, location, target) {
+function mutationTargetsAreOwned(paths, owner, mutationKind, expected) {
+  const taskDirectory = relative2(paths.repoRoot, owner.directory).split("\\").join("/");
+  const expectedDirectory = `.vinea/tasks/${owner.scope}/${owner.taskId}`;
+  if (taskDirectory !== expectedDirectory || !TASK_ID_PATTERN.test(owner.taskId)) return false;
+  const currentTargets = mutationTargetPaths(taskDirectory, owner, mutationKind, expected.identity);
+  if (currentTargets === null) return false;
+  if (sameMutationTargetSet(expected.files.map(({ path }) => path), currentTargets)) return true;
+  if (owner.scope !== "archive") return false;
+  const historicDirectory = `.vinea/tasks/active/${owner.taskId}`;
+  return sameMutationTargetSet(
+    expected.files.map(({ path }) => path),
+    mutationTargetPaths(historicDirectory, owner, mutationKind, expected.identity)
+  );
+}
+function mutationTargetOwner(location) {
+  const domains = {};
+  for (const candidate of location.task.learningCandidates ?? []) {
+    if (typeof candidate.id === "string" && typeof candidate.domain === "string") {
+      domains[candidate.id] = candidate.domain;
+    }
+  }
+  return {
+    directory: location.directory,
+    scope: location.scope,
+    taskId: location.task.id,
+    learningCandidateDomains: domains
+  };
+}
+function mutationTargetPaths(taskDirectory, owner, mutationKind, identity) {
+  const taskArtifact = (artifact) => [`${taskDirectory}/${artifact}`];
+  if (mutationKind === "brief_set") return taskArtifact("brief.md");
+  if (mutationKind === "plan_set") return taskArtifact("plan.md");
+  if (mutationKind === "context_added") return taskArtifact("context.jsonl");
+  if (mutationKind === "evidence_recorded") return taskArtifact("evidence.jsonl");
+  if (mutationKind === "check_upsert") return taskArtifact("check.md");
+  if (mutationKind === "requirement_added" || mutationKind === "acceptance_criterion_added" || mutationKind === "learning_proposed" || mutationKind === "learning_archived") {
+    return taskArtifact("task.json");
+  }
+  if (mutationKind !== "learning_accepted") return null;
+  const candidateId = identity.learningCandidateId;
+  if (candidateId === void 0) return null;
+  const domain = owner.learningCandidateDomains[candidateId];
+  if (domain === void 0 || !LEARNING_DOMAIN_PATTERN.test(domain) || domain === "index") return null;
+  return [
+    `${taskDirectory}/task.json`,
+    ".vinea/specs/index.md",
+    `.vinea/specs/${domain}.md`
+  ];
+}
+function sameMutationTargetSet(actual, expected) {
+  return actual.length === expected.length && new Set(actual).size === actual.length && new Set(expected).size === expected.length && actual.every((path) => expected.includes(path));
+}
+function isPotentialMutationTarget(paths, location, target) {
   const taskDirectory = relative2(paths.repoRoot, location.directory).split("\\").join("/");
-  const taskArtifact = target.startsWith(`${taskDirectory}/`) ? target.slice(taskDirectory.length + 1) : "";
-  if (MUTATION_TASK_ARTIFACTS.has(taskArtifact)) return true;
-  return target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
+  const artifact = target.startsWith(`${taskDirectory}/`) ? target.slice(taskDirectory.length + 1) : "";
+  return ["task.json", "brief.md", "plan.md", "context.jsonl", "evidence.jsonl", "check.md"].includes(artifact) || target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
 }
 async function writeManagedMutationTarget(paths, location, filename, contents) {
   const target = relative2(paths.repoRoot, filename).split("\\").join("/");
-  if (!isManagedMutationTarget(paths, location, target)) {
+  if (!isPotentialMutationTarget(paths, location, target)) {
     throw new ValidationError(`Mutation target is not managed for task ${location.task.id}: ${target}`);
   }
   await assertNoSymlink(paths.repoRoot, filename);
@@ -3930,12 +3980,26 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
       `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`
     );
   }
+  const mutationOwner = mutationTargetOwnerForValidation(taskDirectory, scope, task);
   for (const intent of pendingMutationIntents.values()) {
     add(
       "MUTATION_INTENT_UNCOMMITTED",
       filename,
       `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`
     );
+    const expected = intent.expected;
+    if (!isMutationTargetSummary2(expected) || !mutationTargetsAreOwned(
+      paths,
+      mutationOwner,
+      String(intent.mutationKind),
+      expected
+    )) {
+      add(
+        "MUTATION_TARGET_MISMATCH",
+        filename,
+        `Pending mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} has targets outside its exact managed ownership.`
+      );
+    }
   }
   const pendingTargetFiles = /* @__PURE__ */ new Set();
   for (const intent of pendingMutationIntents.values()) {
@@ -3972,7 +4036,12 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
   }
   for (const [path, intent] of latestIntentByFile) {
     if (pendingTargetFiles.has(path)) continue;
-    if (!await mutationFilesMatch(paths, taskDirectory, scope, intent.expected)) {
+    if (!await mutationFilesMatch(
+      paths,
+      mutationOwner,
+      String(intent.mutationKind),
+      intent.expected
+    )) {
       add(
         "MUTATION_TARGET_MISMATCH",
         filename,
@@ -4000,13 +4069,14 @@ function mutationSemanticIdentityKey(intent) {
   }
   return `operation:${String(intent.operationId)}`;
 }
-async function mutationFilesMatch(paths, taskDirectory, scope, expected) {
+async function mutationFilesMatch(paths, owner, mutationKind, expected) {
   if (!isMutationTargetSummary2(expected)) return false;
+  if (!mutationTargetsAreOwned(paths, owner, mutationKind, expected)) {
+    return false;
+  }
   for (const target of expected.files) {
     const path = target.path;
-    if (!isManagedMutationTarget2(path)) return false;
-    const filename = resolveMutationTargetFilename(paths, taskDirectory, scope, path);
-    if (filename === null) return false;
+    const filename = resolveMutationTargetFilename(paths, owner, path);
     if (path.endsWith("/task.json")) continue;
     if (await entryKind(filename) !== "file") return false;
     try {
@@ -4018,21 +4088,30 @@ async function mutationFilesMatch(paths, taskDirectory, scope, expected) {
   }
   return true;
 }
-function resolveMutationTargetFilename(paths, taskDirectory, scope, target) {
-  if (target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target)) {
-    return resolve7(paths.repoRoot, target);
+function resolveMutationTargetFilename(paths, owner, target) {
+  const taskPrefix = relative6(paths.repoRoot, owner.directory).split("\\").join("/");
+  if (target.startsWith(`${taskPrefix}/`)) return join9(owner.directory, target.slice(taskPrefix.length + 1));
+  const historicPrefix = `.vinea/tasks/active/${owner.taskId}`;
+  if (owner.scope === "archive" && target.startsWith(`${historicPrefix}/`)) {
+    return join9(owner.directory, target.slice(historicPrefix.length + 1));
   }
-  const taskPrefix = relative6(paths.repoRoot, taskDirectory).split("\\").join("/");
-  const artifact = target.startsWith(`${taskPrefix}/`) ? target.slice(taskPrefix.length + 1) : null;
-  if (artifact !== null && isMutationTaskArtifact(artifact)) return join9(taskDirectory, artifact);
-  if (scope !== "archive") return null;
-  const activePrefix = taskPrefix.replace(/^\.vinea\/tasks\/archive\//u, ".vinea/tasks/active/");
-  if (activePrefix === taskPrefix || !target.startsWith(`${activePrefix}/`)) return null;
-  const legacyArtifact = target.slice(activePrefix.length + 1);
-  return isMutationTaskArtifact(legacyArtifact) ? join9(taskDirectory, legacyArtifact) : null;
+  return resolve7(paths.repoRoot, target);
 }
-function isMutationTaskArtifact(value) {
-  return /^(?:task\.json|brief\.md|plan\.md|context\.jsonl|evidence\.jsonl|check\.md)$/u.test(value);
+function mutationTargetOwnerForValidation(directory, scope, task) {
+  const learningCandidateDomains = {};
+  if (Array.isArray(task?.learningCandidates)) {
+    for (const candidate of task.learningCandidates) {
+      if (isRecord8(candidate) && typeof candidate.id === "string" && typeof candidate.domain === "string") {
+        learningCandidateDomains[candidate.id] = candidate.domain;
+      }
+    }
+  }
+  return {
+    directory,
+    scope,
+    taskId: typeof task?.id === "string" ? task.id : "",
+    learningCandidateDomains
+  };
 }
 function semanticMutationTargetMatches(task, intent) {
   const expected = intent.expected;
@@ -4350,7 +4429,7 @@ function isMutationCompletionEvent(value) {
   return typeof value.type === "string" && (value.type === "check_recorded" || value.type === "check_updated" || TASK_MUTATION_KINDS.has(value.type));
 }
 function isMutationKind(value) {
-  return typeof value === "string" && (TASK_MUTATION_KINDS.has(value) || value === "check_recorded" || value === "check_updated" || value === "check_upsert");
+  return typeof value === "string" && (TASK_MUTATION_KINDS.has(value) || value === "check_upsert");
 }
 function isMutationTargetSummary2(value) {
   if (!isRecord8(value) || !hasOnlyKeys(value, ["identity", "files"]) || !isRecord8(value.identity) || !Array.isArray(value.files)) {
@@ -4376,9 +4455,6 @@ function matchesMutationCompletion(intent, completion) {
   const actual = { ...completion };
   delete actual.operationId;
   return stableJson2(expected) === stableJson2(actual);
-}
-function isManagedMutationTarget2(path) {
-  return /^\.vinea\/tasks\/(?:active|archive)\/t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*\/(?:task\.json|brief\.md|plan\.md|context\.jsonl|evidence\.jsonl|check\.md)$/u.test(path) || path === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(path);
 }
 function stableJson2(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson2).join(",")}]`;

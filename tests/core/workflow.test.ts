@@ -728,7 +728,7 @@ test("task mutation recovery rejects a forged pending intent outside managed tar
 
   await expect(persistTaskMutation(paths, location, target, event)).rejects.toMatchObject({
     code: "VINEA_SCHEMA_INVALID",
-    message: expect.stringContaining("no longer matches the requested target"),
+    message: expect.stringContaining("exact managed ownership"),
   });
 });
 

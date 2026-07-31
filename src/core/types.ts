@@ -121,7 +121,7 @@ export interface TaskMutationJournalEvent {
   confirmedBy?: "user";
 }
 
-export type MutationKind = TaskMutationKind | "check_recorded" | "check_updated" | "check_upsert";
+export type MutationKind = TaskMutationKind | "check_upsert";
 
 export interface MutationTargetSummary {
   identity: Record<string, string>;
