@@ -31,6 +31,7 @@ export async function inspectTaskLocks(paths: VineaPaths): Promise<TaskLockDiagn
   try {
     await assertNoSymlink(paths.repoRoot, locksDirectory);
     const locks = await lstat(locksDirectory);
+    await assertNoSymlink(paths.repoRoot, locksDirectory);
     if (!locks.isDirectory() || locks.isSymbolicLink()) {
       return [
         taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
@@ -38,6 +39,7 @@ export async function inspectTaskLocks(paths: VineaPaths): Promise<TaskLockDiagn
       ].sort((left, right) => left.path.localeCompare(right.path));
     }
     entries = await readdir(locksDirectory);
+    await assertNoSymlink(paths.repoRoot, locksDirectory);
   } catch (error) {
     if (isMissing(error)) {
       return inspectNamedRuntimeLock(paths, join(paths.runtime, PROMOTION_LOCK_DIRECTORY));
@@ -57,6 +59,7 @@ async function inspectNamedRuntimeLock(paths: VineaPaths, directory: string): Pr
   try {
     await assertNoSymlink(paths.repoRoot, directory);
     await lstat(directory);
+    await assertNoSymlink(paths.repoRoot, directory);
   } catch (error) {
     if (isMissing(error)) return [];
     return [taskLockDiagnostic(paths, directory, null, null, "directory_invalid", { status: "unsafe" })];
@@ -70,6 +73,7 @@ async function inspectTaskLock(paths: VineaPaths, directory: string): Promise<Ta
   try {
     await assertNoSymlink(paths.repoRoot, directory);
     const entry = await lstat(directory);
+    await assertNoSymlink(paths.repoRoot, directory);
     ageMilliseconds = Math.max(0, Date.now() - entry.mtimeMs);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
       return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, "directory_invalid", { status: "unsafe" });
@@ -97,6 +101,11 @@ async function inspectTaskLockOwner(
     contents = await readFile(ownerPath, "utf8");
   } catch (error) {
     return isMissing(error) ? { status: "missing" } : { status: "unreadable" };
+  }
+  try {
+    await assertNoSymlink(paths.repoRoot, ownerPath);
+  } catch (error) {
+    return isMissing(error) ? { status: "missing" } : { status: "unsafe" };
   }
   try {
     const owner = JSON.parse(contents) as unknown;

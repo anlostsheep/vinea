@@ -1213,6 +1213,7 @@ async function inspectTaskLocks(paths) {
   try {
     await assertNoSymlink(paths.repoRoot, locksDirectory);
     const locks = await lstat6(locksDirectory);
+    await assertNoSymlink(paths.repoRoot, locksDirectory);
     if (!locks.isDirectory() || locks.isSymbolicLink()) {
       return [
         taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
@@ -1220,6 +1221,7 @@ async function inspectTaskLocks(paths) {
       ].sort((left, right) => left.path.localeCompare(right.path));
     }
     entries = await readdir(locksDirectory);
+    await assertNoSymlink(paths.repoRoot, locksDirectory);
   } catch (error) {
     if (isMissing4(error)) {
       return inspectNamedRuntimeLock(paths, join5(paths.runtime, PROMOTION_LOCK_DIRECTORY2));
@@ -1237,6 +1239,7 @@ async function inspectNamedRuntimeLock(paths, directory) {
   try {
     await assertNoSymlink(paths.repoRoot, directory);
     await lstat6(directory);
+    await assertNoSymlink(paths.repoRoot, directory);
   } catch (error) {
     if (isMissing4(error)) return [];
     return [taskLockDiagnostic(paths, directory, null, null, "directory_invalid", { status: "unsafe" })];
@@ -1249,6 +1252,7 @@ async function inspectTaskLock(paths, directory) {
   try {
     await assertNoSymlink(paths.repoRoot, directory);
     const entry = await lstat6(directory);
+    await assertNoSymlink(paths.repoRoot, directory);
     ageMilliseconds = Math.max(0, Date.now() - entry.mtimeMs);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
       return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, "directory_invalid", { status: "unsafe" });
@@ -1271,6 +1275,11 @@ async function inspectTaskLockOwner(paths, ownerPath) {
     contents = await readFile4(ownerPath, "utf8");
   } catch (error) {
     return isMissing4(error) ? { status: "missing" } : { status: "unreadable" };
+  }
+  try {
+    await assertNoSymlink(paths.repoRoot, ownerPath);
+  } catch (error) {
+    return isMissing4(error) ? { status: "missing" } : { status: "unsafe" };
   }
   try {
     const owner = JSON.parse(contents);
@@ -1317,7 +1326,7 @@ __export(validate_exports, {
 });
 import { createHash } from "node:crypto";
 import { lstat as lstat7, readFile as readFile5, readdir as readdir2 } from "node:fs/promises";
-import { basename as basename3, isAbsolute as isAbsolute2, join as join6, relative as relative3, resolve as resolve2 } from "node:path";
+import { basename as basename3, dirname as dirname2, isAbsolute as isAbsolute2, join as join6, relative as relative3, resolve as resolve2 } from "node:path";
 async function validateWorkspace(paths) {
   const issues = [];
   const add = (code, filename, message) => {
@@ -1326,7 +1335,8 @@ async function validateWorkspace(paths) {
   if (!await validateManagedPathSafety(paths, paths.vineaRoot, add)) {
     return { issues: sortIssues(issues) };
   }
-  const root = await entryKind(paths.vineaRoot);
+  const root = await managedEntryKind(paths, paths.vineaRoot, add);
+  if (root === "unsafe") return { issues: sortIssues(issues) };
   if (root === "missing") {
     add("WORKSPACE_NOT_INITIALIZED", paths.vineaRoot, "Run `vinea init` before validating this repository.");
     return { issues: sortIssues(issues) };
@@ -1339,25 +1349,31 @@ async function validateWorkspace(paths) {
   const limits = managed.config ? await validateConfig(paths, add) : null;
   await validateManagedSpecs(paths, add, managed);
   if (managed.inlineAudit) await validateInlineAudit(paths, add);
+  const taskTreeSafe = managed.tasks && await validateManagedPathSafety(paths, paths.tasks, add);
+  let activeTasksDirectory = false;
+  let archivedTasksDirectory = false;
   for (const [label, directory, safe] of [
     ["specs", paths.specs, managed.specs],
-    ["tasks/active", paths.activeTasks, managed.activeTasks],
-    ["tasks/archive", paths.archivedTasks, managed.archivedTasks]
+    ["tasks/active", paths.activeTasks, taskTreeSafe && managed.activeTasks],
+    ["tasks/archive", paths.archivedTasks, taskTreeSafe && managed.archivedTasks]
   ]) {
     if (!safe) continue;
-    const kind = await entryKind(directory);
+    const kind = await managedEntryKind(paths, directory, add);
+    if (kind === "unsafe") continue;
     if (kind === "missing") {
       add("DIRECTORY_MISSING", directory, `Required Vinea directory ${label} is missing.`);
     } else if (kind !== "directory") {
       add("DIRECTORY_INVALID", directory, `Required Vinea path ${label} must be a regular directory.`);
     }
+    if (label === "tasks/active") activeTasksDirectory = kind === "directory";
+    if (label === "tasks/archive") archivedTasksDirectory = kind === "directory";
   }
   const taskScan = {
     activeTaskIds: /* @__PURE__ */ new Set(),
     taskIdsByScope: /* @__PURE__ */ new Map()
   };
-  if (managed.activeTasks) await scanTaskScope(paths, paths.activeTasks, "active", limits, taskScan, add);
-  if (managed.archivedTasks) await scanTaskScope(paths, paths.archivedTasks, "archive", limits, taskScan, add);
+  if (activeTasksDirectory) await scanTaskScope(paths, paths.activeTasks, "active", limits, taskScan, add);
+  if (archivedTasksDirectory) await scanTaskScope(paths, paths.archivedTasks, "archive", limits, taskScan, add);
   for (const [taskId, scopes] of taskScan.taskIdsByScope) {
     if (scopes.size > 1) {
       add(
@@ -1455,9 +1471,39 @@ async function validateManagedPathSafety(paths, filename, add) {
     return false;
   }
 }
+async function managedEntryKind(paths, filename, add) {
+  if (!await validateManagedPathSafety(paths, dirname2(filename), add)) return "unsafe";
+  const kind = await entryKind(filename);
+  if (kind === "symlink") return kind;
+  if (!await validateManagedPathSafety(paths, filename, add)) return "unsafe";
+  return kind;
+}
+async function readManagedDirectory(paths, directory, add, unreadableCode, unreadableLabel) {
+  if (!await validateManagedPathSafety(paths, directory, add)) return null;
+  let entries;
+  try {
+    entries = await readdir2(directory, { withFileTypes: true });
+  } catch (error) {
+    add(unreadableCode, directory, describeError(unreadableLabel, error));
+    return null;
+  }
+  if (!await validateManagedPathSafety(paths, directory, add)) return null;
+  return entries;
+}
+async function readManagedBytes(paths, filename, add) {
+  if (await managedEntryKind(paths, filename, add) !== "file") return null;
+  if (!await validateManagedPathSafety(paths, filename, add)) return null;
+  try {
+    const contents = await readFile5(filename);
+    if (!await validateManagedPathSafety(paths, filename, add)) return null;
+    return contents;
+  } catch {
+    return null;
+  }
+}
 async function validateManagedSpecs(paths, add, managed) {
   if (managed.gitignore) {
-    const gitignore = await readRequiredRegularFile(paths.gitignore, "VINEA_GITIGNORE", add);
+    const gitignore = await readRequiredRegularFile(paths, paths.gitignore, "VINEA_GITIGNORE", add);
     if (gitignore !== null && gitignore !== RUNTIME_IGNORE2) {
       add(
         "VINEA_GITIGNORE_INVALID",
@@ -1466,8 +1512,9 @@ async function validateManagedSpecs(paths, add, managed) {
       );
     }
   }
-  if (!managed.specs || !managed.specIndex || await entryKind(paths.specs) !== "directory") return;
-  const index = await readRequiredRegularFile(paths.specIndex, "SPEC_INDEX", add);
+  if (!managed.specs || !managed.specIndex) return;
+  if (await managedEntryKind(paths, paths.specs, add) !== "directory") return;
+  const index = await readRequiredRegularFile(paths, paths.specIndex, "SPEC_INDEX", add);
   if (index === null) return;
   const seenTargets = /* @__PURE__ */ new Set();
   for (const [index_, line] of index.split(/\r?\n/u).entries()) {
@@ -1492,7 +1539,8 @@ async function validateManagedSpecs(paths, add, managed) {
     }
     seenTargets.add(normalized);
     const targetPath = join6(paths.specs, normalized);
-    const kind = await entryKind(targetPath);
+    const kind = await managedEntryKind(paths, targetPath, add);
+    if (kind === "unsafe") continue;
     if (kind === "missing") {
       add("SPEC_INDEX_TARGET_MISSING", targetPath, `Indexed spec target ${normalized} is missing.`);
     } else if (kind !== "file") {
@@ -1501,7 +1549,7 @@ async function validateManagedSpecs(paths, add, managed) {
   }
 }
 async function validateConfig(paths, add) {
-  const value = await readJsonObject(paths.config, "CONFIG", add);
+  const value = await readJsonObject(paths, paths.config, "CONFIG", add);
   if (value === null) return null;
   if (value.schemaVersion !== SCHEMA_VERSION) {
     add(
@@ -1528,7 +1576,7 @@ async function validateConfig(paths, add) {
 }
 async function validateInlineAudit(paths, add) {
   const filename = join6(paths.vineaRoot, "inline-audit.jsonl");
-  const contents = await readOptionalRegularFile(filename, "INLINE_AUDIT", add);
+  const contents = await readOptionalRegularFile(paths, filename, "INLINE_AUDIT", add);
   if (contents === null) return;
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "INLINE_AUDIT_JSONL_INVALID", add);
@@ -1550,14 +1598,8 @@ async function validateInlineAudit(paths, add) {
   }
 }
 async function scanTaskScope(paths, directory, scope, limits, scan, add) {
-  if (await entryKind(directory) !== "directory") return;
-  let entries;
-  try {
-    entries = await readdir2(directory, { withFileTypes: true });
-  } catch (error) {
-    add("DIRECTORY_UNREADABLE", directory, describeError("Unable to list task storage", error));
-    return;
-  }
+  const entries = await readManagedDirectory(paths, directory, add, "DIRECTORY_UNREADABLE", "Unable to list task storage");
+  if (entries === null) return;
   for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
     const taskDirectory = join6(directory, entry.name);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
@@ -1571,8 +1613,9 @@ async function scanTaskScope(paths, directory, scope, limits, scan, add) {
   }
 }
 async function validateTaskDirectory(paths, directory, directoryName, scope, limits, activeTaskIds, add, pendingMutationRecovery) {
+  if (!await validateManagedPathSafety(paths, directory, add)) return;
   const taskFilename = join6(directory, "task.json");
-  const task = await readJsonObject(taskFilename, "TASK", add);
+  const task = await readJsonObject(paths, taskFilename, "TASK", add);
   if (task !== null) {
     const taskId = typeof task.id === "string" ? task.id : null;
     if (!TASK_ID_PATTERN.test(directoryName)) {
@@ -1608,7 +1651,8 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
   }
   for (const artifact of REQUIRED_TASK_ARTIFACTS) {
     const filename = join6(directory, artifact);
-    const kind = await entryKind(filename);
+    const kind = await managedEntryKind(paths, filename, add);
+    if (kind === "unsafe") continue;
     if (kind === "missing") {
       add("TASK_ARTIFACT_MISSING", filename, `Required task artifact ${artifact} is missing.`);
     } else if (kind !== "file") {
@@ -1616,7 +1660,7 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
     }
   }
   await validateContextManifest(paths, join6(directory, "context.jsonl"), limits, add);
-  const evidence = await validateEvidenceArtifact(join6(directory, "evidence.jsonl"), add);
+  const evidence = await validateEvidenceArtifact(paths, join6(directory, "evidence.jsonl"), add);
   await validateJournalArtifact(
     paths,
     join6(directory, "journal.md"),
@@ -1629,7 +1673,7 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
   await validateCheckArtifact(paths, join6(directory, "check.md"), task, evidence, add);
 }
 async function validateContextManifest(paths, filename, limits, add) {
-  const contents = await readOptionalRegularFile(filename, "CONTEXT", add);
+  const contents = await readOptionalRegularFile(paths, filename, "CONTEXT", add);
   if (contents === null) return;
   let files = 0;
   let estimatedBytes = 0;
@@ -1702,8 +1746,8 @@ async function validateContextPath(paths, manifest, repositoryPath, lineNumber, 
     add("CONTEXT_PATH_INVALID", manifest, `Line ${lineNumber} must reference a regular file: ${normalized}.`);
   }
 }
-async function validateEvidenceArtifact(filename, add) {
-  const contents = await readOptionalRegularFile(filename, "EVIDENCE", add);
+async function validateEvidenceArtifact(paths, filename, add) {
+  const contents = await readOptionalRegularFile(paths, filename, "EVIDENCE", add);
   if (contents === null) return [];
   const records = [];
   const seenIds = /* @__PURE__ */ new Set();
@@ -1734,7 +1778,7 @@ async function validateEvidenceArtifact(filename, add) {
   return records;
 }
 async function validateJournalArtifact(paths, filename, task, taskDirectory, scope, add, pendingMutationRecovery) {
-  const contents = await readOptionalRegularFile(filename, "JOURNAL", add);
+  const contents = await readOptionalRegularFile(paths, filename, "JOURNAL", add);
   if (contents === null) return;
   if (contents.trim() === "") {
     add("JOURNAL_EMPTY", filename, "Task journal must contain its creation event.");
@@ -1914,7 +1958,7 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
         filename,
         `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its expected managed target identity.`
       );
-    } else if (intent.mutationKind === "learning_accepted" && !await acceptedLearningTargetsMatch(paths, task, mutationOwner, intent)) {
+    } else if (intent.mutationKind === "learning_accepted" && !await acceptedLearningTargetsMatch(paths, task, mutationOwner, intent, add)) {
       add(
         "MUTATION_TARGET_MISMATCH",
         filename,
@@ -1928,7 +1972,8 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
       paths,
       mutationOwner,
       String(intent.mutationKind),
-      intent.expected
+      intent.expected,
+      add
     )) {
       add(
         "MUTATION_TARGET_MISMATCH",
@@ -1957,7 +2002,7 @@ function mutationSemanticIdentityKey(intent) {
   }
   return `operation:${String(intent.operationId)}`;
 }
-async function mutationFilesMatch(paths, owner, mutationKind, expected) {
+async function mutationFilesMatch(paths, owner, mutationKind, expected, add) {
   if (!isMutationTargetSummary(expected)) return false;
   if (!mutationTargetsAreOwned(paths, owner, mutationKind, expected)) {
     return false;
@@ -1966,13 +2011,8 @@ async function mutationFilesMatch(paths, owner, mutationKind, expected) {
     const path = target.path;
     const filename = resolveMutationTargetFilename(paths, owner, path);
     if (path.endsWith("/task.json")) continue;
-    if (await entryKind(filename) !== "file") return false;
-    try {
-      const contents = await readFile5(filename);
-      if (createHash("sha256").update(contents).digest("hex") !== target.sha256) return false;
-    } catch {
-      return false;
-    }
+    const contents = await readManagedBytes(paths, filename, add);
+    if (contents === null || createHash("sha256").update(contents).digest("hex") !== target.sha256) return false;
   }
   return true;
 }
@@ -2027,7 +2067,7 @@ function hasLearningCandidate(task, identity, status) {
   const candidate = task.learningCandidates.find((item) => isRecord5(item) && item.id === identity.learningCandidateId && item.status === status);
   return candidate !== void 0 && mutationIdentityValueMatches(candidate, identity);
 }
-async function acceptedLearningTargetsMatch(paths, task, owner, intent) {
+async function acceptedLearningTargetsMatch(paths, task, owner, intent, add) {
   const expected = intent.expected;
   if (task === null || !isMutationTargetSummary(expected) || !mutationTargetsAreOwned(
     paths,
@@ -2043,17 +2083,13 @@ async function acceptedLearningTargetsMatch(paths, task, owner, intent) {
   const normalizedRule = candidate.text.trim().replace(/\s+/gu, " ");
   const rule = `- ${candidate.acceptedAt.slice(0, 10)}: ${normalizedRule}`;
   const specPath = join6(paths.specs, `${candidate.domain}.md`);
-  if (await entryKind(specPath) !== "file" || await entryKind(paths.specIndex) !== "file") return false;
-  let spec;
-  let index;
-  try {
-    [spec, index] = await Promise.all([
-      readFile5(specPath, "utf8"),
-      readFile5(paths.specIndex, "utf8")
-    ]);
-  } catch {
-    return false;
-  }
+  const [specContents, indexContents] = await Promise.all([
+    readManagedBytes(paths, specPath, add),
+    readManagedBytes(paths, paths.specIndex, add)
+  ]);
+  if (specContents === null || indexContents === null) return false;
+  const spec = specContents.toString("utf8");
+  const index = indexContents.toString("utf8");
   if (!spec.split(/\r?\n/u).some((line) => line === rule)) return false;
   return index.split(/\r?\n/u).some((line) => {
     const target = parseSpecIndexTarget(line);
@@ -2075,7 +2111,7 @@ function mutationIdentityValueMatches(value, identity) {
   return typeof identity.valueSha256 === "string" && /^[a-f0-9]{64}$/u.test(identity.valueSha256) && createHash("sha256").update(stableJson(value)).digest("hex") === identity.valueSha256;
 }
 async function validateCheckArtifact(paths, filename, task, evidence, add) {
-  const contents = await readOptionalRegularFile(filename, "CHECK", add);
+  const contents = await readOptionalRegularFile(paths, filename, "CHECK", add);
   if (contents === null || contents === "") return;
   const declaredIds = task === null ? [] : taskRequirementIds(task);
   try {
@@ -2089,25 +2125,28 @@ async function validateCheckArtifact(paths, filename, task, evidence, add) {
   }
 }
 async function validateSessionBindings(paths, activeTaskIds, add) {
-  const runtimeKind = await entryKind(paths.runtime);
+  const runtimeKind = await managedEntryKind(paths, paths.runtime, add);
+  if (runtimeKind === "unsafe") return;
   if (runtimeKind === "missing") return;
   if (runtimeKind !== "directory") {
     add("RUNTIME_INVALID", paths.runtime, "Runtime state must be a regular directory.");
     return;
   }
-  const sessionsKind = await entryKind(paths.sessions);
+  const sessionsKind = await managedEntryKind(paths, paths.sessions, add);
+  if (sessionsKind === "unsafe") return;
   if (sessionsKind === "missing") return;
   if (sessionsKind !== "directory") {
     add("RUNTIME_INVALID", paths.sessions, "Session binding storage must be a regular directory.");
     return;
   }
-  let entries;
-  try {
-    entries = await readdir2(paths.sessions, { withFileTypes: true });
-  } catch (error) {
-    add("RUNTIME_UNREADABLE", paths.sessions, describeError("Unable to list session bindings", error));
-    return;
-  }
+  const entries = await readManagedDirectory(
+    paths,
+    paths.sessions,
+    add,
+    "RUNTIME_UNREADABLE",
+    "Unable to list session bindings"
+  );
+  if (entries === null) return;
   for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
     const filename = join6(paths.sessions, entry.name);
     const validFilename = isValidSessionBindingFilename(entry.name);
@@ -2123,7 +2162,7 @@ async function validateSessionBindings(paths, activeTaskIds, add) {
       continue;
     }
     if (!validFilename) continue;
-    const value = await readJsonObject(filename, "SESSION_BINDING", add);
+    const value = await readJsonObject(paths, filename, "SESSION_BINDING", add);
     if (value === null) continue;
     if (value.schemaVersion !== SCHEMA_VERSION) {
       add(
@@ -2145,8 +2184,8 @@ async function validateSessionBindings(paths, activeTaskIds, add) {
     }
   }
 }
-async function readJsonObject(filename, prefix, add) {
-  const contents = await readRequiredRegularFile(filename, prefix, add);
+async function readJsonObject(paths, filename, prefix, add) {
+  const contents = await readRequiredRegularFile(paths, filename, prefix, add);
   if (contents === null) return null;
   let value;
   try {
@@ -2161,8 +2200,9 @@ async function readJsonObject(filename, prefix, add) {
   }
   return value;
 }
-async function readRequiredRegularFile(filename, prefix, add) {
-  const kind = await entryKind(filename);
+async function readRequiredRegularFile(paths, filename, prefix, add) {
+  const kind = await managedEntryKind(paths, filename, add);
+  if (kind === "unsafe") return null;
   if (kind === "missing") {
     add(`${prefix}_MISSING`, filename, "Required file is missing.");
     return null;
@@ -2171,16 +2211,32 @@ async function readRequiredRegularFile(filename, prefix, add) {
     add(`${prefix}_INVALID`, filename, "Expected a regular file and not a symbolic link.");
     return null;
   }
+  if (!await validateManagedPathSafety(paths, filename, add)) return null;
   try {
-    return await readFile5(filename, "utf8");
+    const contents = await readFile5(filename, "utf8");
+    if (!await validateManagedPathSafety(paths, filename, add)) return null;
+    return contents;
   } catch (error) {
     add(`${prefix}_UNREADABLE`, filename, describeError("Unable to read file", error));
     return null;
   }
 }
-async function readOptionalRegularFile(filename, prefix, add) {
-  if (await entryKind(filename) === "missing") return null;
-  return readRequiredRegularFile(filename, prefix, add);
+async function readOptionalRegularFile(paths, filename, prefix, add) {
+  const kind = await managedEntryKind(paths, filename, add);
+  if (kind === "unsafe" || kind === "missing") return null;
+  if (kind !== "file") {
+    add(`${prefix}_INVALID`, filename, "Expected a regular file and not a symbolic link.");
+    return null;
+  }
+  if (!await validateManagedPathSafety(paths, filename, add)) return null;
+  try {
+    const contents = await readFile5(filename, "utf8");
+    if (!await validateManagedPathSafety(paths, filename, add)) return null;
+    return contents;
+  } catch (error) {
+    add(`${prefix}_UNREADABLE`, filename, describeError("Unable to read file", error));
+    return null;
+  }
 }
 function parseJsonl(line, lineNumber, filename, code, add) {
   try {
@@ -2566,7 +2622,7 @@ var init_validate = __esm({
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
 import { lstat as lstat8, mkdir as mkdir3, readFile as readFile6, readdir as readdir3, rename as rename2, rmdir as rmdir2, rm, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
-import { basename as basename4, dirname as dirname2, join as join7, relative as relative4, resolve as resolve3 } from "node:path";
+import { basename as basename4, dirname as dirname3, join as join7, relative as relative4, resolve as resolve3 } from "node:path";
 function assertTaskMutable(location) {
   if (location.scope === "archive" || location.task.status === "finished" || location.task.status === "archived") {
     throw new ValidationError(`Task is terminal and cannot be mutated: ${location.task.id}`);
@@ -2856,7 +2912,7 @@ async function writeManagedMutationTarget(paths, location, filename, contents) {
     throw new ValidationError(`Mutation target is not managed for task ${location.task.id}: ${target}`);
   }
   await assertNoSymlink(paths.repoRoot, filename);
-  const temporary = join7(dirname2(filename), `.${basename4(filename)}.${randomUUID4()}.tmp`);
+  const temporary = join7(dirname3(filename), `.${basename4(filename)}.${randomUUID4()}.tmp`);
   try {
     await writeFile4(temporary, contents, { encoding: "utf8", flag: "wx" });
     await rename2(temporary, filename);

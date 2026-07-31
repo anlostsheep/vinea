@@ -14,13 +14,40 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { beforeAll, expect, test } from "vitest";
+import { beforeAll, expect, test, vi } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
 import { resolveVineaPaths } from "../../src/core/paths.js";
 import { validateWorkspace } from "../../src/core/validate.js";
 import { addRequirement, createTask } from "../../src/core/workflow.js";
 import { createTempRepo, readJson, runCli, writeJson } from "../helpers/fixture.js";
 import type { TaskRecord } from "../../src/core/types.js";
+
+const managedPathRace = vi.hoisted(() => ({
+  target: "",
+  calls: 0,
+  swapOnCall: 1,
+  swap: null as (() => Promise<void>) | null,
+}));
+
+vi.mock("../../src/core/paths.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/core/paths.js")>();
+  return {
+    ...actual,
+    assertNoSymlink: async (...args: Parameters<typeof actual.assertNoSymlink>) => {
+      await actual.assertNoSymlink(...args);
+      if (args[1] === managedPathRace.target) managedPathRace.calls += 1;
+      if (
+        args[1] === managedPathRace.target
+        && managedPathRace.calls === managedPathRace.swapOnCall
+        && managedPathRace.swap !== null
+      ) {
+        const swap = managedPathRace.swap;
+        managedPathRace.swap = null;
+        await swap();
+      }
+    },
+  };
+});
 
 const execFileAsync = promisify(execFile);
 
@@ -45,7 +72,7 @@ test("validate rejects an intermediate managed tasks symlink without scanning it
   const cwd = await createTempRepo();
   expect((await runCli(["init"], cwd)).exitCode).toBe(0);
   const paths = resolveVineaPaths(cwd);
-  await createTask(paths, {
+  const created = await createTask(paths, {
     title: "Plausible task outside managed storage",
     risk: { level: "low", reasons: [] },
     qualityMode: "standard",
@@ -58,6 +85,7 @@ test("validate rejects an intermediate managed tasks symlink without scanning it
   try {
     await rename(paths.activeTasks, join(externalTasks, "active"));
     await rename(paths.archivedTasks, join(externalTasks, "archive"));
+    await writeFile(join(externalTasks, "active", created.task.id, "evidence.jsonl"), "{}\n", "utf8");
     await rm(paths.tasks, { recursive: true });
     await symlink(externalTasks, paths.tasks);
 
@@ -70,7 +98,50 @@ test("validate rejects an intermediate managed tasks symlink without scanning it
       path: ".vinea/tasks",
       message: "Vinea managed paths must remain inside the repository and must not traverse symbolic links.",
     }]);
+    expect(issues.map(({ code }) => code)).not.toContain("EVIDENCE_RECORD_INVALID");
   } finally {
+    await rm(externalTasks, { recursive: true, force: true });
+  }
+});
+
+test("validate rechecks managed ancestry before scanning after a preliminary path check", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const created = await createTask(paths, {
+    title: "Detect a managed path replacement before scan",
+    risk: { level: "low", reasons: [] },
+    qualityMode: "standard",
+    executionMode: "single-agent",
+    confirmation: "user",
+  });
+  const externalTasks = await mkdtemp(join(tmpdir(), "vinea-race-external-tasks-"));
+  try {
+    // The second active-root check occurs after its entry-kind decision and
+    // immediately before scanTaskScope performs the real readdir.
+    managedPathRace.target = paths.activeTasks;
+    managedPathRace.calls = 0;
+    managedPathRace.swapOnCall = 2;
+    managedPathRace.swap = async () => {
+      await rename(paths.activeTasks, join(externalTasks, "active"));
+      await rename(paths.archivedTasks, join(externalTasks, "archive"));
+      await writeFile(join(externalTasks, "active", created.task.id, "evidence.jsonl"), "{}\n", "utf8");
+      await rm(paths.tasks, { recursive: true });
+      await symlink(externalTasks, paths.tasks);
+    };
+
+    const report = await validateWorkspace(paths);
+
+    expect(report.issues).toEqual(expect.arrayContaining([expect.objectContaining({
+      code: "MANAGED_PATH_UNSAFE",
+      path: ".vinea/tasks/active",
+    })]));
+    expect(report.issues.map(({ code }) => code)).not.toContain("EVIDENCE_RECORD_INVALID");
+  } finally {
+    managedPathRace.target = "";
+    managedPathRace.calls = 0;
+    managedPathRace.swapOnCall = 1;
+    managedPathRace.swap = null;
     await rm(externalTasks, { recursive: true, force: true });
   }
 });
