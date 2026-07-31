@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { DEFAULT_CONFIG, readConfig } from "./config.js";
 import { listContextReferences } from "./context.js";
-import { TransitionError, ValidationError } from "./errors.js";
+import { SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { assertTddReadyForCheck } from "./evidence.js";
 import {
   appendTaskContinuation,
@@ -207,9 +207,16 @@ export async function orientWorkspace(
     inspectWorkspace(paths),
     inspectGitStatus(paths.repoRoot),
   ]);
-  const canInspectTasks = health.initialized
+  if (
+    health.initialized
     && health.supportedSchema
-    && !health.missingRequiredDirectories.includes("tasks/active");
+    && health.missingRequiredDirectories.includes("tasks/active")
+  ) {
+    throw new SchemaError(
+      "Active task storage tasks/active is missing, malformed, or unsafe; run `vinea doctor` for workspace diagnostics.",
+    );
+  }
+  const canInspectTasks = health.initialized && health.supportedSchema;
   const locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
   const candidates = await Promise.all(locations.map(async (location): Promise<OrientCandidate> => {
     const [context, latestEvidence, latestCheckEvent] = await Promise.all([

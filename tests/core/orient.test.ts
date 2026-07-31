@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import { initializeWorkspace } from "../../src/core/config.js";
@@ -17,7 +17,7 @@ import type {
   OrientSummary,
   TaskRecord,
 } from "../../src/core/types.js";
-import { createTempRepo, writeJson } from "../helpers/fixture.js";
+import { createTempRepo, readJson, writeJson } from "../helpers/fixture.js";
 
 const fixedNow = () => new Date("2026-07-31T08:09:10.000Z");
 
@@ -158,7 +158,7 @@ test("orient reports a stale local binding and still requires confirmation for t
     },
     fixedNow,
   );
-  await writeJson(join(paths.sessions, "codex-stale-session.json"), {
+  await writeJson(join(paths.sessions, "codex-sid-c3RhbGUtc2Vzc2lvbg.json"), {
     schemaVersion: 1,
     taskId: "t-20260730-010203-missing-task",
     boundAt: "2026-07-31T08:00:00.000Z",
@@ -187,7 +187,7 @@ test("orient surfaces a malformed local binding without repairing or following i
     },
     fixedNow,
   );
-  const bindingPath = join(paths.sessions, "claude-broken-session.json");
+  const bindingPath = join(paths.sessions, "claude-sid-YnJva2VuLXNlc3Npb24.json");
   await writeFile(bindingPath, "{broken json}\n", "utf8");
 
   const summary = await orient(paths, { host: "claude", sessionId: "broken-session" });
@@ -228,6 +228,27 @@ test("orient is read-only even when the ignored runtime directory is missing", a
   expect(await readFile(journalPath, "utf8")).toBe(beforeJournal);
 });
 
+test("orient fails diagnostically and does not recreate missing active task storage", async () => {
+  await rm(paths.activeTasks, { recursive: true });
+
+  await expect(orient(paths, { host: "claude" })).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("tasks/active"),
+  });
+  await expect(access(paths.activeTasks)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("orient fails diagnostically when active task storage is an unsafe symlink", async () => {
+  await rm(paths.activeTasks, { recursive: true });
+  await symlink(paths.archivedTasks, paths.activeTasks);
+
+  await expect(orient(paths, { host: "codex" })).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("tasks/active"),
+  });
+  expect(await readlink(paths.activeTasks)).toBe(paths.archivedTasks);
+});
+
 test("unsafe session IDs are rejected before any runtime path is resolved", async () => {
   const created = await createTask(
     paths,
@@ -258,6 +279,65 @@ test("unsafe session IDs are rejected before any runtime path is resolved", asyn
   await expect(access(join(paths.runtime, "escape.json"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+test("session IDs with ill-formed Unicode are rejected instead of collapsing during encoding", async () => {
+  await expect(orient(paths, { host: "codex", sessionId: "\uD800" })).rejects.toMatchObject({
+    code: "VINEA_VALIDATION_INVALID",
+    message: expect.stringContaining("Unicode"),
+  });
+  await expect(orient(paths, { host: "codex", sessionId: "\uDC00" })).rejects.toMatchObject({
+    code: "VINEA_VALIDATION_INVALID",
+    message: expect.stringContaining("Unicode"),
+  });
+});
+
+test("distinct valid session IDs persist to distinct binding files without overwriting each other", async () => {
+  const first = await createTask(
+    paths,
+    {
+      title: "Question mark session",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:09:10.000Z"),
+  );
+  const second = await createTask(
+    paths,
+    {
+      title: "Literal encoded session",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    () => new Date("2026-07-31T08:09:11.000Z"),
+  );
+
+  await continueTask(paths, first.task.id, {
+    host: "codex",
+    sessionId: "?",
+    confirmed: true,
+  });
+  await continueTask(paths, second.task.id, {
+    host: "codex",
+    sessionId: "b64-Pw",
+    confirmed: true,
+  });
+
+  const bindingFiles = (await readdir(paths.sessions)).sort();
+  expect(bindingFiles).toHaveLength(2);
+  expect(new Set(bindingFiles).size).toBe(2);
+  expect((await orient(paths, { host: "codex", sessionId: "?" })).binding).toMatchObject({
+    status: "bound",
+    taskId: first.task.id,
+  });
+  expect((await orient(paths, { host: "codex", sessionId: "b64-Pw" })).binding).toMatchObject({
+    status: "bound",
+    taskId: second.task.id,
+  });
+});
+
 test("a malformed active task fails orient instead of allowing another candidate to be guessed", async () => {
   await createTask(
     paths,
@@ -276,6 +356,48 @@ test("a malformed active task fails orient instead of allowing another candidate
 
   await expect(orient(paths, { host: "claude" })).rejects.toMatchObject({
     code: "VINEA_SCHEMA_INVALID",
+  });
+});
+
+test.each([
+  [
+    "a requirement entry without required fields",
+    (task: TaskRecord) => {
+      task.requirements = [{} as TaskRecord["requirements"][number]];
+    },
+  ],
+  [
+    "an acceptance entry without required fields",
+    (task: TaskRecord) => {
+      task.acceptanceCriteria = [{} as TaskRecord["acceptanceCriteria"][number]];
+    },
+  ],
+  [
+    "a commit without a string SHA",
+    (task: TaskRecord) => {
+      task.commit = { sha: 123 } as unknown as TaskRecord["commit"];
+    },
+  ],
+])("orient rejects a task record with %s", async (_label, corrupt) => {
+  const created = await createTask(
+    paths,
+    {
+      title: "Reject malformed nested task state",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    fixedNow,
+  );
+  const taskPath = join(created.directory, "task.json");
+  const task = await readJson<TaskRecord>(taskPath);
+  corrupt(task);
+  await writeJson(taskPath, task);
+
+  await expect(orient(paths, { host: "claude" })).rejects.toMatchObject({
+    code: "VINEA_SCHEMA_INVALID",
+    message: expect.stringContaining("Invalid task record"),
   });
 });
 

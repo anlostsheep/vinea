@@ -320,7 +320,7 @@ async function findInScope(
 ): Promise<TaskLocation[]> {
   const direct = join(root, taskId);
   if (!(await isDirectory(direct))) return [];
-  return [await loadLocation(paths, direct, scope)];
+  return [await loadLocation(paths, direct, scope, false)];
 }
 
 async function listScope(
@@ -338,7 +338,7 @@ async function listScope(
   return Promise.all(
     entries
       .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
-      .map((entry) => loadLocation(paths, join(root, entry.name), scope)),
+      .map((entry) => loadLocation(paths, join(root, entry.name), scope, true)),
   );
 }
 
@@ -346,9 +346,14 @@ async function loadLocation(
   paths: VineaPaths,
   directory: string,
   scope: "active" | "archive",
+  strict: boolean,
 ): Promise<TaskLocation> {
   const task = await readJson<unknown>(join(directory, "task.json"), paths.repoRoot);
-  if (!isTaskRecordShape(task) || task.id !== basename(directory)) {
+  if (
+    !isTaskRecordBaseShape(task)
+    || (strict && !isTaskRecordShape(task))
+    || task.id !== basename(directory)
+  ) {
     throw new SchemaError(`Invalid task record in ${directory}`);
   }
   return { task, directory, scope };
@@ -388,12 +393,27 @@ function safeSessionFilenamePart(sessionId: string): string {
   if (sessionId === "." || sessionId === "..") {
     throw new ValidationError("Session ID must not contain path traversal.");
   }
-  if (Buffer.byteLength(sessionId, "utf8") > 200) {
-    throw new ValidationError("Session ID exceeds the 200-byte local binding limit.");
+  if (!isWellFormedUnicode(sessionId)) {
+    throw new ValidationError("Session ID must contain well-formed Unicode.");
   }
-  return /^[A-Za-z0-9._-]+$/.test(sessionId)
-    ? sessionId
-    : `b64-${Buffer.from(sessionId, "utf8").toString("base64url")}`;
+  if (Buffer.byteLength(sessionId, "utf8") > 176) {
+    throw new ValidationError("Session ID exceeds the 176-byte local binding limit.");
+  }
+  return `sid-${Buffer.from(sessionId, "utf8").toString("base64url")}`;
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xDC00 && codeUnit <= 0xDFFF) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isSessionBinding(value: unknown): value is SessionBinding {
@@ -420,6 +440,13 @@ function isEvidenceRecord(value: unknown): value is EvidenceRecord {
 }
 
 function isTaskRecordShape(value: unknown): value is TaskRecord {
+  if (!isTaskRecordBaseShape(value)) return false;
+  return value.requirements.every(isRequirement)
+    && value.acceptanceCriteria.every(isRequirement)
+    && isCommitMetadata(value.commit);
+}
+
+function isTaskRecordBaseShape(value: unknown): value is TaskRecord {
   if (!isRecord(value)) return false;
   const risk = value.risk;
   return value.schemaVersion === SCHEMA_VERSION
@@ -440,6 +467,28 @@ function isTaskRecordShape(value: unknown): value is TaskRecord {
     && Array.isArray(value.acceptanceCriteria)
     && isIsoTimestamp(value.createdAt)
     && isIsoTimestamp(value.updatedAt);
+}
+
+function isRequirement(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).some((key) => !["schemaVersion", "id", "text", "createdAt"].includes(key))) {
+    return false;
+  }
+  return value.schemaVersion === SCHEMA_VERSION
+    && typeof value.id === "string"
+    && value.id.trim() !== ""
+    && typeof value.text === "string"
+    && value.text.trim() !== ""
+    && isIsoTimestamp(value.createdAt);
+}
+
+function isCommitMetadata(value: unknown): boolean {
+  if (value === null) return true;
+  if (!isRecord(value)) return false;
+  if (Object.keys(value).some((key) => !["sha", "message"].includes(key))) return false;
+  return typeof value.sha === "string"
+    && value.sha.trim() !== ""
+    && (value.message === undefined || typeof value.message === "string");
 }
 
 async function readJsonlRecords(filename: string): Promise<unknown[]> {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { access, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
@@ -37,7 +37,7 @@ test("continue binds only after confirmation and --start is required to move rea
   expect((JSON.parse(continued.stdout) as { task: TaskRecord }).task.status).toBe("ready");
   expect((await readJson<TaskRecord>(taskPath)).status).toBe("ready");
   expect(await readJson<SessionBinding>(
-    join(cwd, ".vinea", ".runtime", "sessions", "codex-thread-123.json"),
+    join(cwd, ".vinea", ".runtime", "sessions", "codex-sid-dGhyZWFkLTEyMw.json"),
   )).toMatchObject({
     schemaVersion: 1,
     taskId: task.id,
@@ -212,6 +212,60 @@ test("continue rejects archived and invalid task IDs clearly", async () => {
       message: "Invalid task ID: ../escape",
     },
   });
+});
+
+test.each([
+  [
+    "missing",
+    async (cwd: string) => {
+      await rm(join(cwd, ".vinea", "tasks", "active"), { recursive: true });
+    },
+  ],
+  [
+    "unsafe symlink",
+    async (cwd: string) => {
+      const active = join(cwd, ".vinea", "tasks", "active");
+      await rm(active, { recursive: true });
+      await symlink(join(cwd, ".vinea", "tasks", "archive"), active);
+    },
+  ],
+])("orient returns a nonzero schema diagnostic for %s active task storage", async (_label, corrupt) => {
+  const cwd = await initializedRepo();
+  await corrupt(cwd);
+
+  const result = await runCli(["orient", "--host", "claude", "--json"], cwd);
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    error: {
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("tasks/active"),
+    },
+  });
+  expect(result.stdout).not.toContain("no-active-task");
+});
+
+test("orient returns a defined schema diagnostic for malformed nested task state", async () => {
+  const cwd = await initializedRepo();
+  const task = await createReadyTask(cwd, "Malformed nested orient task");
+  const taskPath = join(cwd, ".vinea", "tasks", "active", task.id, "task.json");
+  const stored = await readJson<TaskRecord>(taskPath);
+  stored.requirements = [{} as TaskRecord["requirements"][number]];
+  await writeJson(taskPath, stored);
+
+  const result = await runCli(["orient", "--host", "claude", "--json"], cwd);
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toBe("");
+  expect(JSON.parse(result.stdout)).toEqual({
+    error: {
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("Invalid task record"),
+    },
+  });
+  expect(result.stdout).not.toContain("confirm-single");
+  expect(result.stdout).not.toContain("undefined");
 });
 
 async function initializedRepo(): Promise<string> {
