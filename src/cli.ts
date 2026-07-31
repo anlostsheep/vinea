@@ -1,17 +1,39 @@
 import packageJson from "../package.json" with { type: "json" };
+import {
+  commaList,
+  oneOf,
+  optionalValue,
+  parseExitCode,
+  parseOptions,
+  requestsJson,
+  requiredOption,
+  requiredTaskId,
+  UsageError,
+} from "./cli/args.js";
+import {
+  helpText,
+  renderCheckSummary,
+  renderContextManifest,
+  renderDoctorReport,
+  renderEvidence,
+  renderInlineAudit,
+  renderOrient,
+  renderProposal,
+  renderTask,
+  renderValidationReport,
+  reportError,
+  writeOutput,
+} from "./cli/render.js";
 import { initializeWorkspace, readConfig } from "./core/config.js";
 import {
   showCheck,
   upsertCheck,
-  type CheckSummary,
 } from "./core/check.js";
 import {
   addContextReference,
   listContextReferences,
-  type ContextManifest,
 } from "./core/context.js";
 import { recordEvidence } from "./core/evidence.js";
-import { VineaError } from "./core/errors.js";
 import { diagnoseWorkspace } from "./core/doctor.js";
 import {
   acceptLearning,
@@ -19,7 +41,7 @@ import {
   proposeLearning,
 } from "./core/learning.js";
 import { resolveVineaPaths } from "./core/paths.js";
-import { validateWorkspace, type ValidationReport } from "./core/validate.js";
+import { validateWorkspace } from "./core/validate.js";
 import {
   appendInlineAudit,
   addAcceptanceCriterion,
@@ -27,9 +49,7 @@ import {
   archiveTask,
   createTask,
   finishTask,
-  incompleteRequirements,
   listTasks,
-  nextGate,
   orientWorkspace,
   readTask,
   continueTask,
@@ -39,185 +59,91 @@ import {
   transitionTask,
 } from "./core/workflow.js";
 import type {
-  EvidenceRecord,
-  ExecutionMode,
-  OrientSummary,
-  QualityMode,
   RiskLevel,
-  TaskRecord,
 } from "./core/types.js";
 
-const helpText = `Usage: vinea <command>
-
-Commands:
-  init
-  orient
-  propose
-  continue
-  check
-  finish
-  archive
-  doctor
-  validate
-  task list
-  task show
-  task transition
-  task unblock
-  task require
-  task accept
-  task set-plan
-  task set-brief
-  context add
-  context list
-  evidence record
-  learning propose
-  learning accept
-  learning archive
-`;
-
-class UsageError extends Error {
-  readonly exitCode = 2;
-  readonly code = "VINEA_VALIDATION_INVALID";
-}
-
 export async function main(args: string[]): Promise<number> {
-  const command = args[0];
-  const json = args.includes("--json");
+  const json = requestsJson(args);
+  try {
+    const command = args[0];
 
-  if (command === "--help" || command === "-h") {
-    process.stdout.write(helpText);
-    return 0;
-  }
-
-  if (command === "init") {
-    try {
-      await initializeWorkspace(resolveVineaPaths(process.cwd()));
-      process.stdout.write("Initialized Vinea workspace.\n");
+    if (command === "--help" || command === "-h") {
+      parseOptions(args.slice(1), new Set(), new Set());
+      process.stdout.write(helpText);
       return 0;
-    } catch (error) {
-      return reportError(error, false);
     }
-  }
 
-  if (command === "doctor") {
-    const doctorArgs = args.slice(1);
-    const json = doctorArgs.includes("--json");
-    if (doctorArgs.some((argument) => argument !== "--json")) {
-      if (json) {
-        process.stdout.write(`${JSON.stringify({ error: { code: "VINEA_VALIDATION_INVALID", message: "Unknown doctor option." } })}\n`);
-      } else {
-        process.stderr.write(`Unknown doctor option: ${args[1]}\n`);
-      }
-      return 2;
+    if (command === "--version" || command === "-V") {
+      parseOptions(args.slice(1), new Set(), new Set());
+      process.stdout.write(`${packageJson.version}\n`);
+      return 0;
     }
-    const report = await diagnoseWorkspace(resolveVineaPaths(process.cwd()));
-    if (json) {
-      process.stdout.write(`${JSON.stringify(report)}\n`);
-    } else {
-      process.stdout.write(renderDoctorReport(report));
-    }
-    return report.healthy ? 0 : 1;
-  }
 
-  if (command === "validate") {
-    try {
+    if (command === "init") {
+      const options = parseOptions(args.slice(1), new Set(), new Set(["--json"]));
+      await initializeWorkspace(resolveVineaPaths(process.cwd()));
+      writeOutput({ initialized: true }, options.has("--json"), "Initialized Vinea workspace.\n");
+      return 0;
+    }
+
+    if (command === "doctor") {
+      const options = parseOptions(args.slice(1), new Set(), new Set(["--json"]));
+      const report = await diagnoseWorkspace(resolveVineaPaths(process.cwd()));
+      writeOutput(report, options.has("--json"), renderDoctorReport(report));
+      return report.healthy ? 0 : 1;
+    }
+
+    if (command === "validate") {
       const options = parseOptions(args.slice(1), new Set(), new Set(["--json"]));
       const report = await validateWorkspace(resolveVineaPaths(process.cwd()));
       writeOutput(report, options.has("--json"), renderValidationReport(report));
       return report.issues.length === 0 ? 0 : 1;
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "propose") {
-    try {
+    if (command === "propose") {
       return await handlePropose(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "orient") {
-    try {
+    if (command === "orient") {
       return await handleOrient(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "continue") {
-    try {
+    if (command === "continue") {
       return await handleContinue(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "task") {
-    try {
+    if (command === "task") {
       return await handleTask(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "context") {
-    try {
+    if (command === "context") {
       return await handleContext(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "evidence") {
-    try {
+    if (command === "evidence") {
       return await handleEvidence(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "learning") {
-    try {
+    if (command === "learning") {
       return await handleLearning(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "check") {
-    try {
+    if (command === "check") {
       return await handleCheck(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "finish") {
-    try {
+    if (command === "finish") {
       return await handleFinish(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "archive") {
-    try {
+    if (command === "archive") {
       return await handleArchive(args.slice(1));
-    } catch (error) {
-      return reportError(error, json);
     }
-  }
 
-  if (command === "--version" || command === "-V") {
-    process.stdout.write(`${packageJson.version}\n`);
-    return 0;
+    throw new UsageError(`Unknown command: ${command ?? "(none)"}`);
+  } catch (error) {
+    return reportError(error, json);
   }
-
-  const usageError = new UsageError(`Unknown command: ${command ?? "(none)"}`);
-  process.stderr.write(`${usageError.message}\n`);
-  return usageError.exitCode;
 }
 
 async function handleOrient(args: string[]): Promise<number> {
@@ -576,214 +502,6 @@ async function handleArchive(args: string[]): Promise<number> {
   });
   writeOutput(task, options.has("--json"), renderTask(task));
   return 0;
-}
-
-function reportError(error: unknown, json: boolean): number {
-  const code = error instanceof VineaError || error instanceof UsageError
-    ? error.code
-    : "VINEA_SCHEMA_INVALID";
-  const message = error instanceof Error ? error.message : "Unknown failure";
-  if (json) {
-    process.stdout.write(`${JSON.stringify({ error: { code, message } })}\n`);
-  } else if (error instanceof VineaError) {
-    process.stderr.write(`${error.code}: ${error.message}\n`);
-  } else {
-    process.stderr.write(`${code}: ${message}\n`);
-  }
-  if (error instanceof UsageError) return error.exitCode;
-  if (error instanceof VineaError) {
-    return 1;
-  }
-  return 1;
-}
-
-function parseOptions(
-  args: string[],
-  valueOptions: ReadonlySet<string>,
-  booleanOptions: ReadonlySet<string>,
-): Map<string, string | true> {
-  const parsed = new Map<string, string | true>();
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index]!;
-    if (parsed.has(argument)) throw new UsageError(`Duplicate option: ${argument}`);
-    if (booleanOptions.has(argument)) {
-      parsed.set(argument, true);
-      continue;
-    }
-    if (!valueOptions.has(argument)) throw new UsageError(`Unknown option: ${argument}`);
-    const value = args[index + 1];
-    if (value === undefined || value.startsWith("--")) throw new UsageError(`Missing value for ${argument}.`);
-    parsed.set(argument, value);
-    index += 1;
-  }
-  return parsed;
-}
-
-function requiredOption(options: ReadonlyMap<string, string | true>, name: string): string {
-  const value = options.get(name);
-  if (typeof value !== "string" || value.trim() === "") throw new UsageError(`Missing required option: ${name}.`);
-  return value;
-}
-
-function optionalValue(options: ReadonlyMap<string, string | true>, name: string): string | undefined {
-  const value = options.get(name);
-  return typeof value === "string" ? value : undefined;
-}
-
-function requiredTaskId(value: string | undefined): string {
-  if (value === undefined || value.startsWith("--") || value.trim() === "") {
-    throw new UsageError("Missing task ID.");
-  }
-  return value;
-}
-
-function oneOf<const T extends readonly string[]>(value: string, allowed: T, option: string): T[number] {
-  if (!allowed.includes(value)) {
-    throw new UsageError(`Invalid ${option} value: ${value}. Expected ${allowed.join("|")}.`);
-  }
-  return value as T[number];
-}
-
-function parseExitCode(value: string): number {
-  if (!/^\d+$/.test(value)) {
-    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
-  }
-  return parsed;
-}
-
-function commaList(value: string, option: string): string[] {
-  const values = value.split(",").map((item) => item.trim());
-  if (values.some((item) => item === "")) {
-    throw new UsageError(`${option} must be a comma-separated list of nonempty values.`);
-  }
-  return values;
-}
-
-function writeOutput(value: unknown, json: boolean, human: string): void {
-  process.stdout.write(json ? `${JSON.stringify(value)}\n` : human);
-}
-
-function renderProposal(proposal: {
-  title: string;
-  description: string;
-  risk: { level: RiskLevel; reasons: string[] };
-  qualityMode: QualityMode;
-  executionMode: ExecutionMode;
-}): string {
-  return [
-    `title: ${proposal.title}`,
-    `description: ${proposal.description}`,
-    `risk: ${proposal.risk.level}`,
-    `risk reasons: ${proposal.risk.reasons.length ? proposal.risk.reasons.join(", ") : "none"}`,
-    `quality mode: ${proposal.qualityMode}`,
-    `execution mode: ${proposal.executionMode}`,
-    "confirmation required",
-    "",
-  ].join("\n");
-}
-
-function renderInlineAudit(record: { timestamp: string; requestSummary: string; reason: string }): string {
-  return [
-    "Inline skip recorded.",
-    `timestamp: ${record.timestamp}`,
-    `request: ${record.requestSummary}`,
-    `reason: ${record.reason}`,
-    "",
-  ].join("\n");
-}
-
-function renderTask(task: TaskRecord): string {
-  const incomplete = incompleteRequirements(task);
-  return [
-    `task ID: ${task.id}`,
-    `status: ${task.status}`,
-    `quality mode: ${task.qualityMode}`,
-    `execution mode: ${task.executionMode}`,
-    `risk: ${task.risk.level}`,
-    `risk reasons: ${task.risk.reasons.length ? task.risk.reasons.join(", ") : "none"}`,
-    `incomplete requirements: ${incomplete.length ? incomplete.join(", ") : "none"}`,
-    `next gate: ${nextGate(task)}`,
-    "",
-  ].join("\n");
-}
-
-function renderContextManifest(manifest: ContextManifest): string {
-  if (manifest.references.length === 0) {
-    return `No context references. Budget: 0/${manifest.limits.maxFiles} files, 0/${manifest.limits.maxEstimatedBytes} bytes.\n`;
-  }
-  return [
-    ...manifest.references.map(
-      (reference) => `${reference.path} (${reference.estimatedBytes} bytes): ${reference.purpose}`,
-    ),
-    `Budget: ${manifest.totals.files}/${manifest.limits.maxFiles} files, ${manifest.totals.estimatedBytes}/${manifest.limits.maxEstimatedBytes} bytes.`,
-    "",
-  ].join("\n");
-}
-
-function renderEvidence(evidence: EvidenceRecord): string {
-  return [
-    `Evidence: ${evidence.id}`,
-    `kind: ${evidence.kind}`,
-    `result: ${evidence.result}`,
-    `summary: ${evidence.summary}`,
-    "",
-  ].join("\n");
-}
-
-function renderCheckSummary(summary: CheckSummary): string {
-  const lines = summary.rows.map((row) =>
-    `${row.requirementId}: ${row.result}; paths: ${row.paths.join(", ")}; evidence: ${row.evidenceIds.join(", ") || "none"}; ${row.summary}`
-  );
-  lines.push(
-    `Totals: ${summary.totals.total} rows; ${summary.totals.pass} pass; ${summary.totals.fail} fail; ${summary.totals.uncovered} uncovered.`,
-    "",
-  );
-  return lines.join("\n");
-}
-
-function renderOrient(summary: OrientSummary): string {
-  const lines = [
-    `workspace healthy: ${summary.health.healthy}`,
-    `git available: ${summary.gitStatus.available}`,
-    `git status: ${summary.gitStatus.porcelain === "" ? "clean" : summary.gitStatus.porcelain.trimEnd()}`,
-    `binding: ${summary.binding === null ? "none" : summary.binding.status}`,
-    `recommendation: ${summary.recommendation}`,
-  ];
-  for (const candidate of summary.candidates) {
-    lines.push(
-      `${candidate.id}: ${candidate.title} [${candidate.status}; ${candidate.qualityMode}; ${candidate.executionMode}]`,
-      `  requirements not covered: ${candidate.requirementsNotCovered.length ? candidate.requirementsNotCovered.join(", ") : "none"}`,
-      `  context references: ${candidate.contextReferences.length ? candidate.contextReferences.map(({ path }) => path).join(", ") : "none"}`,
-      `  latest evidence: ${candidate.latestEvidence?.id ?? "none"}`,
-      `  latest check event: ${String(candidate.latestCheckEvent?.type ?? "none")}`,
-    );
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-function renderDoctorReport(report: Awaited<ReturnType<typeof diagnoseWorkspace>>): string {
-  const lines = [
-    `initialized: ${report.initialized}`,
-    `config schema: ${report.configSchemaVersion ?? "missing"}`,
-    `supported schema: ${report.supportedSchema}`,
-    `missing directories: ${report.missingRequiredDirectories.length ? report.missingRequiredDirectories.join(", ") : "none"}`,
-    `git available: ${report.gitStatus.available}`,
-    `healthy: ${report.healthy}`,
-  ];
-  if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
-  if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
-  return `${lines.join("\n")}\n`;
-}
-
-function renderValidationReport(report: ValidationReport): string {
-  if (report.issues.length === 0) return "Vinea state is valid.\n";
-  return `${report.issues.map(
-    (issue) => `[${issue.code}] ${issue.path}: ${issue.message}`,
-  ).join("\n")}\n`;
 }
 
 void main(process.argv.slice(2)).then((exitCode) => {
