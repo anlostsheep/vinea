@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "id": "t-20260804-070507-release-vinea-0-2-0-icon-and-host-update-workflow",
+  "title": "Release Vinea 0.2.0 icon and host update workflow",
+  "status": "planning",
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "qualityMode": "tdd",
+  "executionMode": "single-agent",
+  "verificationRevision": 0,
+  "requirements": [],
+  "acceptanceCriteria": [],
+  "commit": null,
+  "createdAt": "2026-08-04T07:05:07.092Z",
+  "updatedAt": "2026-08-04T07:05:07.092Z"
+}

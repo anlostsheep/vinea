@@ -1,0 +1,11 @@
+{"schemaVersion":2,"path":"package.json","purpose":"Authoritative public release version and package scripts.","estimatedBytes":652,"addedAt":"2026-08-04T07:07:41.979Z"}
+{"schemaVersion":2,"path":"hosts/codex/.codex-plugin/plugin.json","purpose":"Codex manifest template and interface icon metadata.","estimatedBytes":930,"addedAt":"2026-08-04T07:07:42.024Z"}
+{"schemaVersion":2,"path":"hosts/claude/.claude-plugin/plugin.json","purpose":"Claude Code manifest template and version contract.","estimatedBytes":313,"addedAt":"2026-08-04T07:07:42.069Z"}
+{"schemaVersion":2,"path":"scripts/package-public-plugin.mjs","purpose":"Builds the distributable public plugin tree.","estimatedBytes":3569,"addedAt":"2026-08-04T07:07:42.122Z"}
+{"schemaVersion":2,"path":"scripts/check-public-plugin.mjs","purpose":"Validates packaged public plugin contracts.","estimatedBytes":7985,"addedAt":"2026-08-04T07:07:42.167Z"}
+{"schemaVersion":2,"path":"scripts/install-codex-plugin.sh","purpose":"Codex local marketplace refresh path.","estimatedBytes":3683,"addedAt":"2026-08-04T07:07:42.210Z"}
+{"schemaVersion":2,"path":"scripts/install-claude-plugin.sh","purpose":"Claude Code local marketplace refresh path.","estimatedBytes":2976,"addedAt":"2026-08-04T07:07:42.256Z"}
+{"schemaVersion":2,"path":"tests/plugin/package.test.ts","purpose":"Public package regression coverage.","estimatedBytes":4877,"addedAt":"2026-08-04T07:07:42.299Z"}
+{"schemaVersion":2,"path":"tests/plugin/install-scripts.test.ts","purpose":"Host installer and refresh regression coverage.","estimatedBytes":2703,"addedAt":"2026-08-04T07:07:42.344Z"}
+{"schemaVersion":2,"path":"tests/core/schema.test.ts","purpose":"Stale doctor JSON assertion to repair.","estimatedBytes":2764,"addedAt":"2026-08-04T07:07:42.387Z"}
+{"schemaVersion":2,"path":"docs/superpowers/specs/2026-08-04-vinea-plugin-release-design.md","purpose":"Approved release design and scope boundary.","estimatedBytes":5511,"addedAt":"2026-08-04T07:07:42.431Z"}
