@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
 import type { TaskRecord } from "../../src/core/types.js";
+import { resolveVineaPaths } from "../../src/core/paths.js";
+import { reworkTask } from "../../src/core/workflow.js";
 import { createTempRepo, runCli } from "../helpers/fixture.js";
 
 const execFileAsync = promisify(execFile);
@@ -42,7 +44,8 @@ test("evidence record stores bounded audit metadata and rejects contradictory TD
   expect(recorded.exitCode).toBe(0);
   expect(recorded.stderr).toBe("");
   expect(JSON.parse(recorded.stdout)).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: 2,
+    verificationRevision: 0,
     id: expect.any(String),
     kind: "tdd-red",
     summary: "Regression assertion failed before implementation",
@@ -128,6 +131,66 @@ test("a TDD checking gate requires a valid red record before a valid green and l
     oldStatus: "in_progress",
     newStatus: "checking",
   });
+});
+
+test("a TDD checking gate ignores red-green evidence from an earlier verification revision", async () => {
+  const { cwd, task } = await initializedTask("Revision-scoped TDD evidence", "tdd");
+  await prepareInProgressTask(cwd, task);
+  expect((await recordEvidence(cwd, task.id, {
+    kind: "tdd-red",
+    summary: "Revision zero test fails first",
+    command: "npm test -- revision-zero",
+    exitCode: 1,
+    result: "fail",
+  })).exitCode).toBe(0);
+  expect((await recordEvidence(cwd, task.id, {
+    kind: "tdd-green",
+    summary: "Revision zero test passes after the change",
+    command: "npm test -- revision-zero",
+    exitCode: 0,
+    result: "pass",
+  })).exitCode).toBe(0);
+
+  expect((await transitionToChecking(cwd, task.id)).exitCode).toBe(0);
+  expect((await runCli([
+    "check", task.id,
+    "--requirement", "R1",
+    "--plan-item", "Record the verification failure",
+    "--paths", "README.md",
+    "--result", "fail",
+    "--summary", "Revision-zero implementation still fails.",
+    "--json",
+  ], cwd)).exitCode).toBe(0);
+  await reworkTask(resolveVineaPaths(cwd), task.id, {
+    actor: "test",
+    reason: "Resume implementation after the failed revision-zero check.",
+  });
+  expect((await showTask(cwd, task.id)).verificationRevision).toBe(1);
+
+  const staleProof = await transitionToChecking(cwd, task.id);
+  expect(staleProof.exitCode).toBe(1);
+  expect(JSON.parse(staleProof.stdout)).toMatchObject({
+    error: { code: "VINEA_TRANSITION_INVALID" },
+  });
+
+  const currentRed = await recordEvidence(cwd, task.id, {
+    kind: "tdd-red",
+    summary: "Revision one test fails first",
+    command: "npm test -- revision-one",
+    exitCode: 1,
+    result: "fail",
+  });
+  const currentGreen = await recordEvidence(cwd, task.id, {
+    kind: "tdd-green",
+    summary: "Revision one test passes after the change",
+    command: "npm test -- revision-one",
+    exitCode: 0,
+    result: "pass",
+  });
+  expect(JSON.parse(currentRed.stdout)).toMatchObject({ verificationRevision: 1 });
+  expect(JSON.parse(currentGreen.stdout)).toMatchObject({ verificationRevision: 1 });
+
+  expect((await transitionToChecking(cwd, task.id)).exitCode).toBe(0);
 });
 
 test("standard quality tasks may enter checking without TDD red or green evidence", async () => {

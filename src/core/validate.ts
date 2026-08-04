@@ -3,13 +3,17 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { parseCheckDocument } from "./check.js";
-import { validateEvidenceRecord } from "./evidence.js";
+import { normalizeEvidenceRecord } from "./evidence.js";
 import { normalizeSpecTarget, parseSpecIndexTarget } from "./learning.js";
+import { readSchemaMigrationState } from "./migration-state.js";
 import { assertNoSymlink, type VineaPaths } from "./paths.js";
 import { mutationTargetsAreOwned, type MutationTargetOwner, type TaskLocation } from "./task-store.js";
 import { inspectTaskLocks } from "./task-locks.js";
 import {
+  LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
+  type CheckHistorySnapshot,
+  type CheckRow,
   type EvidenceRecord,
   type MutationKind,
   type MutationTargetSummary,
@@ -22,6 +26,7 @@ const REQUIRED_TASK_ARTIFACTS = [
   "context.jsonl",
   "evidence.jsonl",
   "check.md",
+  "check-history.jsonl",
   "journal.md",
 ] as const;
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -114,6 +119,7 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
 
   const managed = await inspectManagedPathSafety(paths, add);
   const limits = managed.config ? await validateConfig(paths, add) : null;
+  await validateSchemaMigrationState(paths, add);
   await validateManagedSpecs(paths, add, managed);
   if (managed.inlineAudit) await validateInlineAudit(paths, add);
 
@@ -158,6 +164,25 @@ export async function validateWorkspace(paths: VineaPaths): Promise<ValidationRe
   }
   if (managed.runtime) await validateTaskLocks(paths, add);
   return { issues: sortIssues(issues) };
+}
+
+async function validateSchemaMigrationState(paths: VineaPaths, add: IssueAdder): Promise<void> {
+  try {
+    const state = await readSchemaMigrationState(paths);
+    if (state?.phase === "intent") {
+      add(
+        "MIGRATION_PENDING",
+        paths.migrationState,
+        `Schema migration ${state.operationId} is incomplete; run \`vinea migrate\` to resume it.`,
+      );
+    }
+  } catch (error) {
+    add(
+      "MIGRATION_STATE_INVALID",
+      paths.migrationState,
+      error instanceof Error ? error.message : "Schema migration state is invalid.",
+    );
+  }
 }
 
 // This intentionally excludes workspace-level configuration, shared specs,
@@ -525,14 +550,36 @@ async function validateTaskDirectory(
     }
   }
 
-  await validateContextManifest(paths, join(directory, "context.jsonl"), limits, add);
-  const evidence = await validateEvidenceArtifact(paths, join(directory, "evidence.jsonl"), add);
+  const allowsLegacyHistory = task !== null
+    && task.schemaVersion === SCHEMA_VERSION
+    && isTaskRecordShape(task);
+  const taskVerificationRevision = task !== null
+    && task.schemaVersion === SCHEMA_VERSION
+    && isNonNegativeSafeInteger(task.verificationRevision)
+    ? task.verificationRevision
+    : undefined;
+  await validateContextManifest(paths, join(directory, "context.jsonl"), limits, allowsLegacyHistory, add);
+  const evidence = await validateEvidenceArtifact(
+    paths,
+    join(directory, "evidence.jsonl"),
+    allowsLegacyHistory,
+    taskVerificationRevision,
+    add,
+  );
+  const checkHistory = await validateCheckHistoryArtifact(
+    paths,
+    join(directory, "check-history.jsonl"),
+    task,
+    add,
+  );
   await validateJournalArtifact(
     paths,
     join(directory, "journal.md"),
     task,
     directory,
     scope,
+    allowsLegacyHistory,
+    checkHistory,
     add,
     pendingMutationRecovery,
   );
@@ -543,6 +590,7 @@ async function validateContextManifest(
   paths: VineaPaths,
   filename: string,
   limits: ContextLimits | null,
+  allowsLegacyHistory: boolean,
   add: IssueAdder,
 ): Promise<void> {
   const contents = await readOptionalRegularFile(paths, filename, "CONTEXT", add);
@@ -557,7 +605,7 @@ async function validateContextManifest(
       add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
       continue;
     }
-    if (value.schemaVersion !== SCHEMA_VERSION) {
+    if (!isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
       add(
         "CONTEXT_SCHEMA_UNSUPPORTED",
         filename,
@@ -636,7 +684,13 @@ async function validateContextPath(
   }
 }
 
-async function validateEvidenceArtifact(paths: VineaPaths, filename: string, add: IssueAdder): Promise<EvidenceRecord[]> {
+async function validateEvidenceArtifact(
+  paths: VineaPaths,
+  filename: string,
+  allowsLegacyHistory: boolean,
+  taskVerificationRevision: number | undefined,
+  add: IssueAdder,
+): Promise<EvidenceRecord[]> {
   const contents = await readOptionalRegularFile(paths, filename, "EVIDENCE", add);
   if (contents === null) return [];
   const records: EvidenceRecord[] = [];
@@ -644,7 +698,7 @@ async function validateEvidenceArtifact(paths: VineaPaths, filename: string, add
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "EVIDENCE_JSONL_INVALID", add);
     if (value === null) continue;
-    if (isRecord(value) && value.schemaVersion !== SCHEMA_VERSION) {
+    if (isRecord(value) && !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
       add(
         "EVIDENCE_SCHEMA_UNSUPPORTED",
         filename,
@@ -653,7 +707,7 @@ async function validateEvidenceArtifact(paths: VineaPaths, filename: string, add
     }
     let record: EvidenceRecord;
     try {
-      record = validateEvidenceRecord(value);
+      record = normalizeEvidenceRecord(value, allowsLegacyHistory);
     } catch {
       add("EVIDENCE_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid evidence record.`);
       continue;
@@ -662,10 +716,110 @@ async function validateEvidenceArtifact(paths: VineaPaths, filename: string, add
       add("EVIDENCE_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates evidence ID ${record.id}.`);
       continue;
     }
+    if (taskVerificationRevision !== undefined && record.verificationRevision > taskVerificationRevision) {
+      add(
+        "EVIDENCE_REVISION_INVALID",
+        filename,
+        `Line ${lineNumber} uses future verification revision ${record.verificationRevision}; task.json is at ${taskVerificationRevision}.`,
+      );
+    }
     seenIds.add(record.id);
     records.push(record);
   }
   return records;
+}
+
+async function validateCheckHistoryArtifact(
+  paths: VineaPaths,
+  filename: string,
+  task: Record<string, unknown> | null,
+  add: IssueAdder,
+): Promise<CheckHistorySnapshot[]> {
+  const contents = await readOptionalRegularFile(paths, filename, "CHECK_HISTORY", add);
+  if (contents === null) return [];
+  const snapshots: CheckHistorySnapshot[] = [];
+  const operationIds = new Set<string>();
+  const revisions = new Set<string>();
+  const taskId = typeof task?.id === "string" ? task.id : undefined;
+  const taskRevision = task !== null && isNonNegativeSafeInteger(task.verificationRevision)
+    ? task.verificationRevision
+    : undefined;
+  const declaredIds = task === null ? [] : taskRequirementIds(task);
+  for (const { line, lineNumber } of jsonlLines(contents)) {
+    const value = parseJsonl(line, lineNumber, filename, "CHECK_HISTORY_JSONL_INVALID", add);
+    if (value === null) continue;
+    if (!isCheckHistorySnapshot(value)) {
+      add("CHECK_HISTORY_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid check-history snapshot.`);
+      continue;
+    }
+    const snapshot = value;
+    if (taskId !== undefined && snapshot.taskId !== taskId) {
+      add(
+        "CHECK_HISTORY_TASK_MISMATCH",
+        filename,
+        `Line ${lineNumber} belongs to ${snapshot.taskId}, not task ${taskId}.`,
+      );
+    }
+    if (taskRevision !== undefined && snapshot.verificationRevision > taskRevision) {
+      add(
+        "CHECK_HISTORY_REVISION_INVALID",
+        filename,
+        `Line ${lineNumber} uses future verification revision ${snapshot.verificationRevision}; task.json is at ${taskRevision}.`,
+      );
+    }
+    const revisionKey = `${snapshot.taskId}:${snapshot.verificationRevision}`;
+    if (operationIds.has(snapshot.operationId)) {
+      add("CHECK_HISTORY_OPERATION_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${snapshot.operationId}.`);
+    } else {
+      operationIds.add(snapshot.operationId);
+    }
+    if (revisions.has(revisionKey)) {
+      add("CHECK_HISTORY_REVISION_DUPLICATE", filename, `Line ${lineNumber} duplicates snapshot ${revisionKey}.`);
+    } else {
+      revisions.add(revisionKey);
+    }
+    validateHistoricalRows(snapshot, declaredIds, filename, lineNumber, add);
+    snapshots.push(snapshot);
+  }
+  return snapshots;
+}
+
+function validateHistoricalRows(
+  snapshot: CheckHistorySnapshot,
+  declaredIds: string[],
+  filename: string,
+  lineNumber: number,
+  add: IssueAdder,
+): void {
+  const seen = new Set<string>();
+  let previousDeclarationIndex = -1;
+  for (const row of snapshot.rows) {
+    const declarationIndex = declaredIds.indexOf(row.requirementId);
+    if (declarationIndex === -1) {
+      add(
+        "CHECK_HISTORY_REQUIREMENT_INVALID",
+        filename,
+        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} references undeclared ID ${row.requirementId}.`,
+      );
+      continue;
+    }
+    if (seen.has(row.requirementId)) {
+      add(
+        "CHECK_HISTORY_REQUIREMENT_DUPLICATE",
+        filename,
+        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} duplicates ID ${row.requirementId}.`,
+      );
+    }
+    seen.add(row.requirementId);
+    if (declarationIndex <= previousDeclarationIndex) {
+      add(
+        "CHECK_HISTORY_ORDER_INVALID",
+        filename,
+        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} is not in declared requirement order.`,
+      );
+    }
+    previousDeclarationIndex = declarationIndex;
+  }
 }
 
 async function validateJournalArtifact(
@@ -674,6 +828,8 @@ async function validateJournalArtifact(
   task: Record<string, unknown> | null,
   taskDirectory: string,
   scope: "active" | "archive",
+  allowsLegacyHistory: boolean,
+  checkHistory: CheckHistorySnapshot[],
   add: IssueAdder,
   pendingMutationRecovery?: PendingMutationRecovery,
 ): Promise<void> {
@@ -687,23 +843,28 @@ async function validateJournalArtifact(
   let creationCount = 0;
   let firstEvent = true;
   let currentStatus: TaskStatus | null = null;
+  let currentVerificationRevision = 0;
   let replayIsValid = true;
   let lastTransition: { oldStatus: TaskStatus; newStatus: TaskStatus } | null = null;
   let lastValidEventType: string | null = null;
   const pendingMutationIntents = new Map<string, Record<string, unknown>>();
   const committedMutationIntents: Record<string, unknown>[] = [];
+  const reworkIntents = new Map<string, Record<string, unknown>>();
+  const pendingReworkIntents = new Map<string, Record<string, unknown>>();
+  const matchedReworkCompletionIds = new Set<string>();
+  const supersededCheckMutationOperations = new Set<string>();
   const latestLearningMutationOperation = new Map<string, string>();
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
     if (value === null) continue;
-    if (isRecord(value) && value.schemaVersion !== SCHEMA_VERSION) {
+    if (isRecord(value) && !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
       add(
         "JOURNAL_SCHEMA_UNSUPPORTED",
         filename,
         `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`,
       );
     }
-    if (!isJournalEvent(value)) {
+    if (!isJournalEvent(value, allowsLegacyHistory)) {
       add("JOURNAL_EVENT_INVALID", filename, `Line ${lineNumber} is not a valid journal event.`);
       replayIsValid = false;
       continue;
@@ -734,6 +895,35 @@ async function validateJournalArtifact(
         committedMutationIntents.push(intent);
         if (String(value.type).startsWith("learning_") && typeof value.learningCandidateId === "string") {
           latestLearningMutationOperation.set(value.learningCandidateId, operationId);
+        }
+      }
+    }
+    if (value.type === "rework_intent") {
+      const operationId = value.operationId as string;
+      if (reworkIntents.has(operationId)) {
+        add("REWORK_INTENT_DUPLICATE", filename, `Line ${lineNumber} duplicates rework intent ${operationId}.`);
+      } else {
+        reworkIntents.set(operationId, value);
+        pendingReworkIntents.set(operationId, value);
+      }
+    } else if (value.type === "reworked") {
+      const operationId = value.operationId as string;
+      const intent = pendingReworkIntents.get(operationId);
+      if (intent === undefined) {
+        add(
+          "REWORK_COMPLETION_ORPHAN",
+          filename,
+          `Line ${lineNumber} rework completion ${operationId} has no matching rework intent.`,
+        );
+      } else if (!matchesReworkCompletion(intent, value)) {
+        add("REWORK_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match rework intent ${operationId}.`);
+      } else {
+        pendingReworkIntents.delete(operationId);
+        matchedReworkCompletionIds.add(operationId);
+        for (const mutation of committedMutationIntents) {
+          if (mutation.mutationKind === "check_upsert") {
+            supersededCheckMutationOperations.add(mutation.operationId as string);
+          }
         }
       }
     }
@@ -768,6 +958,32 @@ async function validateJournalArtifact(
         currentStatus = newStatus;
         lastTransition = { oldStatus, newStatus };
       }
+    } else if (value.type === "rework_intent") {
+      const sourceRevision = value.sourceVerificationRevision as number;
+      if (currentStatus !== "checking" || sourceRevision !== currentVerificationRevision) {
+        add(
+          "JOURNAL_REWORK_DISCONTINUITY",
+          filename,
+          `Line ${lineNumber} rework intent targets revision ${sourceRevision} while journal is ${String(currentStatus)} at revision ${currentVerificationRevision}.`,
+        );
+        replayIsValid = false;
+      }
+    } else if (value.type === "reworked") {
+      const operationId = value.operationId as string;
+      const sourceRevision = value.sourceVerificationRevision as number;
+      if (!matchedReworkCompletionIds.has(operationId)
+        || currentStatus !== "checking"
+        || sourceRevision !== currentVerificationRevision) {
+        add(
+          "JOURNAL_REWORK_DISCONTINUITY",
+          filename,
+          `Line ${lineNumber} cannot complete rework ${operationId} from ${String(currentStatus)} at revision ${currentVerificationRevision}.`,
+        );
+        replayIsValid = false;
+      } else {
+        currentStatus = "in_progress";
+        currentVerificationRevision += 1;
+      }
     } else if (value.type === "continued") {
       const status = value.status as TaskStatus;
       if (currentStatus === null || status !== currentStatus) {
@@ -782,7 +998,9 @@ async function validateJournalArtifact(
     // A mutation intent and its semantic completion deliberately share one
     // operation ID. The completion is the unique operation record; only it
     // participates in the legacy duplicate-ID check.
-    if (typeof value.operationId === "string" && value.type !== "mutation_intent") {
+    if (typeof value.operationId === "string"
+      && value.type !== "mutation_intent"
+      && value.type !== "rework_intent") {
       if (operationIds.has(value.operationId)) {
         add("JOURNAL_OPERATION_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${value.operationId}.`);
       } else {
@@ -815,6 +1033,47 @@ async function validateJournalArtifact(
       filename,
       `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`,
     );
+  }
+  if (
+    replayIsValid
+    && creationCount === 1
+    && task !== null
+    && isNonNegativeSafeInteger(task.verificationRevision)
+    && task.verificationRevision !== currentVerificationRevision
+  ) {
+    add(
+      "JOURNAL_TASK_REVISION_MISMATCH",
+      filename,
+      `Journal resolves to verification revision ${currentVerificationRevision}, but task.json records ${task.verificationRevision}.`,
+    );
+  }
+  for (const intent of pendingReworkIntents.values()) {
+    add(
+      "REWORK_INTENT_UNCOMMITTED",
+      filename,
+      `Rework intent ${String(intent.operationId)} has no matching completion event; run \`vinea task rework\` to recover it.`,
+    );
+  }
+  const historyByOperation = new Map(checkHistory.map((snapshot) => [snapshot.operationId, snapshot]));
+  for (const [operationId, intent] of reworkIntents) {
+    const snapshot = historyByOperation.get(operationId);
+    if (snapshot === undefined || stableJson(snapshot) !== stableJson(intent.snapshot)) {
+      add(
+        "REWORK_HISTORY_MISMATCH",
+        filename,
+        `Rework ${operationId} does not have the exact check-history snapshot recorded in its intent.`,
+      );
+    }
+  }
+  for (const snapshot of checkHistory) {
+    const intent = reworkIntents.get(snapshot.operationId);
+    if (intent === undefined || stableJson(intent.snapshot) !== stableJson(snapshot)) {
+      add(
+        "CHECK_HISTORY_ORPHAN",
+        filename,
+        `Check-history snapshot ${snapshot.operationId} has no matching rework intent.`,
+      );
+    }
   }
   const mutationOwner = mutationTargetOwnerForValidation(taskDirectory, scope, task);
   for (const intent of pendingMutationIntents.values()) {
@@ -856,6 +1115,10 @@ async function validateJournalArtifact(
   const latestIntentByFile = new Map<string, Record<string, unknown>>();
   const latestIntentBySemanticIdentity = new Map<string, Record<string, unknown>>();
   for (const intent of committedMutationIntents) {
+    if (intent.mutationKind === "check_upsert"
+      && supersededCheckMutationOperations.has(intent.operationId as string)) {
+      continue;
+    }
     latestIntentBySemanticIdentity.set(mutationSemanticIdentityKey(intent), intent);
     const expected = intent.expected as Record<string, unknown>;
     if (!isMutationTargetSummary(expected)) continue;
@@ -1088,8 +1351,13 @@ async function validateCheckArtifact(
   const contents = await readOptionalRegularFile(paths, filename, "CHECK", add);
   if (contents === null || contents === "") return;
   const declaredIds = task === null ? [] : taskRequirementIds(task);
+  const expectedRevision = task !== null
+    && task.schemaVersion === SCHEMA_VERSION
+    && isNonNegativeSafeInteger(task.verificationRevision)
+    ? task.verificationRevision
+    : undefined;
   try {
-    parseCheckDocument(contents, paths.repoRoot, declaredIds, evidence, filename);
+    parseCheckDocument(contents, paths.repoRoot, declaredIds, evidence, filename, expectedRevision);
   } catch {
     add(
       "CHECK_PAYLOAD_INVALID",
@@ -1271,6 +1539,7 @@ function isTaskRecordShape(value: Record<string, unknown>): boolean {
     && isStringArray(value.risk.reasons)
     && ["standard", "tdd"].includes(String(value.qualityMode))
     && ["single-agent", "delegated"].includes(String(value.executionMode))
+    && isNonNegativeSafeInteger(value.verificationRevision)
     && Array.isArray(value.requirements)
     && value.requirements.every(isRequirement)
     && Array.isArray(value.acceptanceCriteria)
@@ -1313,9 +1582,12 @@ function isTaskStatus(value: unknown): value is TaskStatus {
   return typeof value === "string" && ALL_STATUSES.has(value);
 }
 
-function isJournalEvent(value: unknown): value is Record<string, unknown> & { type: string } {
+function isJournalEvent(
+  value: unknown,
+  allowsLegacyHistory = false,
+): value is Record<string, unknown> & { type: string } {
   if (!isRecord(value)
-    || value.schemaVersion !== SCHEMA_VERSION
+    || !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)
     || !isIsoTimestamp(value.timestamp)
     || !isNonemptyString(value.actor)
     || typeof value.type !== "string") {
@@ -1344,6 +1616,31 @@ function isJournalEvent(value: unknown): value is Record<string, unknown> & { ty
       && /^[a-f0-9]{64}$/u.test(String(value.fingerprint))
       && isMutationTargetSummary(value.expected)
       && isMutationCompletion(value.completion, value.operationId, value.mutationKind);
+  }
+  if (value.type === "rework_intent") {
+    return value.schemaVersion === SCHEMA_VERSION
+      && hasOnlyKeys(value, [
+        "schemaVersion", "type", "operationId", "timestamp", "actor", "reason", "sourceVerificationRevision", "snapshot",
+      ])
+      && isNonemptyString(value.operationId)
+      && isNonemptyString(value.reason)
+      && isNonNegativeSafeInteger(value.sourceVerificationRevision)
+      && isCheckHistorySnapshot(value.snapshot)
+      && value.snapshot.verificationRevision === value.sourceVerificationRevision
+      && value.snapshot.operationId === value.operationId
+      && value.snapshot.reworkReason === value.reason;
+  }
+  if (value.type === "reworked") {
+    return value.schemaVersion === SCHEMA_VERSION
+      && hasOnlyKeys(value, [
+        "schemaVersion", "type", "operationId", "timestamp", "actor", "reason", "sourceVerificationRevision", "verificationRevision", "status",
+      ])
+      && isNonemptyString(value.operationId)
+      && isNonemptyString(value.reason)
+      && isNonNegativeSafeInteger(value.sourceVerificationRevision)
+      && isNonNegativeSafeInteger(value.verificationRevision)
+      && value.verificationRevision === value.sourceVerificationRevision + 1
+      && value.status === "in_progress";
   }
   if (value.type === "continued") {
     return hasOnlyKeys(value, [
@@ -1414,6 +1711,72 @@ function isMutationCompletionEvent(value: Record<string, unknown>): boolean {
     || TASK_MUTATION_KINDS.has(value.type));
 }
 
+function matchesReworkCompletion(intent: Record<string, unknown>, completion: Record<string, unknown>): boolean {
+  return intent.type === "rework_intent"
+    && completion.type === "reworked"
+    && completion.operationId === intent.operationId
+    && completion.timestamp === intent.timestamp
+    && completion.actor === intent.actor
+    && completion.reason === intent.reason
+    && completion.sourceVerificationRevision === intent.sourceVerificationRevision
+    && typeof intent.sourceVerificationRevision === "number"
+    && completion.verificationRevision === intent.sourceVerificationRevision + 1
+    && completion.status === "in_progress";
+}
+
+function isCheckHistorySnapshot(value: unknown): value is CheckHistorySnapshot {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "schemaVersion",
+      "taskId",
+      "verificationRevision",
+      "archivedAt",
+      "reworkReason",
+      "operationId",
+      "rows",
+    ])
+    || value.schemaVersion !== SCHEMA_VERSION
+    || !isNonemptyString(value.taskId)
+    || !isNonNegativeSafeInteger(value.verificationRevision)
+    || !isIsoTimestamp(value.archivedAt)
+    || !isNonemptyString(value.reworkReason)
+    || !isNonemptyString(value.operationId)
+    || !Array.isArray(value.rows)) {
+    return false;
+  }
+  const verificationRevision = value.verificationRevision;
+  return value.rows.every((row) => isHistoricalCheckRow(row, verificationRevision));
+}
+
+function isHistoricalCheckRow(value: unknown, verificationRevision: number): value is CheckRow {
+  return isRecord(value)
+    && hasOnlyKeys(value, [
+      "schemaVersion",
+      "verificationRevision",
+      "requirementId",
+      "planItem",
+      "paths",
+      "evidenceIds",
+      "result",
+      "summary",
+      "checkedAt",
+    ])
+    && value.schemaVersion === SCHEMA_VERSION
+    && value.verificationRevision === verificationRevision
+    && isNonemptyString(value.requirementId)
+    && isNonemptyString(value.planItem)
+    && Array.isArray(value.paths)
+    && value.paths.length > 0
+    && value.paths.every((path) => typeof path === "string" && normalizeRepositoryPath(path) === path)
+    && new Set(value.paths).size === value.paths.length
+    && Array.isArray(value.evidenceIds)
+    && value.evidenceIds.every(isNonemptyString)
+    && new Set(value.evidenceIds).size === value.evidenceIds.length
+    && (value.result === "pass" || value.result === "fail" || value.result === "uncovered")
+    && isNonemptyString(value.summary)
+    && isIsoTimestamp(value.checkedAt);
+}
+
 function isExpectedPendingMutationRecovery(
   intent: Record<string, unknown>,
   recovery: PendingMutationRecovery | undefined,
@@ -1475,7 +1838,7 @@ function matchesMutationCompletion(intent: Record<string, unknown>, completion: 
 }
 
 function isManagedMutationTarget(path: string): boolean {
-  return /^\.vinea\/tasks\/(?:active|archive)\/t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*\/(?:task\.json|brief\.md|plan\.md|context\.jsonl|evidence\.jsonl|check\.md)$/u.test(path)
+  return /^\.vinea\/tasks\/(?:active|archive)\/t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*\/(?:task\.json|brief\.md|plan\.md|context\.jsonl|evidence\.jsonl|check\.md|check-history\.jsonl)$/u.test(path)
     || path === ".vinea/specs/index.md"
     || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(path);
 }
@@ -1494,6 +1857,11 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: string[]): boolean
 
 function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function isSupportedHistorySchema(value: unknown, allowsLegacyHistory: boolean): boolean {
+  return value === SCHEMA_VERSION
+    || (allowsLegacyHistory && value === LEGACY_SCHEMA_VERSION);
 }
 
 function isSessionBindingShape(value: Record<string, unknown>): boolean {

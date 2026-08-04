@@ -1,6 +1,7 @@
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { SchemaError } from "./errors.js";
 import { readJson, writeJsonAtomic } from "./json.js";
+import { readSchemaMigrationState } from "./migration-state.js";
 import { assertNoSymlink, ensureDirectory, type VineaPaths } from "./paths.js";
 import { assertSupportedSchema } from "./schema.js";
 import { SCHEMA_VERSION, type VineaConfig } from "./types.js";
@@ -20,6 +21,12 @@ const RUNTIME_IGNORE = ".runtime/\n";
 export async function readConfig(paths: VineaPaths): Promise<VineaConfig> {
   const config = await readJson<unknown>(paths.config, paths.repoRoot);
   assertSupportedSchema(config, paths.config);
+  const migration = await readSchemaMigrationState(paths);
+  if (migration?.phase === "intent") {
+    throw new SchemaError(
+      `Schema migration ${migration.operationId} is incomplete. Run \`vinea migrate\` to resume before modifying the workspace.`,
+    );
+  }
   return config;
 }
 

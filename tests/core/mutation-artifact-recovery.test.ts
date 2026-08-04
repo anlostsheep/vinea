@@ -17,6 +17,7 @@ import {
   setTaskBrief,
   setTaskPlan,
 } from "../../src/core/workflow.js";
+import { SCHEMA_VERSION } from "../../src/core/types.js";
 import { createTempRepo } from "../helpers/fixture.js";
 
 const faults = vi.hoisted(() => ({
@@ -107,7 +108,7 @@ test("matching mutation recovery refuses duplicate creation and illegal replay w
 
   const journalPath = join(task.directory, "journal.md");
   await appendJsonl(journalPath, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "created",
     timestamp: "2026-07-31T09:05:01.000Z",
     actor: "cli",
@@ -115,7 +116,7 @@ test("matching mutation recovery refuses duplicate creation and illegal replay w
     status: "planning",
   }, paths.repoRoot);
   await appendJsonl(journalPath, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "transition_intent",
     operationId: "op-illegal-replay",
     timestamp: "2026-07-31T09:05:02.000Z",
@@ -125,7 +126,7 @@ test("matching mutation recovery refuses duplicate creation and illegal replay w
     newStatus: "checking",
   }, paths.repoRoot);
   await appendJsonl(journalPath, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "continued",
     timestamp: "2026-07-31T09:05:03.000Z",
     actor: "codex",
@@ -317,14 +318,14 @@ test("context and brief recovery reject forged but otherwise valid spec targets"
     actor: "codex",
   };
   await appendJsonl(join(contextTask.directory, "journal.md"), {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "mutation_intent",
     operationId: "op-forged-context-target",
     timestamp: contextTimestamp,
     actor: "codex",
     mutationKind: "context_added",
     fingerprint: mutationFingerprint({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "context_added",
       actor: "codex",
       path: contextInput.path,
@@ -336,7 +337,7 @@ test("context and brief recovery reject forged but otherwise valid spec targets"
       files: [{ path: ".vinea/specs/index.md", sha256: indexSha256 }],
     },
     completion: {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "context_added",
       mutationKind: "context_added",
       timestamp: contextTimestamp,
@@ -360,14 +361,14 @@ test("context and brief recovery reject forged but otherwise valid spec targets"
   const briefTimestamp = "2026-07-31T09:32:00.000Z";
   await writeFile(join(paths.repoRoot, briefSource), briefContents, "utf8");
   await appendJsonl(join(briefTask.directory, "journal.md"), {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "mutation_intent",
     operationId: "op-forged-brief-target",
     timestamp: briefTimestamp,
     actor: "codex",
     mutationKind: "brief_set",
     fingerprint: mutationFingerprint({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "brief_set",
       actor: "codex",
       artifact: "brief.md",
@@ -378,7 +379,7 @@ test("context and brief recovery reject forged but otherwise valid spec targets"
       files: [{ path: ".vinea/specs/index.md", sha256: indexSha256 }],
     },
     completion: {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "brief_set",
       mutationKind: "brief_set",
       timestamp: briefTimestamp,

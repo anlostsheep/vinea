@@ -15,13 +15,15 @@ import {
   type TaskLocation,
 } from "./task-store.js";
 import {
+  LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
   type CheckRow,
   type EvidenceRecord,
 } from "./types.js";
 
 type Clock = () => Date;
-const CHECK_PREFIX = "<!-- vinea-checks:v1:";
+const CHECK_PREFIX = "<!-- vinea-checks:v2:";
+const LEGACY_CHECK_PREFIX = "<!-- vinea-checks:v1:";
 const CHECK_SUFFIX = " -->";
 const MAX_TEXT_BYTES = 4000;
 const MAX_ID_BYTES = 200;
@@ -52,6 +54,15 @@ export interface CheckSummary {
 interface CheckPayload {
   schemaVersion: typeof SCHEMA_VERSION;
   rows: CheckRow[];
+}
+
+interface LegacyCheckRow extends Omit<CheckRow, "schemaVersion" | "verificationRevision"> {
+  schemaVersion: typeof LEGACY_SCHEMA_VERSION;
+}
+
+interface LegacyCheckPayload {
+  schemaVersion: typeof LEGACY_SCHEMA_VERSION;
+  rows: LegacyCheckRow[];
 }
 
 export async function upsertCheck(
@@ -87,11 +98,12 @@ async function upsertCheckLocked(
   const evidenceIds = uniqueStrings(
     input.evidenceIds.map((id) => boundedNonempty(id, "Evidence ID", MAX_ID_BYTES)),
   );
-  const knownEvidenceIds = new Set(evidence.map(({ id }) => id));
-  const missingEvidence = evidenceIds.find((id) => !knownEvidenceIds.has(id));
+  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
+  const missingEvidence = evidenceIds.find((id) => !evidenceById.has(id));
   if (missingEvidence !== undefined) {
     throw new ValidationError(`Evidence ID is not present for ${taskId}: ${missingEvidence}`);
   }
+  assertEvidenceFromCurrentRevision(evidenceById, evidenceIds, location.task.verificationRevision, taskId);
   const result = validateResult(input.result);
   if (result === "pass" && evidenceIds.length === 0) {
     throw new ValidationError("A passing check row requires at least one evidence ID.");
@@ -107,6 +119,7 @@ async function upsertCheckLocked(
   const actor = boundedNonempty(input.actor, "Check actor", MAX_ID_BYTES);
   const request = {
     schemaVersion: SCHEMA_VERSION,
+    verificationRevision: location.task.verificationRevision,
     actor,
     requirementId,
     planItem,
@@ -130,13 +143,20 @@ async function upsertCheckLocked(
     if (!currentDeclaredIds.includes(requirementId)) {
       throw new ValidationError(`Requirement or acceptance ID is not declared for ${taskId}: ${requirementId}`);
     }
-    const currentEvidenceIds = new Set(currentEvidence.map(({ id }) => id));
-    const missingEvidence = evidenceIds.find((id) => !currentEvidenceIds.has(id));
+    const currentEvidenceById = new Map(currentEvidence.map((record) => [record.id, record]));
+    const missingEvidence = evidenceIds.find((id) => !currentEvidenceById.has(id));
     if (missingEvidence !== undefined) {
       throw new ValidationError(`Evidence ID is not present for ${taskId}: ${missingEvidence}`);
     }
+    assertEvidenceFromCurrentRevision(
+      currentEvidenceById,
+      evidenceIds,
+      current.task.verificationRevision,
+      taskId,
+    );
     const row: CheckRow = {
       schemaVersion: SCHEMA_VERSION,
+      verificationRevision: current.task.verificationRevision,
       requirementId,
       planItem,
       paths: checkedPaths,
@@ -222,7 +242,14 @@ async function readRows(
   } catch (error) {
     throw new SchemaError(`Unable to read check matrix ${filename}`, error);
   }
-  return parseCheckDocument(contents, paths.repoRoot, declaredRequirementIds(location), evidence, filename);
+  return parseCheckDocument(
+    contents,
+    paths.repoRoot,
+    declaredRequirementIds(location),
+    evidence,
+    filename,
+    location.task.verificationRevision,
+  );
 }
 
 export function parseCheckDocument(
@@ -231,6 +258,7 @@ export function parseCheckDocument(
   declaredIds: string[],
   evidence: EvidenceRecord[],
   filename: string,
+  expectedVerificationRevision?: number,
 ): CheckRow[] {
   if (contents === "") return [];
   const firstLineEnd = contents.indexOf("\n");
@@ -254,11 +282,125 @@ export function parseCheckDocument(
     || !Array.isArray(value.rows)) {
     throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
   }
-  const evidenceIds = new Set(evidence.map(({ id }) => id));
+  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
   const seen = new Set<string>();
   let previousDeclarationIndex = -1;
   const rows = value.rows.map((candidate, index) => {
     const row = validateStoredRow(candidate, repoRoot, filename, index + 1);
+    if (expectedVerificationRevision !== undefined && row.verificationRevision !== expectedVerificationRevision) {
+      throw new SchemaError(
+        `Check row ${row.requirementId} uses verification revision ${row.verificationRevision}, but current revision is ${expectedVerificationRevision} in ${filename}`,
+      );
+    }
+    const declarationIndex = declaredIds.indexOf(row.requirementId);
+    if (declarationIndex === -1) {
+      throw new SchemaError(`Check row references undeclared requirement ${row.requirementId} in ${filename}`);
+    }
+    if (declarationIndex <= previousDeclarationIndex) {
+      throw new SchemaError(`Check rows are not in declaration order in ${filename}`);
+    }
+    previousDeclarationIndex = declarationIndex;
+    if (seen.has(row.requirementId)) {
+      throw new SchemaError(`Duplicate check row for ${row.requirementId} in ${filename}`);
+    }
+    seen.add(row.requirementId);
+    const missingEvidence = row.evidenceIds.find((id) => !evidenceById.has(id));
+    if (missingEvidence !== undefined) {
+      throw new SchemaError(`Check row references absent evidence ${missingEvidence} in ${filename}`);
+    }
+    if (expectedVerificationRevision !== undefined) {
+      const staleEvidence = row.evidenceIds.find(
+        (id) => evidenceById.get(id)?.verificationRevision !== expectedVerificationRevision,
+      );
+      if (staleEvidence !== undefined) {
+        throw new SchemaError(
+          `Check row references evidence ${staleEvidence} outside current verification revision ${expectedVerificationRevision} in ${filename}`,
+        );
+      }
+    }
+    if (row.result === "pass" && row.evidenceIds.length === 0) {
+      throw new SchemaError(`Passing check row ${row.requirementId} has no evidence in ${filename}`);
+    }
+    return row;
+  });
+  if (contents !== renderCheckDocument(rows)) {
+    throw new SchemaError(`Check table does not match its authoritative payload in ${filename}`);
+  }
+  return rows;
+}
+
+function assertEvidenceFromCurrentRevision(
+  evidenceById: ReadonlyMap<string, EvidenceRecord>,
+  evidenceIds: string[],
+  verificationRevision: number,
+  taskId: string,
+): void {
+  const staleEvidence = evidenceIds.find(
+    (id) => evidenceById.get(id)?.verificationRevision !== verificationRevision,
+  );
+  if (staleEvidence !== undefined) {
+    throw new ValidationError(
+      `Evidence ID is not from the current verification revision ${verificationRevision} for ${taskId}: ${staleEvidence}`,
+    );
+  }
+}
+
+export function migrateLegacyCheckDocument(
+  contents: string,
+  repoRoot: string,
+  declaredIds: string[],
+  evidence: EvidenceRecord[],
+  filename: string,
+): string {
+  if (contents === "") return "";
+  const firstLineEnd = contents.indexOf("\n");
+  const firstLine = firstLineEnd === -1 ? contents : contents.slice(0, firstLineEnd);
+  if (firstLine.startsWith(CHECK_PREFIX)) {
+    return renderCheckDocument(parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename));
+  }
+  if (!firstLine.startsWith(LEGACY_CHECK_PREFIX) || !firstLine.endsWith(CHECK_SUFFIX)) {
+    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
+  }
+  const encoded = firstLine.slice(LEGACY_CHECK_PREFIX.length, -CHECK_SUFFIX.length);
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new SchemaError(`Invalid authoritative check payload encoding in ${filename}`);
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as unknown;
+  } catch (error) {
+    throw new SchemaError(`Invalid authoritative check payload in ${filename}`, error);
+  }
+  if (!isRecord(payload)
+    || Object.keys(payload).some((key) => key !== "schemaVersion" && key !== "rows")
+    || payload.schemaVersion !== LEGACY_SCHEMA_VERSION
+    || !Array.isArray(payload.rows)) {
+    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
+  }
+  const evidenceIds = new Set(evidence.map(({ id }) => id));
+  const seen = new Set<string>();
+  let previousDeclarationIndex = -1;
+  const rows = payload.rows.map((candidate, index) => {
+    if (!isRecord(candidate)
+      || Object.keys(candidate).some((key) => ![
+        "schemaVersion",
+        "requirementId",
+        "planItem",
+        "paths",
+        "evidenceIds",
+        "result",
+        "summary",
+        "checkedAt",
+      ].includes(key))
+      || candidate.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+      throw new SchemaError(`Invalid check row ${index + 1} in ${filename}`);
+    }
+    const row = validateStoredRow(
+      { ...candidate, schemaVersion: SCHEMA_VERSION, verificationRevision: 0 },
+      repoRoot,
+      filename,
+      index + 1,
+    );
     const declarationIndex = declaredIds.indexOf(row.requirementId);
     if (declarationIndex === -1) {
       throw new SchemaError(`Check row references undeclared requirement ${row.requirementId} in ${filename}`);
@@ -280,10 +422,10 @@ export function parseCheckDocument(
     }
     return row;
   });
-  if (contents !== renderCheckDocument(rows)) {
+  if (contents !== renderLegacyCheckDocument(rows)) {
     throw new SchemaError(`Check table does not match its authoritative payload in ${filename}`);
   }
-  return rows;
+  return renderCheckDocument(rows);
 }
 
 function validateStoredRow(
@@ -295,6 +437,7 @@ function validateStoredRow(
   if (!isRecord(value)) throw new SchemaError(`Invalid check row ${rowNumber} in ${filename}`);
   const fields = [
     "schemaVersion",
+    "verificationRevision",
     "requirementId",
     "planItem",
     "paths",
@@ -305,6 +448,9 @@ function validateStoredRow(
   ];
   if (Object.keys(value).some((key) => !fields.includes(key))
     || value.schemaVersion !== SCHEMA_VERSION
+    || typeof value.verificationRevision !== "number"
+    || !Number.isSafeInteger(value.verificationRevision)
+    || value.verificationRevision < 0
     || typeof value.requirementId !== "string"
     || typeof value.planItem !== "string"
     || !Array.isArray(value.paths)
@@ -354,6 +500,7 @@ function validateStoredRow(
   }
   return {
     schemaVersion: SCHEMA_VERSION,
+    verificationRevision: value.verificationRevision,
     requirementId: value.requirementId,
     planItem: value.planItem,
     paths: uniqueStrings(normalizedPaths),
@@ -385,14 +532,20 @@ async function readEvidence(paths: VineaPaths, location: TaskLocation): Promise<
       throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`);
     }
     seen.add(value.id);
-    return value;
+    return {
+      ...value,
+      schemaVersion: SCHEMA_VERSION,
+      verificationRevision: (value as unknown as Record<string, unknown>).schemaVersion === LEGACY_SCHEMA_VERSION
+        ? 0
+        : value.verificationRevision,
+    };
   });
 }
 
 function isEvidenceRecord(value: unknown): value is EvidenceRecord {
   if (!isRecord(value)) return false;
   const fields = [
-    "schemaVersion", "id", "kind", "summary", "result", "recordedAt",
+    "schemaVersion", "verificationRevision", "id", "kind", "summary", "result", "recordedAt",
     "command", "exitCode", "actor",
   ];
   if (Object.keys(value).some((key) => !fields.includes(key))) return false;
@@ -400,6 +553,11 @@ function isEvidenceRecord(value: unknown): value is EvidenceRecord {
   const exitCodeValid = value.exitCode === undefined
     || (typeof value.exitCode === "number" && Number.isSafeInteger(value.exitCode) && value.exitCode >= 0);
   if (!exitCodeValid) return false;
+  const validRevision = value.schemaVersion === LEGACY_SCHEMA_VERSION
+    || (typeof value.verificationRevision === "number"
+      && Number.isSafeInteger(value.verificationRevision)
+      && value.verificationRevision >= 0);
+  if (!validRevision) return false;
   if (value.result === "pass" && value.exitCode !== undefined && value.exitCode !== 0) return false;
   if (value.result === "fail" && value.exitCode === 0) return false;
   if (value.kind === "tdd-red"
@@ -407,7 +565,7 @@ function isEvidenceRecord(value: unknown): value is EvidenceRecord {
     return false;
   }
   if (value.kind === "tdd-green" && (value.result !== "pass" || value.exitCode !== 0)) return false;
-  return value.schemaVersion === SCHEMA_VERSION
+  return (value.schemaVersion === LEGACY_SCHEMA_VERSION || value.schemaVersion === SCHEMA_VERSION)
     && typeof value.id === "string"
     && value.id.trim() !== ""
     && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind))
@@ -422,11 +580,40 @@ function isEvidenceRecord(value: unknown): value is EvidenceRecord {
     && (value.command === undefined || (typeof value.command === "string" && value.command.trim() !== ""));
 }
 
-function renderCheckDocument(rows: CheckRow[]): string {
+export function renderCheckDocument(rows: CheckRow[]): string {
   const payload: CheckPayload = { schemaVersion: SCHEMA_VERSION, rows };
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   const lines = [
     `${CHECK_PREFIX}${encoded}${CHECK_SUFFIX}`,
+    "",
+    "# Check matrix",
+    "",
+    "| Requirement/acceptance ID | Task item | Implementation/change paths | Test/verification evidence | Result | Summary |",
+    "| --- | --- | --- | --- | --- | --- |",
+    ...rows.map((row) => [
+      row.requirementId,
+      row.planItem,
+      row.paths.map((path) => `\`${path.replace(/`/g, "\\`")}\``).join("<br>"),
+      row.evidenceIds.map((id) => `\`${id.replace(/`/g, "\\`")}\``).join("<br>") || "none",
+      row.result,
+      row.summary,
+    ].map(escapeTableCell).join(" | ")).map((line) => `| ${line} |`),
+    "",
+  ];
+  return lines.join("\n");
+}
+
+function renderLegacyCheckDocument(rows: CheckRow[]): string {
+  const payload: LegacyCheckPayload = {
+    schemaVersion: LEGACY_SCHEMA_VERSION,
+    rows: rows.map(({ schemaVersion: _schemaVersion, verificationRevision: _verificationRevision, ...row }) => ({
+      schemaVersion: LEGACY_SCHEMA_VERSION,
+      ...row,
+    })),
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const lines = [
+    `${LEGACY_CHECK_PREFIX}${encoded}${CHECK_SUFFIX}`,
     "",
     "# Check matrix",
     "",

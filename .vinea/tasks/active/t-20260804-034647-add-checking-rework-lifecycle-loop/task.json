@@ -1,0 +1,74 @@
+{
+  "id": "t-20260804-034647-add-checking-rework-lifecycle-loop",
+  "title": "Add checking rework lifecycle loop",
+  "status": "checking",
+  "risk": {
+    "level": "medium",
+    "reasons": []
+  },
+  "qualityMode": "tdd",
+  "executionMode": "single-agent",
+  "commit": null,
+  "createdAt": "2026-08-04T03:46:47.345Z",
+  "updatedAt": "2026-08-04T05:51:53.488Z",
+  "schemaVersion": 2,
+  "verificationRevision": 0,
+  "requirements": [
+    {
+      "schemaVersion": 2,
+      "id": "R1",
+      "text": "Provide an explicit checking-to-in_progress rework operation with a required reason and current-cycle fail/uncovered precondition, without repurposing blocked.",
+      "createdAt": "2026-08-04T04:27:16.174Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R2",
+      "text": "Introduce schema v2 verification revisions so only current-cycle evidence and checks can satisfy coverage, TDD, and finish gates.",
+      "createdAt": "2026-08-04T04:27:16.203Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R3",
+      "text": "Preserve current checks separately from immutable check-history snapshots and make rework crash-recoverable and idempotent.",
+      "createdAt": "2026-08-04T04:27:16.232Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R4",
+      "text": "Provide explicit idempotent v1-to-v2 migration while preserving immutable v1 history and making old readers fail closed on v2.",
+      "createdAt": "2026-08-04T04:27:16.265Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R5",
+      "text": "Expose revision-aware rework, history, migration, orient, and agent-routing behavior through the public CLI and packaged skills.",
+      "createdAt": "2026-08-04T04:27:16.297Z"
+    }
+  ],
+  "acceptanceCriteria": [
+    {
+      "schemaVersion": 2,
+      "id": "AC1",
+      "text": "Two consecutive checking-to-rework-to-in_progress loops succeed, and stale prior-revision proof cannot finish the current revision.",
+      "createdAt": "2026-08-04T04:27:16.325Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "AC2",
+      "text": "Migration is explicit and idempotent, preserves v1 immutable history byte-for-byte, and validates mixed-version history as revision 0.",
+      "createdAt": "2026-08-04T04:27:16.354Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "AC3",
+      "text": "Failure injection at every rework write boundary recovers with one logical snapshot, one revision increment, and no lost rows.",
+      "createdAt": "2026-08-04T04:27:16.382Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "AC4",
+      "text": "Focused and full tests, type checks, build, plugin packaging, plugin checks, doctor, and validator pass.",
+      "createdAt": "2026-08-04T04:27:16.410Z"
+    }
+  ]
+}

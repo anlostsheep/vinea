@@ -20,7 +20,7 @@ import { resolveVineaPaths } from "../../src/core/paths.js";
 import { validateWorkspace } from "../../src/core/validate.js";
 import { addRequirement, createTask } from "../../src/core/workflow.js";
 import { createTempRepo, readJson, runCli, writeJson } from "../helpers/fixture.js";
-import type { TaskRecord } from "../../src/core/types.js";
+import { LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, type TaskRecord } from "../../src/core/types.js";
 
 const managedPathRace = vi.hoisted(() => ({
   target: "",
@@ -66,6 +66,27 @@ test("validate emits one deterministic JSON object and accepts a missing local r
   expect(result.stderr).toBe("");
   expect(result.stdout.trim().split("\n")).toHaveLength(1);
   expect(JSON.parse(result.stdout)).toEqual({ issues: [] });
+});
+
+test("validate requires the immutable check-history artifact for every v2 task", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const created = await createTask(paths, {
+    title: "Require check history",
+    risk: { level: "low", reasons: [] },
+    qualityMode: "standard",
+    executionMode: "single-agent",
+    confirmation: "user",
+  });
+  await rm(join(created.directory, "check-history.jsonl"));
+
+  expect((await validateWorkspace(paths)).issues).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      code: "TASK_ARTIFACT_MISSING",
+      path: `.vinea/tasks/active/${created.task.id}/check-history.jsonl`,
+    }),
+  ]));
 });
 
 test("validate rejects an intermediate managed tasks symlink without scanning its external tree", async () => {
@@ -300,20 +321,21 @@ test("validate aggregates malformed shared and runtime state in stable order wit
   );
   const taskPath = join(created.directory, "task.json");
   const task = await readJson<TaskRecord>(taskPath);
-  await writeJson(taskPath, { ...task, schemaVersion: 2, status: "mystery" });
+  await writeJson(taskPath, { ...task, status: "mystery" });
   await rm(join(created.directory, "plan.md"));
+  await writeFile(join(cwd, "README.md"), "validation context fixture\n", "utf8");
   await writeFile(
     join(created.directory, "context.jsonl"),
     [
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         path: "README.md",
         purpose: "first",
         estimatedBytes: 10,
         addedAt: "2026-07-31T08:09:10.000Z",
       }),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         path: "README.md",
         purpose: "duplicate",
         estimatedBytes: 10,
@@ -324,18 +346,18 @@ test("validate aggregates malformed shared and runtime state in stable order wit
     "utf8",
   );
   await writeJson(paths.config, {
-    schemaVersion: 2,
+    schemaVersion: SCHEMA_VERSION + 1,
     riskRules: { medium: [], high: [] },
     context: { maxFiles: 1, maxEstimatedBytes: 5 },
   });
   await writeFile(join(paths.vineaRoot, "inline-audit.jsonl"), "{broken json}\n", "utf8");
   await writeJson(join(paths.sessions, "codex-sid-7374616c65.json"), {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     taskId: "t-20260730-010203-missing-task",
     boundAt: "2026-07-31T08:00:00.000Z",
   });
   await writeJson(join(paths.sessions, "codex-raw-session.json"), {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     taskId: created.task.id,
     boundAt: "2026-07-31T08:00:00.000Z",
   });
@@ -359,7 +381,7 @@ test("validate aggregates malformed shared and runtime state in stable order wit
   expect(output.issues.map(({ code }) => code)).toEqual(expect.arrayContaining([
     "CONFIG_SCHEMA_UNSUPPORTED",
     "INLINE_AUDIT_JSONL_INVALID",
-    "TASK_SCHEMA_UNSUPPORTED",
+    "TASK_RECORD_INVALID",
     "TASK_STATUS_INVALID",
     "TASK_ARTIFACT_MISSING",
     "CONTEXT_DUPLICATE",
@@ -389,7 +411,7 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
   );
   const task = await readJson<TaskRecord>(join(primary.directory, "task.json"));
   const requirement = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     id: "R1",
     text: "Validate versioned artifacts",
     createdAt: "2026-07-31T08:09:10.000Z",
@@ -399,7 +421,8 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
     requirements: [requirement],
   });
   const evidence = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
+    verificationRevision: 0,
     id: "evidence-1",
     kind: "command",
     summary: "A valid command result",
@@ -412,7 +435,7 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
     join(primary.directory, "evidence.jsonl"),
     [
       JSON.stringify(evidence),
-      JSON.stringify({ ...evidence, id: "future-evidence", schemaVersion: 2 }),
+      JSON.stringify({ ...evidence, id: "future-evidence", schemaVersion: SCHEMA_VERSION + 1 }),
       JSON.stringify({ ...evidence, summary: "Duplicate evidence ID" }),
       "",
     ].join("\n"),
@@ -420,7 +443,8 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
   );
   await writeFile(join(primary.directory, "journal.md"), "", "utf8");
   const checkRow = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
+    verificationRevision: 0,
     requirementId: "R1",
     planItem: "Validate artifacts",
     paths: ["README.md"],
@@ -429,11 +453,11 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
     summary: "Backed by command evidence",
     checkedAt: "2026-07-31T08:09:10.000Z",
   };
-  const checkPayload = Buffer.from(JSON.stringify({ schemaVersion: 1, rows: [checkRow, checkRow] }), "utf8")
+  const checkPayload = Buffer.from(JSON.stringify({ schemaVersion: SCHEMA_VERSION, rows: [checkRow, checkRow] }), "utf8")
     .toString("base64url");
   await writeFile(
     join(primary.directory, "check.md"),
-    `<!-- vinea-checks:v1:${checkPayload} -->\n`,
+    `<!-- vinea-checks:v2:${checkPayload} -->\n`,
     "utf8",
   );
   const secondary = await createTask(
@@ -450,7 +474,7 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
   await writeFile(
     join(secondary.directory, "journal.md"),
     `${JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: SCHEMA_VERSION + 1,
       type: "created",
       timestamp: "2026-07-31T08:09:11.000Z",
       actor: "cli",
@@ -473,7 +497,7 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
   await writeFile(
     join(missingCreation.directory, "journal.md"),
     `${JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "continued",
       timestamp: "2026-07-31T08:09:12.000Z",
       actor: "cli",
@@ -502,6 +526,36 @@ test("validate rejects invalid versioned evidence, journal, and authoritative ch
   expect(await snapshotFiles(paths.vineaRoot)).toEqual(before);
 });
 
+test("validate rejects evidence that claims a verification revision newer than its task", async () => {
+  const cwd = await createTempRepo();
+  const paths = resolveVineaPaths(cwd);
+  await initializeWorkspace(paths);
+  const task = await createTask(paths, {
+    title: "Reject future evidence revision",
+    risk: { level: "low", reasons: [] },
+    qualityMode: "standard",
+    executionMode: "single-agent",
+    confirmation: "user",
+  }, () => new Date("2026-08-04T01:05:00.000Z"));
+  await writeFile(join(task.directory, "evidence.jsonl"), `${JSON.stringify({
+    schemaVersion: SCHEMA_VERSION,
+    verificationRevision: 1,
+    id: "future-evidence",
+    kind: "command",
+    summary: "This proof cannot come from the future.",
+    result: "pass",
+    recordedAt: "2026-08-04T01:05:01.000Z",
+    command: "npm test -- future",
+    exitCode: 0,
+    actor: "cli",
+  })}\n`, "utf8");
+
+  const report = await validateWorkspace(paths);
+  expect(report.issues).toEqual(expect.arrayContaining([
+    expect.objectContaining({ code: "EVIDENCE_REVISION_INVALID" }),
+  ]));
+});
+
 test("validate replays journal state before accepting task lifecycle artifacts", async () => {
   const cwd = await createTempRepo();
   const paths = resolveVineaPaths(cwd);
@@ -519,7 +573,7 @@ test("validate replays journal state before accepting task lifecycle artifacts",
     () => new Date(`2026-07-31T08:10:0${offset}.000Z`),
   );
   const creation = (timestamp: string) => ({
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "created",
     timestamp,
     actor: "cli",
@@ -527,7 +581,7 @@ test("validate replays journal state before accepting task lifecycle artifacts",
     status: "planning",
   });
   const transition = (operationId: string, oldStatus: string, newStatus: string, timestamp: string) => ({
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "transition_intent",
     operationId,
     timestamp,
@@ -542,7 +596,7 @@ test("validate replays journal state before accepting task lifecycle artifacts",
     join(continuedBeforeCreation.directory, "journal.md"),
     [
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         type: "continued",
         timestamp: createdAt,
         actor: "cli",
@@ -591,7 +645,7 @@ test("validate replays journal state before accepting task lifecycle artifacts",
       JSON.stringify(creation(createdAt)),
       JSON.stringify(transition("op-mismatch", "planning", "ready", "2026-07-31T08:10:05.000Z")),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         type: "continued",
         timestamp: "2026-07-31T08:10:06.000Z",
         actor: "cli",
@@ -640,7 +694,7 @@ test("validate preserves the old-status window only for a final transition inten
     join(task.directory, "journal.md"),
     [
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         type: "created",
         timestamp: "2026-07-31T08:11:00.000Z",
         actor: "cli",
@@ -648,7 +702,7 @@ test("validate preserves the old-status window only for a final transition inten
         status: "planning",
       }),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         type: "transition_intent",
         operationId: "op-pending",
         timestamp: "2026-07-31T08:11:01.000Z",
@@ -691,7 +745,7 @@ test("validate distinguishes uncommitted mutation intents from committed events 
     files: [{ path: relative(cwd, taskPath).split("\\").join("/"), sha256: "0".repeat(64) }],
   };
   const completion = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "requirement_added",
     mutationKind: "requirement_added",
     timestamp,
@@ -704,7 +758,7 @@ test("validate distinguishes uncommitted mutation intents from committed events 
     [
       original.trimEnd(),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         type: "mutation_intent",
         operationId: "op-completed-target-missing",
         timestamp,
@@ -716,7 +770,7 @@ test("validate distinguishes uncommitted mutation intents from committed events 
       }),
       JSON.stringify({ ...completion, operationId: "op-completed-target-missing" }),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         type: "mutation_intent",
         operationId: "op-uncommitted",
         timestamp,
@@ -766,7 +820,7 @@ test("validate rejects current orphan mutation completions while preserving the 
   await writeFile(currentJournal, [
     (await readFile(currentJournal, "utf8")).trimEnd(),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "requirement_added",
       mutationKind: "requirement_added",
       mutationProtocolVersion: 1,
@@ -776,7 +830,7 @@ test("validate rejects current orphan mutation completions while preserving the 
       requirementId: "R1",
     }),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "learning_accepted",
       mutationKind: "learning_accepted",
       mutationProtocolVersion: 1,
@@ -787,7 +841,7 @@ test("validate rejects current orphan mutation completions while preserving the 
       confirmedBy: "user",
     }),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "check_recorded",
       mutationKind: "check_recorded",
       mutationProtocolVersion: 1,
@@ -821,7 +875,7 @@ test("validate rejects current orphan mutation completions while preserving the 
   await writeJson(join(legacy.directory, "task.json"), {
     ...legacyTask,
     requirements: [{
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R1",
       text: "Recorded before the mutation-intent protocol.",
       createdAt: timestamp,
@@ -832,7 +886,7 @@ test("validate rejects current orphan mutation completions while preserving the 
   await writeFile(legacyJournal, [
     (await readFile(legacyJournal, "utf8")).trimEnd(),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: LEGACY_SCHEMA_VERSION,
       type: "requirement_added",
       operationId: "op-legacy-requirement",
       timestamp,
@@ -861,7 +915,7 @@ test("validate detects a completed task mutation whose identified value was chan
   const originalRequirement = {
     createdAt: "2026-07-31T20:11:01.000Z",
     id: "R1",
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     text: "Original durable requirement",
   };
   const stored = await readJson<TaskRecord>(join(created.directory, "task.json"));
@@ -872,7 +926,7 @@ test("validate detects a completed task mutation whose identified value was chan
   const taskPath = join(created.directory, "task.json");
   const timestamp = "2026-07-31T20:11:01.000Z";
   const completion = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "requirement_added",
     mutationKind: "requirement_added",
     timestamp,
@@ -884,7 +938,7 @@ test("validate detects a completed task mutation whose identified value was chan
   await writeFile(journalPath, [
     journal.trimEnd(),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "mutation_intent",
       operationId: "op-altered-requirement",
       timestamp,

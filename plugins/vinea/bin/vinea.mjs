@@ -74,7 +74,8 @@ function resolveVineaPaths(repoRoot) {
     activeTasks: inside(tasks, "active"),
     archivedTasks: inside(tasks, "archive"),
     runtime,
-    sessions: inside(runtime, "sessions")
+    sessions: inside(runtime, "sessions"),
+    migrationState: inside(runtime, "schema-migration.json")
   };
 }
 function assertInside(root, candidate) {
@@ -141,8 +142,8 @@ async function readJson(filename, repoRoot) {
   await assertNoSymlink(repoRoot, filename);
   let content;
   try {
-    const { readFile: readFile10 } = await import("node:fs/promises");
-    content = await readFile10(filename, "utf8");
+    const { readFile: readFile11 } = await import("node:fs/promises");
+    content = await readFile11(filename, "utf8");
   } catch (error) {
     if (error instanceof SchemaError) throw error;
     throw new SchemaError(`Unable to read JSON file ${filename}`, error);
@@ -200,24 +201,97 @@ var init_json = __esm({
 });
 
 // src/core/types.ts
-var SCHEMA_VERSION;
+var LEGACY_SCHEMA_VERSION, SCHEMA_VERSION;
 var init_types = __esm({
   "src/core/types.ts"() {
     "use strict";
-    SCHEMA_VERSION = 1;
+    LEGACY_SCHEMA_VERSION = 1;
+    SCHEMA_VERSION = 2;
+  }
+});
+
+// src/core/migration-state.ts
+import { lstat as lstat3 } from "node:fs/promises";
+async function readSchemaMigrationState(paths) {
+  await assertNoSymlink(paths.repoRoot, paths.runtime);
+  try {
+    const entry = await lstat3(paths.migrationState);
+    if (!entry.isFile() || entry.isSymbolicLink()) {
+      throw new SchemaError(`Migration state must be a regular file: ${paths.migrationState}`);
+    }
+  } catch (error) {
+    if (isMissing3(error)) return null;
+    throw error;
+  }
+  const value = await readJson(paths.migrationState, paths.repoRoot);
+  if (!isSchemaMigrationState(value)) {
+    throw new SchemaError(`Invalid schema migration state in ${paths.migrationState}.`);
+  }
+  return value;
+}
+async function writeSchemaMigrationState(paths, state) {
+  await ensureDirectory(paths.repoRoot, paths.runtime);
+  await writeJsonAtomic(paths.migrationState, state, paths.repoRoot);
+}
+function isSchemaMigrationState(value) {
+  if (!isRecord(value) || Object.keys(value).some((key) => ![
+    "schemaVersion",
+    "type",
+    "operationId",
+    "fromSchemaVersion",
+    "toSchemaVersion",
+    "phase",
+    "taskIds",
+    "migratedTaskIds",
+    "startedAt",
+    "completedAt"
+  ].includes(key)) || value.schemaVersion !== SCHEMA_VERSION || value.type !== "schema_migration" || typeof value.operationId !== "string" || value.operationId.trim() === "" || value.fromSchemaVersion !== LEGACY_SCHEMA_VERSION || value.toSchemaVersion !== SCHEMA_VERSION || value.phase !== "intent" && value.phase !== "completed" || !isUniqueTaskIds(value.taskIds) || !isUniqueTaskIds(value.migratedTaskIds) || !isIsoTimestamp(value.startedAt)) {
+    return false;
+  }
+  if (value.phase === "completed") return isIsoTimestamp(value.completedAt);
+  return value.completedAt === void 0;
+}
+function isUniqueTaskIds(value) {
+  return Array.isArray(value) && value.every((taskId) => typeof taskId === "string" && TASK_ID_PATTERN.test(taskId)) && new Set(value).size === value.length;
+}
+function isIsoTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const timestamp = new Date(value);
+  return !Number.isNaN(timestamp.valueOf()) && timestamp.toISOString() === value;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isMissing3(error) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+var TASK_ID_PATTERN;
+var init_migration_state = __esm({
+  "src/core/migration-state.ts"() {
+    "use strict";
+    init_json();
+    init_errors();
+    init_paths();
+    init_types();
+    TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
   }
 });
 
 // src/core/schema.ts
-import { lstat as lstat3 } from "node:fs/promises";
+import { lstat as lstat4 } from "node:fs/promises";
 function assertSupportedSchema(value, filename) {
-  if (!isRecord(value)) {
+  if (!isRecord2(value)) {
     throw new SchemaError(`Invalid Vinea config in ${filename}: expected an object.`);
   }
   if (value.schemaVersion !== SCHEMA_VERSION) {
     if (typeof value.schemaVersion === "number" && value.schemaVersion > SCHEMA_VERSION) {
       throw new SchemaError(
         `Vinea schema version ${value.schemaVersion} in ${filename} is newer than this CLI. Upgrade Vinea before modifying the workspace; do not recreate or overwrite it.`
+      );
+    }
+    if (value.schemaVersion === 1) {
+      throw new SchemaError(
+        `Vinea schema version 1 in ${filename} requires explicit migration. Run \`vinea migrate\` before modifying the workspace.`
       );
     }
     throw new SchemaError(
@@ -227,7 +301,7 @@ function assertSupportedSchema(value, filename) {
   if (!isStringList(value.riskRules, "medium") || !isStringList(value.riskRules, "high")) {
     throw new SchemaError(`Invalid Vinea config in ${filename}: riskRules.medium and riskRules.high must be string arrays.`);
   }
-  if (!isRecord(value.context) || !isNonNegativeInteger(value.context.maxFiles) || !isNonNegativeInteger(value.context.maxEstimatedBytes)) {
+  if (!isRecord2(value.context) || !isNonNegativeInteger(value.context.maxFiles) || !isNonNegativeInteger(value.context.maxEstimatedBytes)) {
     throw new SchemaError(`Invalid Vinea config in ${filename}: context limits must be non-negative integers.`);
   }
 }
@@ -256,11 +330,11 @@ async function inspectWorkspace(paths) {
   let migrationGuidance = null;
   try {
     const value = await readJson(paths.config, paths.repoRoot);
-    if (isRecord(value) && typeof value.schemaVersion === "number") configSchemaVersion = value.schemaVersion;
+    if (isRecord2(value) && typeof value.schemaVersion === "number") configSchemaVersion = value.schemaVersion;
     assertSupportedSchema(value, paths.config);
     supportedSchema = true;
   } catch (error) {
-    migrationGuidance = error instanceof SchemaError && configSchemaVersion !== null && configSchemaVersion > SCHEMA_VERSION ? "This workspace uses a newer schema. Upgrade Vinea before modifying it." : "Repair or restore config.json with a supported Vinea schema before using lifecycle commands.";
+    migrationGuidance = error instanceof SchemaError && configSchemaVersion !== null && configSchemaVersion > SCHEMA_VERSION ? "This workspace uses a newer schema. Upgrade Vinea before modifying it." : configSchemaVersion === 1 ? "This workspace requires explicit migration. Run `vinea migrate` before using lifecycle commands." : "Repair or restore config.json with a supported Vinea schema before using lifecycle commands.";
   }
   return {
     initialized,
@@ -274,16 +348,16 @@ async function inspectWorkspace(paths) {
 async function isDirectory(path, repoRoot) {
   try {
     await assertNoSymlink(repoRoot, path);
-    return (await lstat3(path)).isDirectory();
+    return (await lstat4(path)).isDirectory();
   } catch {
     return false;
   }
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isStringList(value, property) {
-  return isRecord(value) && Array.isArray(value[property]) && value[property].every((item) => typeof item === "string");
+  return isRecord2(value) && Array.isArray(value[property]) && value[property].every((item) => typeof item === "string");
 }
 function isNonNegativeInteger(value) {
   return typeof value === "number" && Number.isInteger(value) && value >= 0;
@@ -299,10 +373,16 @@ var init_schema = __esm({
 });
 
 // src/core/config.ts
-import { lstat as lstat4, readFile, writeFile as writeFile2 } from "node:fs/promises";
+import { lstat as lstat5, readFile, writeFile as writeFile2 } from "node:fs/promises";
 async function readConfig(paths) {
   const config = await readJson(paths.config, paths.repoRoot);
   assertSupportedSchema(config, paths.config);
+  const migration = await readSchemaMigrationState(paths);
+  if (migration?.phase === "intent") {
+    throw new SchemaError(
+      `Schema migration ${migration.operationId} is incomplete. Run \`vinea migrate\` to resume before modifying the workspace.`
+    );
+  }
   return config;
 }
 async function initializeWorkspace(paths) {
@@ -345,14 +425,14 @@ async function ensureFile(filename, contents, repoRoot) {
 }
 async function exists(filename) {
   try {
-    await lstat4(filename);
+    await lstat5(filename);
     return true;
   } catch (error) {
-    if (isMissing3(error)) return false;
+    if (isMissing4(error)) return false;
     throw error;
   }
 }
-function isMissing3(error) {
+function isMissing4(error) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 var DEFAULT_CONFIG, SPEC_INDEX, RUNTIME_IGNORE;
@@ -361,6 +441,7 @@ var init_config = __esm({
     "use strict";
     init_errors();
     init_json();
+    init_migration_state();
     init_paths();
     init_schema();
     init_types();
@@ -402,6 +483,7 @@ async function recordEvidenceLocked(paths, taskId, input, now) {
     timestamp: now().toISOString(),
     fingerprint: mutationFingerprint({
       schemaVersion: SCHEMA_VERSION,
+      verificationRevision: location.task.verificationRevision,
       type: "evidence_recorded",
       actor,
       kind,
@@ -416,6 +498,7 @@ async function recordEvidenceLocked(paths, taskId, input, now) {
     const evidenceId2 = pending?.expected.identity.evidenceId ?? randomUUID2();
     const record2 = {
       schemaVersion: SCHEMA_VERSION,
+      verificationRevision: current.task.verificationRevision,
       id: evidenceId2,
       kind,
       summary,
@@ -427,14 +510,15 @@ async function recordEvidenceLocked(paths, taskId, input, now) {
     };
     validateEvidenceRecord(record2);
     const currentFilename = join3(current.directory, "evidence.jsonl");
-    const records = await readEvidenceRecords(paths.repoRoot, currentFilename);
+    const existing = await readEvidenceFile(paths.repoRoot, currentFilename, true);
+    const records = existing.records;
     if (records.some((candidate) => candidate.id === evidenceId2)) {
       if (recovering) {
         throw new SchemaError(`Pending evidence mutation already contains ${evidenceId2}, but its managed target does not match.`);
       }
       throw new SchemaError(`Generated evidence ID already exists in ${currentFilename}: ${evidenceId2}`);
     }
-    const contents = renderEvidenceRecords([...records, record2]);
+    const contents = appendEvidenceRecord(existing.contents, record2);
     return {
       expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ evidenceId: evidenceId2 }, record2)),
       completion: {
@@ -451,15 +535,16 @@ async function recordEvidenceLocked(paths, taskId, input, now) {
     };
   });
   const evidenceId = intent.expected.identity.evidenceId;
-  const record = (await readEvidenceRecords(paths.repoRoot, filename)).find((candidate) => candidate.id === evidenceId);
+  const record = (await readEvidenceRecords(paths.repoRoot, filename, true)).find((candidate) => candidate.id === evidenceId);
   if (record === void 0) throw new SchemaError(`Recovered evidence mutation did not record ${evidenceId}.`);
   return record;
 }
 async function assertTddReadyForCheck(paths, location) {
   if (location.task.qualityMode !== "tdd") return;
-  const evidence = await readEvidenceRecords(paths.repoRoot, join3(location.directory, "evidence.jsonl"));
+  const evidence = await readEvidenceRecords(paths.repoRoot, join3(location.directory, "evidence.jsonl"), true);
   let hasValidRed = false;
   for (const record of evidence) {
+    if (record.verificationRevision !== location.task.verificationRevision) continue;
     if (isValidRed(record)) {
       hasValidRed = true;
       continue;
@@ -508,7 +593,10 @@ function boundedNonempty(value, label, maxBytes) {
   }
   return normalized;
 }
-async function readEvidenceRecords(repoRoot, filename) {
+async function readEvidenceRecords(repoRoot, filename, allowLegacySchema = false) {
+  return (await readEvidenceFile(repoRoot, filename, allowLegacySchema)).records;
+}
+async function readEvidenceFile(repoRoot, filename, allowLegacySchema) {
   await assertNoSymlink(repoRoot, filename);
   let contents;
   try {
@@ -516,7 +604,7 @@ async function readEvidenceRecords(repoRoot, filename) {
   } catch (error) {
     throw new SchemaError(`Unable to read evidence records ${filename}`, error);
   }
-  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
+  const records = contents.split("\n").filter((line) => line !== "").map((line, index) => {
     let value;
     try {
       value = JSON.parse(line);
@@ -524,14 +612,17 @@ async function readEvidenceRecords(repoRoot, filename) {
       throw new SchemaError(`Invalid JSONL in ${filename} at line ${index + 1}`, error);
     }
     try {
-      return validateEvidenceRecord(value);
+      return normalizeEvidenceRecord(value, allowLegacySchema);
     } catch (error) {
       throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`, error);
     }
   });
+  return { contents, records };
 }
-function renderEvidenceRecords(records) {
-  return records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+function appendEvidenceRecord(contents, record) {
+  const separator = contents === "" || contents.endsWith("\n") ? "" : "\n";
+  return `${contents}${separator}${JSON.stringify(record)}
+`;
 }
 function isValidRed(value) {
   return value.schemaVersion === SCHEMA_VERSION && value.kind === "tdd-red" && value.result === "fail" && value.exitCode !== void 0 && value.exitCode > 0;
@@ -540,13 +631,17 @@ function isValidGreen(value) {
   return value.schemaVersion === SCHEMA_VERSION && value.kind === "tdd-green" && value.result === "pass" && value.exitCode === 0;
 }
 function validateEvidenceRecord(value) {
-  if (!isRecord2(value)) throw new ValidationError("Evidence record must be an object.");
+  return normalizeEvidenceRecord(value);
+}
+function normalizeEvidenceRecord(value, allowLegacySchema = false) {
+  if (!isRecord3(value)) throw new ValidationError("Evidence record must be an object.");
   if (Object.keys(value).some((field) => !EVIDENCE_FIELDS.has(field))) {
     throw new ValidationError("Evidence record contains unsupported fields.");
   }
-  if (value.schemaVersion !== SCHEMA_VERSION) {
+  if (value.schemaVersion !== SCHEMA_VERSION && !(allowLegacySchema && value.schemaVersion === LEGACY_SCHEMA_VERSION)) {
     throw new ValidationError(`Evidence record schemaVersion must be ${SCHEMA_VERSION}.`);
   }
+  const verificationRevision = value.schemaVersion === LEGACY_SCHEMA_VERSION ? 0 : validateVerificationRevision(value.verificationRevision);
   const id = boundedUnknownString(value.id, "Evidence ID", MAX_EVIDENCE_ID_BYTES);
   const kind = validateKind(value.kind);
   const summary = boundedUnknownString(
@@ -562,6 +657,7 @@ function validateEvidenceRecord(value) {
   assertConsistentEvidence(kind, result, exitCode);
   return {
     schemaVersion: SCHEMA_VERSION,
+    verificationRevision,
     id,
     kind,
     summary,
@@ -571,6 +667,12 @@ function validateEvidenceRecord(value) {
     ...command === void 0 ? {} : { command },
     ...exitCode === void 0 ? {} : { exitCode }
   };
+}
+function validateVerificationRevision(value) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ValidationError("Evidence verificationRevision must be a non-negative safe integer.");
+  }
+  return value;
 }
 function validateKind(value) {
   if (typeof value !== "string" || !EVIDENCE_KINDS.has(value)) {
@@ -603,7 +705,7 @@ function validateUnknownExitCode(value) {
   }
   return validateExitCode(value);
 }
-function isRecord2(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 var MAX_EVIDENCE_SUMMARY_BYTES, MAX_EVIDENCE_COMMAND_BYTES, MAX_EVIDENCE_ID_BYTES, MAX_EVIDENCE_ACTOR_BYTES, EVIDENCE_KINDS, EVIDENCE_RESULTS, EVIDENCE_FIELDS;
@@ -628,6 +730,7 @@ var init_evidence = __esm({
     EVIDENCE_RESULTS = /* @__PURE__ */ new Set(["pass", "fail"]);
     EVIDENCE_FIELDS = /* @__PURE__ */ new Set([
       "schemaVersion",
+      "verificationRevision",
       "id",
       "kind",
       "summary",
@@ -642,7 +745,7 @@ var init_evidence = __esm({
 
 // src/core/learning.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { lstat as lstat5, mkdir as mkdir2, readFile as readFile3, rmdir, unlink, writeFile as writeFile3 } from "node:fs/promises";
+import { lstat as lstat6, mkdir as mkdir2, readFile as readFile3, rmdir, unlink, writeFile as writeFile3 } from "node:fs/promises";
 import { join as join4 } from "node:path";
 async function proposeLearning(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
   return withTaskLock(paths, taskId, () => proposeLearningLocked(paths, taskId, input, now));
@@ -991,7 +1094,7 @@ function ensureTrailingNewline(contents) {
 `;
 }
 function validateStoredCandidate(value, taskId) {
-  if (!isRecord3(value) || value.schemaVersion !== SCHEMA_VERSION) {
+  if (!isRecord4(value) || value.schemaVersion !== SCHEMA_VERSION) {
     throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
   }
   if (typeof value.id !== "string" || typeof value.domain !== "string" || typeof value.text !== "string" || typeof value.rationale !== "string") {
@@ -1001,15 +1104,15 @@ function validateStoredCandidate(value, taskId) {
   validateDomain(value.domain);
   boundedNonempty2(value.text, "Learning text", MAX_RULE_CHARACTERS);
   boundedNonempty2(value.rationale, "Learning rationale", MAX_RATIONALE_CHARACTERS);
-  if (!isIsoTimestamp(value.proposedAt)) {
+  if (!isIsoTimestamp2(value.proposedAt)) {
     throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
   }
   if (value.status === "accepted") {
-    if (value.confirmedBy !== "user" || !isIsoTimestamp(value.acceptedAt)) {
+    if (value.confirmedBy !== "user" || !isIsoTimestamp2(value.acceptedAt)) {
       throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
     }
   } else if (value.status === "archived") {
-    if (!isIsoTimestamp(value.archivedAt)) {
+    if (!isIsoTimestamp2(value.archivedAt)) {
       throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
     }
     if (typeof value.archiveReason !== "string") {
@@ -1107,7 +1210,7 @@ async function releasePromotionLock(paths, lock) {
       error
     );
   }
-  if (!isRecord3(owner) || owner.token !== lock.token) {
+  if (!isRecord4(owner) || owner.token !== lock.token) {
     throw new SchemaError(
       `Learning promotion lock ownership changed at ${lock.directory}; refusing unsafe cleanup`
     );
@@ -1125,7 +1228,7 @@ async function releasePromotionLock(paths, lock) {
 async function describePromotionLock(paths, directory, ownerPath) {
   let ageMilliseconds;
   try {
-    ageMilliseconds = Math.max(0, Date.now() - (await lstat5(directory)).mtimeMs);
+    ageMilliseconds = Math.max(0, Date.now() - (await lstat6(directory)).mtimeMs);
   } catch (error) {
     if (!isCode(error, "ENOENT")) {
       return `Learning promotion lock is busy at ${directory}; retry after the active promotion completes.`;
@@ -1135,7 +1238,7 @@ async function describePromotionLock(paths, directory, ownerPath) {
   try {
     await assertNoSymlink(paths.repoRoot, ownerPath);
     const owner = JSON.parse(await readFile3(ownerPath, "utf8"));
-    if (isRecord3(owner)) {
+    if (isRecord4(owner)) {
       const pid = typeof owner.pid === "number" ? `pid ${owner.pid}` : "unknown pid";
       const acquiredAt = typeof owner.acquiredAt === "string" ? ` since ${owner.acquiredAt}` : "";
       ownerDescription = `${pid}${acquiredAt}`;
@@ -1171,12 +1274,12 @@ function errorMessage(error) {
 function isCode(error, code) {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
-function isIsoTimestamp(value) {
+function isIsoTimestamp2(value) {
   if (typeof value !== "string") return false;
   const parsed = new Date(value);
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 var DOMAIN_PATTERN, MAX_DOMAIN_CHARACTERS, MAX_ID_CHARACTERS, MAX_RULE_CHARACTERS, MAX_RATIONALE_CHARACTERS, MAX_REASON_CHARACTERS, MAX_ACTOR_CHARACTERS, PROMOTION_LOCK_DIRECTORY, PROMOTION_LOCK_OWNER, PROMOTION_LOCK_RETRY_MILLISECONDS, PROMOTION_LOCK_TIMEOUT_MILLISECONDS, PROMOTION_LOCK_STALE_MILLISECONDS;
@@ -1205,14 +1308,14 @@ var init_learning = __esm({
 });
 
 // src/core/task-locks.ts
-import { lstat as lstat6, readFile as readFile4, readdir } from "node:fs/promises";
+import { lstat as lstat7, readFile as readFile4, readdir } from "node:fs/promises";
 import { basename as basename2, join as join5, relative as relative2 } from "node:path";
 async function inspectTaskLocks(paths) {
   const locksDirectory = join5(paths.runtime, "task-locks");
   let entries;
   try {
     await assertNoSymlink(paths.repoRoot, locksDirectory);
-    const locks = await lstat6(locksDirectory);
+    const locks = await lstat7(locksDirectory);
     await assertNoSymlink(paths.repoRoot, locksDirectory);
     if (!locks.isDirectory() || locks.isSymbolicLink()) {
       return [
@@ -1223,7 +1326,7 @@ async function inspectTaskLocks(paths) {
     entries = await readdir(locksDirectory);
     await assertNoSymlink(paths.repoRoot, locksDirectory);
   } catch (error) {
-    if (isMissing4(error)) {
+    if (isMissing5(error)) {
       return inspectNamedRuntimeLock(paths, join5(paths.runtime, PROMOTION_LOCK_DIRECTORY2));
     }
     return [
@@ -1238,10 +1341,10 @@ async function inspectTaskLocks(paths) {
 async function inspectNamedRuntimeLock(paths, directory) {
   try {
     await assertNoSymlink(paths.repoRoot, directory);
-    await lstat6(directory);
+    await lstat7(directory);
     await assertNoSymlink(paths.repoRoot, directory);
   } catch (error) {
-    if (isMissing4(error)) return [];
+    if (isMissing5(error)) return [];
     return [taskLockDiagnostic(paths, directory, null, null, "directory_invalid", { status: "unsafe" })];
   }
   return [await inspectTaskLock(paths, directory)];
@@ -1251,7 +1354,7 @@ async function inspectTaskLock(paths, directory) {
   let ageMilliseconds = null;
   try {
     await assertNoSymlink(paths.repoRoot, directory);
-    const entry = await lstat6(directory);
+    const entry = await lstat7(directory);
     await assertNoSymlink(paths.repoRoot, directory);
     ageMilliseconds = Math.max(0, Date.now() - entry.mtimeMs);
     if (!entry.isDirectory() || entry.isSymbolicLink()) {
@@ -1268,22 +1371,22 @@ async function inspectTaskLockOwner(paths, ownerPath) {
   try {
     await assertNoSymlink(paths.repoRoot, ownerPath);
   } catch (error) {
-    return isMissing4(error) ? { status: "missing" } : { status: "unsafe" };
+    return isMissing5(error) ? { status: "missing" } : { status: "unsafe" };
   }
   let contents;
   try {
     contents = await readFile4(ownerPath, "utf8");
   } catch (error) {
-    return isMissing4(error) ? { status: "missing" } : { status: "unreadable" };
+    return isMissing5(error) ? { status: "missing" } : { status: "unreadable" };
   }
   try {
     await assertNoSymlink(paths.repoRoot, ownerPath);
   } catch (error) {
-    return isMissing4(error) ? { status: "missing" } : { status: "unsafe" };
+    return isMissing5(error) ? { status: "missing" } : { status: "unsafe" };
   }
   try {
     const owner = JSON.parse(contents);
-    if (!isRecord4(owner) || typeof owner.token !== "string" || owner.token.trim() === "") {
+    if (!isRecord5(owner) || typeof owner.token !== "string" || owner.token.trim() === "") {
       return { status: "malformed" };
     }
     return { status: "valid", token: owner.token };
@@ -1302,10 +1405,10 @@ function taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, status, o
     recoveryInstruction: `Confirm no active process, then remove exact lock directory ${path}.`
   };
 }
-function isMissing4(error) {
+function isMissing5(error) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
-function isRecord4(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 var TASK_LOCK_FILENAME, PROMOTION_LOCK_DIRECTORY2;
@@ -1325,7 +1428,7 @@ __export(validate_exports, {
   validateWorkspace: () => validateWorkspace
 });
 import { createHash } from "node:crypto";
-import { lstat as lstat7, readFile as readFile5, readdir as readdir2 } from "node:fs/promises";
+import { lstat as lstat8, readFile as readFile5, readdir as readdir2 } from "node:fs/promises";
 import { basename as basename3, dirname as dirname2, isAbsolute as isAbsolute2, join as join6, relative as relative3, resolve as resolve2 } from "node:path";
 async function validateWorkspace(paths) {
   const issues = [];
@@ -1347,6 +1450,7 @@ async function validateWorkspace(paths) {
   }
   const managed = await inspectManagedPathSafety(paths, add);
   const limits = managed.config ? await validateConfig(paths, add) : null;
+  await validateSchemaMigrationState(paths, add);
   await validateManagedSpecs(paths, add, managed);
   if (managed.inlineAudit) await validateInlineAudit(paths, add);
   const taskTreeSafe = managed.tasks && await validateManagedPathSafety(paths, paths.tasks, add);
@@ -1388,6 +1492,24 @@ async function validateWorkspace(paths) {
   }
   if (managed.runtime) await validateTaskLocks(paths, add);
   return { issues: sortIssues(issues) };
+}
+async function validateSchemaMigrationState(paths, add) {
+  try {
+    const state = await readSchemaMigrationState(paths);
+    if (state?.phase === "intent") {
+      add(
+        "MIGRATION_PENDING",
+        paths.migrationState,
+        `Schema migration ${state.operationId} is incomplete; run \`vinea migrate\` to resume it.`
+      );
+    }
+  } catch (error) {
+    add(
+      "MIGRATION_STATE_INVALID",
+      paths.migrationState,
+      error instanceof Error ? error.message : "Schema migration state is invalid."
+    );
+  }
 }
 async function validateTaskStructure(paths, location, options = {}) {
   const issues = [];
@@ -1560,8 +1682,8 @@ async function validateConfig(paths, add) {
   }
   const riskRules = value.riskRules;
   const context = value.context;
-  const validRiskRules = isRecord5(riskRules) && isStringArray(riskRules.medium) && isStringArray(riskRules.high);
-  const validContext = isRecord5(context) && isNonNegativeSafeInteger(context.maxFiles) && isNonNegativeSafeInteger(context.maxEstimatedBytes);
+  const validRiskRules = isRecord6(riskRules) && isStringArray(riskRules.medium) && isStringArray(riskRules.high);
+  const validContext = isRecord6(context) && isNonNegativeSafeInteger(context.maxFiles) && isNonNegativeSafeInteger(context.maxEstimatedBytes);
   if (!validRiskRules || !validContext) {
     add(
       "CONFIG_INVALID",
@@ -1581,7 +1703,7 @@ async function validateInlineAudit(paths, add) {
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "INLINE_AUDIT_JSONL_INVALID", add);
     if (value === null) continue;
-    if (!isRecord5(value)) {
+    if (!isRecord6(value)) {
       add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
       continue;
     }
@@ -1592,7 +1714,7 @@ async function validateInlineAudit(paths, add) {
         `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`
       );
     }
-    if (!isIsoTimestamp2(value.timestamp) || typeof value.requestSummary !== "string" || value.requestSummary.trim() === "" || typeof value.reason !== "string" || value.reason.trim() === "" || !isRecord5(value.proposedRisk) || !["low", "medium", "high"].includes(String(value.proposedRisk.level)) || !isStringArray(value.proposedRisk.reasons)) {
+    if (!isIsoTimestamp3(value.timestamp) || typeof value.requestSummary !== "string" || value.requestSummary.trim() === "" || typeof value.reason !== "string" || value.reason.trim() === "" || !isRecord6(value.proposedRisk) || !["low", "medium", "high"].includes(String(value.proposedRisk.level)) || !isStringArray(value.proposedRisk.reasons)) {
       add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid inline-audit record.`);
     }
   }
@@ -1618,7 +1740,7 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
   const task = await readJsonObject(paths, taskFilename, "TASK", add);
   if (task !== null) {
     const taskId = typeof task.id === "string" ? task.id : null;
-    if (!TASK_ID_PATTERN.test(directoryName)) {
+    if (!TASK_ID_PATTERN2.test(directoryName)) {
       add("TASK_ID_INVALID", taskFilename, `Task directory name is invalid: ${directoryName}.`);
     }
     if (taskId !== directoryName) {
@@ -1645,7 +1767,7 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
       add("TASK_RECORD_INVALID", taskFilename, "Task record does not match the supported task structure.");
     }
     validateTaskRequirementIds(task, taskFilename, add);
-    if (scope === "active" && taskId === directoryName && TASK_ID_PATTERN.test(taskId) && task.schemaVersion === SCHEMA_VERSION && ACTIVE_STATUSES.has(status) && isTaskRecordShape(task)) {
+    if (scope === "active" && taskId === directoryName && TASK_ID_PATTERN2.test(taskId) && task.schemaVersion === SCHEMA_VERSION && ACTIVE_STATUSES.has(status) && isTaskRecordShape(task)) {
       activeTaskIds.add(taskId);
     }
   }
@@ -1659,20 +1781,36 @@ async function validateTaskDirectory(paths, directory, directoryName, scope, lim
       add("TASK_ARTIFACT_INVALID", filename, `Required task artifact ${artifact} must be a regular file.`);
     }
   }
-  await validateContextManifest(paths, join6(directory, "context.jsonl"), limits, add);
-  const evidence = await validateEvidenceArtifact(paths, join6(directory, "evidence.jsonl"), add);
+  const allowsLegacyHistory = task !== null && task.schemaVersion === SCHEMA_VERSION && isTaskRecordShape(task);
+  const taskVerificationRevision = task !== null && task.schemaVersion === SCHEMA_VERSION && isNonNegativeSafeInteger(task.verificationRevision) ? task.verificationRevision : void 0;
+  await validateContextManifest(paths, join6(directory, "context.jsonl"), limits, allowsLegacyHistory, add);
+  const evidence = await validateEvidenceArtifact(
+    paths,
+    join6(directory, "evidence.jsonl"),
+    allowsLegacyHistory,
+    taskVerificationRevision,
+    add
+  );
+  const checkHistory = await validateCheckHistoryArtifact(
+    paths,
+    join6(directory, "check-history.jsonl"),
+    task,
+    add
+  );
   await validateJournalArtifact(
     paths,
     join6(directory, "journal.md"),
     task,
     directory,
     scope,
+    allowsLegacyHistory,
+    checkHistory,
     add,
     pendingMutationRecovery
   );
   await validateCheckArtifact(paths, join6(directory, "check.md"), task, evidence, add);
 }
-async function validateContextManifest(paths, filename, limits, add) {
+async function validateContextManifest(paths, filename, limits, allowsLegacyHistory, add) {
   const contents = await readOptionalRegularFile(paths, filename, "CONTEXT", add);
   if (contents === null) return;
   let files = 0;
@@ -1681,11 +1819,11 @@ async function validateContextManifest(paths, filename, limits, add) {
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "CONTEXT_JSONL_INVALID", add);
     if (value === null) continue;
-    if (!isRecord5(value)) {
+    if (!isRecord6(value)) {
       add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
       continue;
     }
-    if (value.schemaVersion !== SCHEMA_VERSION) {
+    if (!isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
       add(
         "CONTEXT_SCHEMA_UNSUPPORTED",
         filename,
@@ -1694,7 +1832,7 @@ async function validateContextManifest(paths, filename, limits, add) {
     }
     const validBytes = isNonNegativeSafeInteger(value.estimatedBytes);
     const normalizedPath = typeof value.path === "string" ? normalizeRepositoryPath(value.path) : null;
-    if (typeof value.path !== "string" || normalizedPath === null || normalizedPath !== value.path || typeof value.purpose !== "string" || value.purpose.trim() === "" || !validBytes || !isIsoTimestamp2(value.addedAt)) {
+    if (typeof value.path !== "string" || normalizedPath === null || normalizedPath !== value.path || typeof value.purpose !== "string" || value.purpose.trim() === "" || !validBytes || !isIsoTimestamp3(value.addedAt)) {
       add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid context reference.`);
     }
     files += 1;
@@ -1746,7 +1884,7 @@ async function validateContextPath(paths, manifest, repositoryPath, lineNumber, 
     add("CONTEXT_PATH_INVALID", manifest, `Line ${lineNumber} must reference a regular file: ${normalized}.`);
   }
 }
-async function validateEvidenceArtifact(paths, filename, add) {
+async function validateEvidenceArtifact(paths, filename, allowsLegacyHistory, taskVerificationRevision, add) {
   const contents = await readOptionalRegularFile(paths, filename, "EVIDENCE", add);
   if (contents === null) return [];
   const records = [];
@@ -1754,7 +1892,7 @@ async function validateEvidenceArtifact(paths, filename, add) {
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "EVIDENCE_JSONL_INVALID", add);
     if (value === null) continue;
-    if (isRecord5(value) && value.schemaVersion !== SCHEMA_VERSION) {
+    if (isRecord6(value) && !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
       add(
         "EVIDENCE_SCHEMA_UNSUPPORTED",
         filename,
@@ -1763,7 +1901,7 @@ async function validateEvidenceArtifact(paths, filename, add) {
     }
     let record;
     try {
-      record = validateEvidenceRecord(value);
+      record = normalizeEvidenceRecord(value, allowsLegacyHistory);
     } catch {
       add("EVIDENCE_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid evidence record.`);
       continue;
@@ -1772,12 +1910,97 @@ async function validateEvidenceArtifact(paths, filename, add) {
       add("EVIDENCE_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates evidence ID ${record.id}.`);
       continue;
     }
+    if (taskVerificationRevision !== void 0 && record.verificationRevision > taskVerificationRevision) {
+      add(
+        "EVIDENCE_REVISION_INVALID",
+        filename,
+        `Line ${lineNumber} uses future verification revision ${record.verificationRevision}; task.json is at ${taskVerificationRevision}.`
+      );
+    }
     seenIds.add(record.id);
     records.push(record);
   }
   return records;
 }
-async function validateJournalArtifact(paths, filename, task, taskDirectory, scope, add, pendingMutationRecovery) {
+async function validateCheckHistoryArtifact(paths, filename, task, add) {
+  const contents = await readOptionalRegularFile(paths, filename, "CHECK_HISTORY", add);
+  if (contents === null) return [];
+  const snapshots = [];
+  const operationIds = /* @__PURE__ */ new Set();
+  const revisions = /* @__PURE__ */ new Set();
+  const taskId = typeof task?.id === "string" ? task.id : void 0;
+  const taskRevision = task !== null && isNonNegativeSafeInteger(task.verificationRevision) ? task.verificationRevision : void 0;
+  const declaredIds = task === null ? [] : taskRequirementIds(task);
+  for (const { line, lineNumber } of jsonlLines(contents)) {
+    const value = parseJsonl(line, lineNumber, filename, "CHECK_HISTORY_JSONL_INVALID", add);
+    if (value === null) continue;
+    if (!isCheckHistorySnapshot(value)) {
+      add("CHECK_HISTORY_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid check-history snapshot.`);
+      continue;
+    }
+    const snapshot = value;
+    if (taskId !== void 0 && snapshot.taskId !== taskId) {
+      add(
+        "CHECK_HISTORY_TASK_MISMATCH",
+        filename,
+        `Line ${lineNumber} belongs to ${snapshot.taskId}, not task ${taskId}.`
+      );
+    }
+    if (taskRevision !== void 0 && snapshot.verificationRevision > taskRevision) {
+      add(
+        "CHECK_HISTORY_REVISION_INVALID",
+        filename,
+        `Line ${lineNumber} uses future verification revision ${snapshot.verificationRevision}; task.json is at ${taskRevision}.`
+      );
+    }
+    const revisionKey = `${snapshot.taskId}:${snapshot.verificationRevision}`;
+    if (operationIds.has(snapshot.operationId)) {
+      add("CHECK_HISTORY_OPERATION_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${snapshot.operationId}.`);
+    } else {
+      operationIds.add(snapshot.operationId);
+    }
+    if (revisions.has(revisionKey)) {
+      add("CHECK_HISTORY_REVISION_DUPLICATE", filename, `Line ${lineNumber} duplicates snapshot ${revisionKey}.`);
+    } else {
+      revisions.add(revisionKey);
+    }
+    validateHistoricalRows(snapshot, declaredIds, filename, lineNumber, add);
+    snapshots.push(snapshot);
+  }
+  return snapshots;
+}
+function validateHistoricalRows(snapshot, declaredIds, filename, lineNumber, add) {
+  const seen = /* @__PURE__ */ new Set();
+  let previousDeclarationIndex = -1;
+  for (const row of snapshot.rows) {
+    const declarationIndex = declaredIds.indexOf(row.requirementId);
+    if (declarationIndex === -1) {
+      add(
+        "CHECK_HISTORY_REQUIREMENT_INVALID",
+        filename,
+        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} references undeclared ID ${row.requirementId}.`
+      );
+      continue;
+    }
+    if (seen.has(row.requirementId)) {
+      add(
+        "CHECK_HISTORY_REQUIREMENT_DUPLICATE",
+        filename,
+        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} duplicates ID ${row.requirementId}.`
+      );
+    }
+    seen.add(row.requirementId);
+    if (declarationIndex <= previousDeclarationIndex) {
+      add(
+        "CHECK_HISTORY_ORDER_INVALID",
+        filename,
+        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} is not in declared requirement order.`
+      );
+    }
+    previousDeclarationIndex = declarationIndex;
+  }
+}
+async function validateJournalArtifact(paths, filename, task, taskDirectory, scope, allowsLegacyHistory, checkHistory, add, pendingMutationRecovery) {
   const contents = await readOptionalRegularFile(paths, filename, "JOURNAL", add);
   if (contents === null) return;
   if (contents.trim() === "") {
@@ -1788,23 +2011,28 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
   let creationCount = 0;
   let firstEvent = true;
   let currentStatus = null;
+  let currentVerificationRevision = 0;
   let replayIsValid = true;
   let lastTransition = null;
   let lastValidEventType = null;
   const pendingMutationIntents = /* @__PURE__ */ new Map();
   const committedMutationIntents = [];
+  const reworkIntents = /* @__PURE__ */ new Map();
+  const pendingReworkIntents = /* @__PURE__ */ new Map();
+  const matchedReworkCompletionIds = /* @__PURE__ */ new Set();
+  const supersededCheckMutationOperations = /* @__PURE__ */ new Set();
   const latestLearningMutationOperation = /* @__PURE__ */ new Map();
   for (const { line, lineNumber } of jsonlLines(contents)) {
     const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
     if (value === null) continue;
-    if (isRecord5(value) && value.schemaVersion !== SCHEMA_VERSION) {
+    if (isRecord6(value) && !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
       add(
         "JOURNAL_SCHEMA_UNSUPPORTED",
         filename,
         `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`
       );
     }
-    if (!isJournalEvent(value)) {
+    if (!isJournalEvent(value, allowsLegacyHistory)) {
       add("JOURNAL_EVENT_INVALID", filename, `Line ${lineNumber} is not a valid journal event.`);
       replayIsValid = false;
       continue;
@@ -1835,6 +2063,35 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
         committedMutationIntents.push(intent);
         if (String(value.type).startsWith("learning_") && typeof value.learningCandidateId === "string") {
           latestLearningMutationOperation.set(value.learningCandidateId, operationId);
+        }
+      }
+    }
+    if (value.type === "rework_intent") {
+      const operationId = value.operationId;
+      if (reworkIntents.has(operationId)) {
+        add("REWORK_INTENT_DUPLICATE", filename, `Line ${lineNumber} duplicates rework intent ${operationId}.`);
+      } else {
+        reworkIntents.set(operationId, value);
+        pendingReworkIntents.set(operationId, value);
+      }
+    } else if (value.type === "reworked") {
+      const operationId = value.operationId;
+      const intent = pendingReworkIntents.get(operationId);
+      if (intent === void 0) {
+        add(
+          "REWORK_COMPLETION_ORPHAN",
+          filename,
+          `Line ${lineNumber} rework completion ${operationId} has no matching rework intent.`
+        );
+      } else if (!matchesReworkCompletion(intent, value)) {
+        add("REWORK_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match rework intent ${operationId}.`);
+      } else {
+        pendingReworkIntents.delete(operationId);
+        matchedReworkCompletionIds.add(operationId);
+        for (const mutation of committedMutationIntents) {
+          if (mutation.mutationKind === "check_upsert") {
+            supersededCheckMutationOperations.add(mutation.operationId);
+          }
         }
       }
     }
@@ -1869,6 +2126,30 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
         currentStatus = newStatus;
         lastTransition = { oldStatus, newStatus };
       }
+    } else if (value.type === "rework_intent") {
+      const sourceRevision = value.sourceVerificationRevision;
+      if (currentStatus !== "checking" || sourceRevision !== currentVerificationRevision) {
+        add(
+          "JOURNAL_REWORK_DISCONTINUITY",
+          filename,
+          `Line ${lineNumber} rework intent targets revision ${sourceRevision} while journal is ${String(currentStatus)} at revision ${currentVerificationRevision}.`
+        );
+        replayIsValid = false;
+      }
+    } else if (value.type === "reworked") {
+      const operationId = value.operationId;
+      const sourceRevision = value.sourceVerificationRevision;
+      if (!matchedReworkCompletionIds.has(operationId) || currentStatus !== "checking" || sourceRevision !== currentVerificationRevision) {
+        add(
+          "JOURNAL_REWORK_DISCONTINUITY",
+          filename,
+          `Line ${lineNumber} cannot complete rework ${operationId} from ${String(currentStatus)} at revision ${currentVerificationRevision}.`
+        );
+        replayIsValid = false;
+      } else {
+        currentStatus = "in_progress";
+        currentVerificationRevision += 1;
+      }
     } else if (value.type === "continued") {
       const status = value.status;
       if (currentStatus === null || status !== currentStatus) {
@@ -1880,7 +2161,7 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
         replayIsValid = false;
       }
     }
-    if (typeof value.operationId === "string" && value.type !== "mutation_intent") {
+    if (typeof value.operationId === "string" && value.type !== "mutation_intent" && value.type !== "rework_intent") {
       if (operationIds.has(value.operationId)) {
         add("JOURNAL_OPERATION_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${value.operationId}.`);
       } else {
@@ -1901,6 +2182,41 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
       filename,
       `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`
     );
+  }
+  if (replayIsValid && creationCount === 1 && task !== null && isNonNegativeSafeInteger(task.verificationRevision) && task.verificationRevision !== currentVerificationRevision) {
+    add(
+      "JOURNAL_TASK_REVISION_MISMATCH",
+      filename,
+      `Journal resolves to verification revision ${currentVerificationRevision}, but task.json records ${task.verificationRevision}.`
+    );
+  }
+  for (const intent of pendingReworkIntents.values()) {
+    add(
+      "REWORK_INTENT_UNCOMMITTED",
+      filename,
+      `Rework intent ${String(intent.operationId)} has no matching completion event; run \`vinea task rework\` to recover it.`
+    );
+  }
+  const historyByOperation = new Map(checkHistory.map((snapshot) => [snapshot.operationId, snapshot]));
+  for (const [operationId, intent] of reworkIntents) {
+    const snapshot = historyByOperation.get(operationId);
+    if (snapshot === void 0 || stableJson(snapshot) !== stableJson(intent.snapshot)) {
+      add(
+        "REWORK_HISTORY_MISMATCH",
+        filename,
+        `Rework ${operationId} does not have the exact check-history snapshot recorded in its intent.`
+      );
+    }
+  }
+  for (const snapshot of checkHistory) {
+    const intent = reworkIntents.get(snapshot.operationId);
+    if (intent === void 0 || stableJson(intent.snapshot) !== stableJson(snapshot)) {
+      add(
+        "CHECK_HISTORY_ORPHAN",
+        filename,
+        `Check-history snapshot ${snapshot.operationId} has no matching rework intent.`
+      );
+    }
   }
   const mutationOwner = mutationTargetOwnerForValidation(taskDirectory, scope, task);
   for (const intent of pendingMutationIntents.values()) {
@@ -1940,6 +2256,9 @@ async function validateJournalArtifact(paths, filename, task, taskDirectory, sco
   const latestIntentByFile = /* @__PURE__ */ new Map();
   const latestIntentBySemanticIdentity = /* @__PURE__ */ new Map();
   for (const intent of committedMutationIntents) {
+    if (intent.mutationKind === "check_upsert" && supersededCheckMutationOperations.has(intent.operationId)) {
+      continue;
+    }
     latestIntentBySemanticIdentity.set(mutationSemanticIdentityKey(intent), intent);
     const expected = intent.expected;
     if (!isMutationTargetSummary(expected)) continue;
@@ -2029,7 +2348,7 @@ function mutationTargetOwnerForValidation(directory, scope, task) {
   const learningCandidateDomains = {};
   if (Array.isArray(task?.learningCandidates)) {
     for (const candidate of task.learningCandidates) {
-      if (isRecord5(candidate) && typeof candidate.id === "string" && typeof candidate.domain === "string") {
+      if (isRecord6(candidate) && typeof candidate.id === "string" && typeof candidate.domain === "string") {
         learningCandidateDomains[candidate.id] = candidate.domain;
       }
     }
@@ -2048,7 +2367,7 @@ function semanticMutationTargetMatches(task, intent) {
   const mutationKind = intent.mutationKind;
   if (mutationKind === "requirement_added" || mutationKind === "acceptance_criterion_added") {
     const collection = mutationKind === "requirement_added" ? task.requirements : task.acceptanceCriteria;
-    const requirement = Array.isArray(collection) ? collection.find((item) => isRecord5(item) && item.id === identity.requirementId) : void 0;
+    const requirement = Array.isArray(collection) ? collection.find((item) => isRecord6(item) && item.id === identity.requirementId) : void 0;
     return requirement !== void 0 && mutationIdentityValueMatches(requirement, identity);
   }
   if (mutationKind === "learning_proposed") {
@@ -2064,7 +2383,7 @@ function semanticMutationTargetMatches(task, intent) {
 }
 function hasLearningCandidate(task, identity, status) {
   if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return false;
-  const candidate = task.learningCandidates.find((item) => isRecord5(item) && item.id === identity.learningCandidateId && item.status === status);
+  const candidate = task.learningCandidates.find((item) => isRecord6(item) && item.id === identity.learningCandidateId && item.status === status);
   return candidate !== void 0 && mutationIdentityValueMatches(candidate, identity);
 }
 async function acceptedLearningTargetsMatch(paths, task, owner, intent, add) {
@@ -2098,7 +2417,7 @@ async function acceptedLearningTargetsMatch(paths, task, owner, intent, add) {
 }
 function acceptedLearningCandidate(task, identity) {
   if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return null;
-  const candidate = task.learningCandidates.find((item) => isRecord5(item) && item.id === identity.learningCandidateId && item.status === "accepted" && item.confirmedBy === "user" && typeof item.domain === "string" && typeof item.text === "string" && isIsoTimestamp2(item.acceptedAt));
+  const candidate = task.learningCandidates.find((item) => isRecord6(item) && item.id === identity.learningCandidateId && item.status === "accepted" && item.confirmedBy === "user" && typeof item.domain === "string" && typeof item.text === "string" && isIsoTimestamp3(item.acceptedAt));
   if (candidate === void 0 || !mutationIdentityValueMatches(candidate, identity)) return null;
   const domain = candidate.domain;
   const text = candidate.text;
@@ -2114,8 +2433,9 @@ async function validateCheckArtifact(paths, filename, task, evidence, add) {
   const contents = await readOptionalRegularFile(paths, filename, "CHECK", add);
   if (contents === null || contents === "") return;
   const declaredIds = task === null ? [] : taskRequirementIds(task);
+  const expectedRevision = task !== null && task.schemaVersion === SCHEMA_VERSION && isNonNegativeSafeInteger(task.verificationRevision) ? task.verificationRevision : void 0;
   try {
-    parseCheckDocument(contents, paths.repoRoot, declaredIds, evidence, filename);
+    parseCheckDocument(contents, paths.repoRoot, declaredIds, evidence, filename, expectedRevision);
   } catch {
     add(
       "CHECK_PAYLOAD_INVALID",
@@ -2194,7 +2514,7 @@ async function readJsonObject(paths, filename, prefix, add) {
     add(`${prefix}_JSON_INVALID`, filename, "File does not contain valid JSON.");
     return null;
   }
-  if (!isRecord5(value)) {
+  if (!isRecord6(value)) {
     add(`${prefix}_INVALID`, filename, "File must contain a JSON object.");
     return null;
   }
@@ -2250,7 +2570,7 @@ function jsonlLines(contents) {
   return contents.split("\n").map((line, index) => ({ line, lineNumber: index + 1 })).filter(({ line }) => line.trim() !== "");
 }
 function isTaskRecordShape(value) {
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ALL_STATUSES.has(String(value.status)) && isRecord5(value.risk) && ["low", "medium", "high"].includes(String(value.risk.level)) && isStringArray(value.risk.reasons) && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && Array.isArray(value.requirements) && value.requirements.every(isRequirement) && Array.isArray(value.acceptanceCriteria) && value.acceptanceCriteria.every(isRequirement) && isLearningCandidates(value.learningCandidates) && isCommitMetadata(value.commit) && isIsoTimestamp2(value.createdAt) && isIsoTimestamp2(value.updatedAt);
+  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN2.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ALL_STATUSES.has(String(value.status)) && isRecord6(value.risk) && ["low", "medium", "high"].includes(String(value.risk.level)) && isStringArray(value.risk.reasons) && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && isNonNegativeSafeInteger(value.verificationRevision) && Array.isArray(value.requirements) && value.requirements.every(isRequirement) && Array.isArray(value.acceptanceCriteria) && value.acceptanceCriteria.every(isRequirement) && isLearningCandidates(value.learningCandidates) && isCommitMetadata(value.commit) && isIsoTimestamp3(value.createdAt) && isIsoTimestamp3(value.updatedAt);
 }
 function validateTaskRequirementIds(task, filename, add) {
   const seen = /* @__PURE__ */ new Set();
@@ -2263,7 +2583,7 @@ function validateTaskRequirementIds(task, filename, add) {
   }
 }
 function taskRequirementIds(task) {
-  return [task.requirements, task.acceptanceCriteria].flatMap((collection) => Array.isArray(collection) ? collection : []).flatMap((requirement) => isRecord5(requirement) && typeof requirement.id === "string" ? [requirement.id] : []);
+  return [task.requirements, task.acceptanceCriteria].flatMap((collection) => Array.isArray(collection) ? collection : []).flatMap((requirement) => isRecord6(requirement) && typeof requirement.id === "string" ? [requirement.id] : []);
 }
 function isLegalJournalTransition(oldStatus, newStatus) {
   if (oldStatus === newStatus) return false;
@@ -2273,8 +2593,8 @@ function isLegalJournalTransition(oldStatus, newStatus) {
 function isTaskStatus(value) {
   return typeof value === "string" && ALL_STATUSES.has(value);
 }
-function isJournalEvent(value) {
-  if (!isRecord5(value) || value.schemaVersion !== SCHEMA_VERSION || !isIsoTimestamp2(value.timestamp) || !isNonemptyString(value.actor) || typeof value.type !== "string") {
+function isJournalEvent(value, allowsLegacyHistory = false) {
+  if (!isRecord6(value) || !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory) || !isIsoTimestamp3(value.timestamp) || !isNonemptyString(value.actor) || typeof value.type !== "string") {
     return false;
   }
   if (value.type === "created") {
@@ -2304,6 +2624,31 @@ function isJournalEvent(value) {
       "expected",
       "completion"
     ]) && isNonemptyString(value.operationId) && isMutationKind(value.mutationKind) && /^[a-f0-9]{64}$/u.test(String(value.fingerprint)) && isMutationTargetSummary(value.expected) && isMutationCompletion(value.completion, value.operationId, value.mutationKind);
+  }
+  if (value.type === "rework_intent") {
+    return value.schemaVersion === SCHEMA_VERSION && hasOnlyKeys(value, [
+      "schemaVersion",
+      "type",
+      "operationId",
+      "timestamp",
+      "actor",
+      "reason",
+      "sourceVerificationRevision",
+      "snapshot"
+    ]) && isNonemptyString(value.operationId) && isNonemptyString(value.reason) && isNonNegativeSafeInteger(value.sourceVerificationRevision) && isCheckHistorySnapshot(value.snapshot) && value.snapshot.verificationRevision === value.sourceVerificationRevision && value.snapshot.operationId === value.operationId && value.snapshot.reworkReason === value.reason;
+  }
+  if (value.type === "reworked") {
+    return value.schemaVersion === SCHEMA_VERSION && hasOnlyKeys(value, [
+      "schemaVersion",
+      "type",
+      "operationId",
+      "timestamp",
+      "actor",
+      "reason",
+      "sourceVerificationRevision",
+      "verificationRevision",
+      "status"
+    ]) && isNonemptyString(value.operationId) && isNonemptyString(value.reason) && isNonNegativeSafeInteger(value.sourceVerificationRevision) && isNonNegativeSafeInteger(value.verificationRevision) && value.verificationRevision === value.sourceVerificationRevision + 1 && value.status === "in_progress";
   }
   if (value.type === "continued") {
     return hasOnlyKeys(value, [
@@ -2423,6 +2768,37 @@ function isJournalEvent(value) {
 function isMutationCompletionEvent(value) {
   return typeof value.type === "string" && (value.type === "check_recorded" || value.type === "check_updated" || TASK_MUTATION_KINDS.has(value.type));
 }
+function matchesReworkCompletion(intent, completion) {
+  return intent.type === "rework_intent" && completion.type === "reworked" && completion.operationId === intent.operationId && completion.timestamp === intent.timestamp && completion.actor === intent.actor && completion.reason === intent.reason && completion.sourceVerificationRevision === intent.sourceVerificationRevision && typeof intent.sourceVerificationRevision === "number" && completion.verificationRevision === intent.sourceVerificationRevision + 1 && completion.status === "in_progress";
+}
+function isCheckHistorySnapshot(value) {
+  if (!isRecord6(value) || !hasOnlyKeys(value, [
+    "schemaVersion",
+    "taskId",
+    "verificationRevision",
+    "archivedAt",
+    "reworkReason",
+    "operationId",
+    "rows"
+  ]) || value.schemaVersion !== SCHEMA_VERSION || !isNonemptyString(value.taskId) || !isNonNegativeSafeInteger(value.verificationRevision) || !isIsoTimestamp3(value.archivedAt) || !isNonemptyString(value.reworkReason) || !isNonemptyString(value.operationId) || !Array.isArray(value.rows)) {
+    return false;
+  }
+  const verificationRevision = value.verificationRevision;
+  return value.rows.every((row) => isHistoricalCheckRow(row, verificationRevision));
+}
+function isHistoricalCheckRow(value, verificationRevision) {
+  return isRecord6(value) && hasOnlyKeys(value, [
+    "schemaVersion",
+    "verificationRevision",
+    "requirementId",
+    "planItem",
+    "paths",
+    "evidenceIds",
+    "result",
+    "summary",
+    "checkedAt"
+  ]) && value.schemaVersion === SCHEMA_VERSION && value.verificationRevision === verificationRevision && isNonemptyString(value.requirementId) && isNonemptyString(value.planItem) && Array.isArray(value.paths) && value.paths.length > 0 && value.paths.every((path) => typeof path === "string" && normalizeRepositoryPath(path) === path) && new Set(value.paths).size === value.paths.length && Array.isArray(value.evidenceIds) && value.evidenceIds.every(isNonemptyString) && new Set(value.evidenceIds).size === value.evidenceIds.length && (value.result === "pass" || value.result === "fail" || value.result === "uncovered") && isNonemptyString(value.summary) && isIsoTimestamp3(value.checkedAt);
+}
 function isExpectedPendingMutationRecovery(intent, recovery) {
   return recovery !== void 0 && intent.operationId === recovery.operationId && intent.mutationKind === recovery.mutationKind;
 }
@@ -2433,13 +2809,13 @@ function isMutationKind(value) {
   return typeof value === "string" && (TASK_MUTATION_KINDS.has(value) || value === "check_upsert");
 }
 function isMutationTargetSummary(value) {
-  if (!isRecord5(value) || !hasOnlyKeys(value, ["identity", "files"]) || !isRecord5(value.identity) || !Array.isArray(value.files)) {
+  if (!isRecord6(value) || !hasOnlyKeys(value, ["identity", "files"]) || !isRecord6(value.identity) || !Array.isArray(value.files)) {
     return false;
   }
   if (Object.values(value.identity).some((item) => typeof item !== "string" || item.trim() === "")) return false;
   const paths = /* @__PURE__ */ new Set();
   return value.files.length > 0 && value.files.every((target) => {
-    if (!isRecord5(target) || !hasOnlyKeys(target, ["path", "sha256"]) || !isNonemptyString(target.path) || !/^[a-f0-9]{64}$/u.test(String(target.sha256)) || paths.has(target.path)) {
+    if (!isRecord6(target) || !hasOnlyKeys(target, ["path", "sha256"]) || !isNonemptyString(target.path) || !/^[a-f0-9]{64}$/u.test(String(target.sha256)) || paths.has(target.path)) {
       return false;
     }
     paths.add(target.path);
@@ -2447,19 +2823,19 @@ function isMutationTargetSummary(value) {
   });
 }
 function isMutationCompletion(value, operationId, _mutationKind) {
-  if (!isRecord5(value)) return false;
+  if (!isRecord6(value)) return false;
   return isJournalEvent({ ...value, operationId }) && value.operationId === void 0;
 }
 function matchesMutationCompletion(intent, completion) {
   const expected = intent.completion;
-  if (!isRecord5(expected)) return false;
+  if (!isRecord6(expected)) return false;
   const actual = { ...completion };
   delete actual.operationId;
   return stableJson(expected) === stableJson(actual);
 }
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (isRecord5(value)) {
+  if (isRecord6(value)) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
@@ -2470,26 +2846,29 @@ function hasOnlyKeys(value, allowed) {
 function isNonemptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
+function isSupportedHistorySchema(value, allowsLegacyHistory) {
+  return value === SCHEMA_VERSION || allowsLegacyHistory && value === LEGACY_SCHEMA_VERSION;
+}
 function isSessionBindingShape(value) {
-  return Object.keys(value).every((key) => ["schemaVersion", "taskId", "boundAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.taskId === "string" && TASK_ID_PATTERN.test(value.taskId) && isIsoTimestamp2(value.boundAt);
+  return Object.keys(value).every((key) => ["schemaVersion", "taskId", "boundAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.taskId === "string" && TASK_ID_PATTERN2.test(value.taskId) && isIsoTimestamp3(value.boundAt);
 }
 function isRequirement(value) {
-  return isRecord5(value) && Object.keys(value).every((key) => ["schemaVersion", "id", "text", "createdAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp2(value.createdAt);
+  return isRecord6(value) && Object.keys(value).every((key) => ["schemaVersion", "id", "text", "createdAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp3(value.createdAt);
 }
 function isLearningCandidates(value) {
   if (value === void 0) return true;
   if (!Array.isArray(value)) return false;
   const ids = /* @__PURE__ */ new Set();
   for (const candidate of value) {
-    if (!isRecord5(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp2(candidate.proposedAt)) {
+    if (!isRecord6(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp3(candidate.proposedAt)) {
       return false;
     }
     ids.add(candidate.id);
     if (candidate.status === "proposed") continue;
-    if (candidate.status === "accepted" && candidate.confirmedBy === "user" && isIsoTimestamp2(candidate.acceptedAt)) {
+    if (candidate.status === "accepted" && candidate.confirmedBy === "user" && isIsoTimestamp3(candidate.acceptedAt)) {
       continue;
     }
-    if (candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp2(candidate.archivedAt)) {
+    if (candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp3(candidate.archivedAt)) {
       continue;
     }
     return false;
@@ -2498,7 +2877,7 @@ function isLearningCandidates(value) {
 }
 function isCommitMetadata(value) {
   if (value === null) return true;
-  return isRecord5(value) && Object.keys(value).every((key) => ["sha", "message"].includes(key)) && typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
+  return isRecord6(value) && Object.keys(value).every((key) => ["sha", "message"].includes(key)) && typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
 }
 function isValidSessionBindingFilename(filename) {
   const match = /^(?:codex|claude)-sid-([0-9a-f]+)\.json$/.exec(filename);
@@ -2529,7 +2908,7 @@ function normalizeRepositoryPath(input) {
 }
 async function entryKind(path) {
   try {
-    const entry = await lstat7(path);
+    const entry = await lstat8(path);
     if (entry.isSymbolicLink()) return "symlink";
     if (entry.isFile()) return "file";
     if (entry.isDirectory()) return "directory";
@@ -2551,7 +2930,7 @@ function sortIssues(issues) {
 function compareText(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function isRecord5(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isStringArray(value) {
@@ -2560,7 +2939,7 @@ function isStringArray(value) {
 function isNonNegativeSafeInteger(value) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
-function isIsoTimestamp2(value) {
+function isIsoTimestamp3(value) {
   if (typeof value !== "string") return false;
   const parsed = new Date(value);
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
@@ -2571,13 +2950,14 @@ function isErrorCode(error, code) {
 function describeError(prefix, error) {
   return `${prefix}: ${error instanceof Error ? error.message : "unknown error"}.`;
 }
-var REQUIRED_TASK_ARTIFACTS, TASK_ID_PATTERN, ACTIVE_STATUSES, ALL_STATUSES, FORWARD_TRANSITIONS, BLOCKABLE_STATUSES, UNBLOCK_TARGETS, TASK_MUTATION_KINDS, RUNTIME_IGNORE2, MANAGED_SPEC_TARGET;
+var REQUIRED_TASK_ARTIFACTS, TASK_ID_PATTERN2, ACTIVE_STATUSES, ALL_STATUSES, FORWARD_TRANSITIONS, BLOCKABLE_STATUSES, UNBLOCK_TARGETS, TASK_MUTATION_KINDS, RUNTIME_IGNORE2, MANAGED_SPEC_TARGET;
 var init_validate = __esm({
   "src/core/validate.ts"() {
     "use strict";
     init_check();
     init_evidence();
     init_learning();
+    init_migration_state();
     init_paths();
     init_task_store();
     init_task_locks();
@@ -2588,9 +2968,10 @@ var init_validate = __esm({
       "context.jsonl",
       "evidence.jsonl",
       "check.md",
+      "check-history.jsonl",
       "journal.md"
     ];
-    TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+    TASK_ID_PATTERN2 = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
     ACTIVE_STATUSES = /* @__PURE__ */ new Set(["planning", "ready", "in_progress", "checking", "finished", "blocked"]);
     ALL_STATUSES = /* @__PURE__ */ new Set([...ACTIVE_STATUSES, "archived"]);
     FORWARD_TRANSITIONS = {
@@ -2621,7 +3002,7 @@ var init_validate = __esm({
 // src/core/task-store.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
-import { lstat as lstat8, mkdir as mkdir3, readFile as readFile6, readdir as readdir3, rename as rename2, rmdir as rmdir2, rm, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
+import { lstat as lstat9, mkdir as mkdir3, readFile as readFile6, readdir as readdir3, rename as rename2, rmdir as rmdir2, rm, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
 import { basename as basename4, dirname as dirname3, join as join7, relative as relative4, resolve as resolve3 } from "node:path";
 function assertTaskMutable(location) {
   if (location.scope === "archive" || location.task.status === "finished" || location.task.status === "archived") {
@@ -2673,15 +3054,20 @@ async function createTaskArtifacts(paths, task, creationEvent) {
   }
   return { task, directory, scope: "active" };
 }
-async function findTask(paths, taskId) {
-  if (!TASK_ID_PATTERN2.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
+async function findTask(paths, taskId, options = {}) {
+  if (!TASK_ID_PATTERN3.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
   const matches = (await Promise.all([
     findInScope(paths, paths.activeTasks, "active", taskId),
     findInScope(paths, paths.archivedTasks, "archive", taskId)
   ])).flat();
   if (matches.length === 0) throw new ValidationError(`Task not found: ${taskId}`);
   if (matches.length > 1) throw new AmbiguousTaskError(`Task ID is present in multiple locations: ${taskId}`);
-  return matches[0];
+  const location = matches[0];
+  if (options.recoverPendingRework === false) return location;
+  const { recoverPendingRework: recoverPendingRework2 } = await Promise.resolve().then(() => (init_workflow(), workflow_exports));
+  const recovered = await recoverPendingRework2(paths, taskId);
+  if (recovered === null) return location;
+  return findTask(paths, taskId, { recoverPendingRework: false });
 }
 async function listStoredTasks(paths, status) {
   const scopes = [[paths.activeTasks, "active"]];
@@ -2817,7 +3203,7 @@ async function readPendingTaskMutationIntent(paths, journalPath) {
   const records = await readJsonlRecords(paths.repoRoot, journalPath);
   let pending = null;
   for (const record of records) {
-    if (!isRecord6(record) || typeof record.type !== "string") continue;
+    if (!isRecord7(record) || typeof record.type !== "string") continue;
     if (record.type === "mutation_intent") {
       if (!isMutationIntent(record)) throw new SchemaError(`Invalid mutation intent in ${journalPath}`);
       if (pending !== null) {
@@ -2852,7 +3238,7 @@ async function mutationTargetsMatch(paths, location, mutationKind, expected) {
 function mutationTargetsAreOwned(paths, owner, mutationKind, expected) {
   const taskDirectory = relative4(paths.repoRoot, owner.directory).split("\\").join("/");
   const expectedDirectory = `.vinea/tasks/${owner.scope}/${owner.taskId}`;
-  if (taskDirectory !== expectedDirectory || !TASK_ID_PATTERN2.test(owner.taskId)) return false;
+  if (taskDirectory !== expectedDirectory || !TASK_ID_PATTERN3.test(owner.taskId)) return false;
   const currentTargets = mutationTargetPaths(taskDirectory, owner, mutationKind, expected.identity);
   if (currentTargets === null) return false;
   if (sameMutationTargetSet(expected.files.map(({ path }) => path), currentTargets)) return true;
@@ -2904,7 +3290,15 @@ function sameMutationTargetSet(actual, expected) {
 function isPotentialMutationTarget(paths, location, target) {
   const taskDirectory = relative4(paths.repoRoot, location.directory).split("\\").join("/");
   const artifact = target.startsWith(`${taskDirectory}/`) ? target.slice(taskDirectory.length + 1) : "";
-  return ["task.json", "brief.md", "plan.md", "context.jsonl", "evidence.jsonl", "check.md"].includes(artifact) || target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
+  return [
+    "task.json",
+    "brief.md",
+    "plan.md",
+    "context.jsonl",
+    "evidence.jsonl",
+    "check.md",
+    "check-history.jsonl"
+  ].includes(artifact) || target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
 }
 async function writeManagedMutationTarget(paths, location, filename, contents) {
   const target = relative4(paths.repoRoot, filename).split("\\").join("/");
@@ -2938,10 +3332,10 @@ function mutationValueIdentity(identity, value) {
   };
 }
 function isMutationIntent(value) {
-  return value.schemaVersion === SCHEMA_VERSION && value.type === "mutation_intent" && typeof value.operationId === "string" && value.operationId !== "" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.mutationKind === "string" && typeof value.fingerprint === "string" && /^[a-f0-9]{64}$/u.test(value.fingerprint) && isMutationTargetSummary2(value.expected) && isRecord6(value.completion);
+  return value.schemaVersion === SCHEMA_VERSION && value.type === "mutation_intent" && typeof value.operationId === "string" && value.operationId !== "" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.mutationKind === "string" && typeof value.fingerprint === "string" && /^[a-f0-9]{64}$/u.test(value.fingerprint) && isMutationTargetSummary2(value.expected) && isRecord7(value.completion);
 }
 function isMutationTargetSummary2(value) {
-  return isRecord6(value) && isRecord6(value.identity) && Object.values(value.identity).every((entry) => typeof entry === "string" && entry !== "") && Array.isArray(value.files) && value.files.length > 0 && value.files.every((entry) => isRecord6(entry) && typeof entry.path === "string" && typeof entry.sha256 === "string" && /^[a-f0-9]{64}$/u.test(entry.sha256));
+  return isRecord7(value) && isRecord7(value.identity) && Object.values(value.identity).every((entry) => typeof entry === "string" && entry !== "") && Array.isArray(value.files) && value.files.length > 0 && value.files.every((entry) => isRecord7(entry) && typeof entry.path === "string" && typeof entry.sha256 === "string" && /^[a-f0-9]{64}$/u.test(entry.sha256));
 }
 function matchesCompletion(left, right) {
   return stableJson2(left) === stableJson2(right);
@@ -2969,7 +3363,7 @@ function recordWithoutOperationId(value) {
 }
 function stableJson2(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson2).join(",")}]`;
-  if (isRecord6(value)) {
+  if (isRecord7(value)) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson2(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
@@ -3056,7 +3450,11 @@ async function readLatestEvidence(paths, location) {
     if (!isEvidenceRecord(record)) {
       throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`);
     }
-    return record;
+    return {
+      ...record,
+      schemaVersion: SCHEMA_VERSION,
+      verificationRevision: record.schemaVersion === LEGACY_SCHEMA_VERSION ? 0 : record.verificationRevision
+    };
   });
   return evidence.at(-1);
 }
@@ -3065,7 +3463,7 @@ async function readLatestCheckEvent(paths, location) {
   const events = await readJsonlRecords(paths.repoRoot, filename);
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
-    if (!isRecord6(event) || typeof event.type !== "string") continue;
+    if (!isRecord7(event) || typeof event.type !== "string") continue;
     if (event.type === "check_recorded" || event.type === "check_updated") return event;
   }
   return null;
@@ -3129,7 +3527,7 @@ async function loadLocation(paths, directory, scope, strict) {
 }
 async function isDirectory2(path) {
   try {
-    const entry = await lstat8(path);
+    const entry = await lstat9(path);
     return entry.isDirectory() && !entry.isSymbolicLink();
   } catch (error) {
     if (isCode2(error, "ENOENT")) return false;
@@ -3138,7 +3536,7 @@ async function isDirectory2(path) {
 }
 async function pathExists(path) {
   try {
-    await lstat8(path);
+    await lstat9(path);
     return true;
   } catch (error) {
     if (isCode2(error, "ENOENT")) return false;
@@ -3146,7 +3544,7 @@ async function pathExists(path) {
   }
 }
 async function withTaskLock(paths, taskId, operation) {
-  if (!TASK_ID_PATTERN2.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
+  if (!TASK_ID_PATTERN3.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
   const key = `${paths.repoRoot}\0${taskId}`;
   const inherited = taskLockContext.getStore();
   if (inherited?.has(key)) return operation();
@@ -3212,7 +3610,7 @@ async function releaseTaskLock(paths, lock) {
   } catch (error) {
     throw new SchemaError(`Unable to verify task lock ownership at ${lock.directory}`, error);
   }
-  if (!isRecord6(owner) || owner.token !== lock.token) {
+  if (!isRecord7(owner) || owner.token !== lock.token) {
     throw new SchemaError(`Task lock ownership changed at ${lock.directory}; refusing unsafe cleanup.`);
   }
   await removeOwnedTaskLock(lock.directory, lock.ownerPath, lock.token);
@@ -3220,7 +3618,7 @@ async function releaseTaskLock(paths, lock) {
 async function removeOwnedTaskLock(directory, ownerPath, token) {
   try {
     const owner = JSON.parse(await readFile6(ownerPath, "utf8"));
-    if (!isRecord6(owner) || owner.token !== token) return;
+    if (!isRecord7(owner) || owner.token !== token) return;
     await unlink2(ownerPath);
     await rmdir2(directory);
   } catch (error) {
@@ -3266,46 +3664,46 @@ function isWellFormedUnicode(value) {
   return true;
 }
 function isSessionBinding(value) {
-  if (!isRecord6(value)) return false;
+  if (!isRecord7(value)) return false;
   if (Object.keys(value).some((key) => !["schemaVersion", "taskId", "boundAt"].includes(key))) return false;
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.taskId === "string" && TASK_ID_PATTERN2.test(value.taskId) && isIsoTimestamp3(value.boundAt);
+  return value.schemaVersion === SCHEMA_VERSION && typeof value.taskId === "string" && TASK_ID_PATTERN3.test(value.taskId) && isIsoTimestamp4(value.boundAt);
 }
 function isEvidenceRecord(value) {
-  if (!isRecord6(value)) return false;
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind)) && typeof value.summary === "string" && value.summary.trim() !== "" && ["pass", "fail"].includes(String(value.result)) && isIsoTimestamp3(value.recordedAt) && typeof value.actor === "string" && value.actor.trim() !== "";
+  if (!isRecord7(value)) return false;
+  return (value.schemaVersion === LEGACY_SCHEMA_VERSION || value.schemaVersion === SCHEMA_VERSION) && (value.schemaVersion === LEGACY_SCHEMA_VERSION || isNonNegativeSafeInteger2(value.verificationRevision)) && typeof value.id === "string" && value.id.trim() !== "" && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind)) && typeof value.summary === "string" && value.summary.trim() !== "" && ["pass", "fail"].includes(String(value.result)) && isIsoTimestamp4(value.recordedAt) && typeof value.actor === "string" && value.actor.trim() !== "";
 }
 function isTaskRecordShape2(value) {
   if (!isTaskRecordBaseShape(value)) return false;
   return value.requirements.every(isRequirement2) && value.acceptanceCriteria.every(isRequirement2) && isLearningCandidateCollection(value.learningCandidates) && isCommitMetadata2(value.commit);
 }
 function isTaskRecordBaseShape(value) {
-  if (!isRecord6(value)) return false;
+  if (!isRecord7(value)) return false;
   const risk = value.risk;
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN2.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ["planning", "ready", "in_progress", "checking", "finished", "archived", "blocked"].includes(
+  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN3.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ["planning", "ready", "in_progress", "checking", "finished", "archived", "blocked"].includes(
     String(value.status)
-  ) && isRecord6(risk) && ["low", "medium", "high"].includes(String(risk.level)) && Array.isArray(risk.reasons) && risk.reasons.every((reason) => typeof reason === "string") && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && Array.isArray(value.requirements) && Array.isArray(value.acceptanceCriteria) && isIsoTimestamp3(value.createdAt) && isIsoTimestamp3(value.updatedAt);
+  ) && isRecord7(risk) && ["low", "medium", "high"].includes(String(risk.level)) && Array.isArray(risk.reasons) && risk.reasons.every((reason) => typeof reason === "string") && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && isNonNegativeSafeInteger2(value.verificationRevision) && Array.isArray(value.requirements) && Array.isArray(value.acceptanceCriteria) && isIsoTimestamp4(value.createdAt) && isIsoTimestamp4(value.updatedAt);
 }
 function isRequirement2(value) {
-  if (!isRecord6(value)) return false;
+  if (!isRecord7(value)) return false;
   if (Object.keys(value).some((key) => !["schemaVersion", "id", "text", "createdAt"].includes(key))) {
     return false;
   }
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp3(value.createdAt);
+  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp4(value.createdAt);
 }
 function isLearningCandidateCollection(value) {
   if (value === void 0) return true;
   if (!Array.isArray(value)) return false;
   const ids = /* @__PURE__ */ new Set();
   for (const candidate of value) {
-    if (!isRecord6(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp3(candidate.proposedAt)) {
+    if (!isRecord7(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp4(candidate.proposedAt)) {
       return false;
     }
     ids.add(candidate.id);
     if (candidate.status === "proposed") continue;
-    if (candidate.status === "accepted" && candidate.confirmedBy === "user" && isIsoTimestamp3(candidate.acceptedAt)) {
+    if (candidate.status === "accepted" && candidate.confirmedBy === "user" && isIsoTimestamp4(candidate.acceptedAt)) {
       continue;
     }
-    if (candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp3(candidate.archivedAt)) {
+    if (candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp4(candidate.archivedAt)) {
       continue;
     }
     return false;
@@ -3314,7 +3712,7 @@ function isLearningCandidateCollection(value) {
 }
 function isCommitMetadata2(value) {
   if (value === null) return true;
-  if (!isRecord6(value)) return false;
+  if (!isRecord7(value)) return false;
   if (Object.keys(value).some((key) => !["sha", "message"].includes(key))) return false;
   return typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
 }
@@ -3325,7 +3723,7 @@ async function readPendingTransitionIntent(paths, filename, taskStatus) {
   return candidate;
 }
 function isTransitionIntent(value) {
-  return isRecord6(value) && value.schemaVersion === SCHEMA_VERSION && value.type === "transition_intent" && typeof value.operationId === "string" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.reason === "string" && isTaskStatus2(value.oldStatus) && isTaskStatus2(value.newStatus);
+  return isRecord7(value) && value.schemaVersion === SCHEMA_VERSION && value.type === "transition_intent" && typeof value.operationId === "string" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.reason === "string" && isTaskStatus2(value.oldStatus) && isTaskStatus2(value.newStatus);
 }
 function isTaskStatus2(value) {
   return value === "planning" || value === "ready" || value === "in_progress" || value === "checking" || value === "finished" || value === "archived" || value === "blocked";
@@ -3346,15 +3744,18 @@ async function readJsonlRecords(repoRoot, filename) {
     }
   });
 }
-function isIsoTimestamp3(value) {
+function isIsoTimestamp4(value) {
   if (typeof value !== "string") return false;
   const parsed = new Date(value);
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
 }
-function isRecord6(value) {
+function isNonNegativeSafeInteger2(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-var ARTIFACTS, TASK_ID_PATTERN2, LEARNING_DOMAIN_PATTERN, TASK_LOCK_RETRY_MILLISECONDS, TASK_LOCK_TIMEOUT_MILLISECONDS, taskLockContext, DEFAULT_TRANSITION_OPERATIONS;
+var ARTIFACTS, TASK_ID_PATTERN3, LEARNING_DOMAIN_PATTERN, TASK_LOCK_RETRY_MILLISECONDS, TASK_LOCK_TIMEOUT_MILLISECONDS, taskLockContext, DEFAULT_TRANSITION_OPERATIONS;
 var init_task_store = __esm({
   "src/core/task-store.ts"() {
     "use strict";
@@ -3368,9 +3769,10 @@ var init_task_store = __esm({
       "context.jsonl",
       "evidence.jsonl",
       "check.md",
+      "check-history.jsonl",
       "journal.md"
     ];
-    TASK_ID_PATTERN2 = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+    TASK_ID_PATTERN3 = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
     LEARNING_DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
     TASK_LOCK_RETRY_MILLISECONDS = 25;
     TASK_LOCK_TIMEOUT_MILLISECONDS = 5e3;
@@ -3409,11 +3811,12 @@ async function upsertCheckLocked(paths, taskId, input, now) {
   const evidenceIds = uniqueStrings(
     input.evidenceIds.map((id) => boundedNonempty3(id, "Evidence ID", MAX_ID_BYTES))
   );
-  const knownEvidenceIds = new Set(evidence.map(({ id }) => id));
-  const missingEvidence = evidenceIds.find((id) => !knownEvidenceIds.has(id));
+  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
+  const missingEvidence = evidenceIds.find((id) => !evidenceById.has(id));
   if (missingEvidence !== void 0) {
     throw new ValidationError(`Evidence ID is not present for ${taskId}: ${missingEvidence}`);
   }
+  assertEvidenceFromCurrentRevision(evidenceById, evidenceIds, location.task.verificationRevision, taskId);
   const result = validateResult2(input.result);
   if (result === "pass" && evidenceIds.length === 0) {
     throw new ValidationError("A passing check row requires at least one evidence ID.");
@@ -3429,6 +3832,7 @@ async function upsertCheckLocked(paths, taskId, input, now) {
   const actor = boundedNonempty3(input.actor, "Check actor", MAX_ID_BYTES);
   const request = {
     schemaVersion: SCHEMA_VERSION,
+    verificationRevision: location.task.verificationRevision,
     actor,
     requirementId,
     planItem,
@@ -3452,13 +3856,20 @@ async function upsertCheckLocked(paths, taskId, input, now) {
     if (!currentDeclaredIds.includes(requirementId)) {
       throw new ValidationError(`Requirement or acceptance ID is not declared for ${taskId}: ${requirementId}`);
     }
-    const currentEvidenceIds = new Set(currentEvidence.map(({ id }) => id));
-    const missingEvidence2 = evidenceIds.find((id) => !currentEvidenceIds.has(id));
+    const currentEvidenceById = new Map(currentEvidence.map((record) => [record.id, record]));
+    const missingEvidence2 = evidenceIds.find((id) => !currentEvidenceById.has(id));
     if (missingEvidence2 !== void 0) {
       throw new ValidationError(`Evidence ID is not present for ${taskId}: ${missingEvidence2}`);
     }
+    assertEvidenceFromCurrentRevision(
+      currentEvidenceById,
+      evidenceIds,
+      current.task.verificationRevision,
+      taskId
+    );
     const row = {
       schemaVersion: SCHEMA_VERSION,
+      verificationRevision: current.task.verificationRevision,
       requirementId,
       planItem,
       paths: checkedPaths,
@@ -3531,9 +3942,16 @@ async function readRows(paths, location, evidence) {
   } catch (error) {
     throw new SchemaError(`Unable to read check matrix ${filename}`, error);
   }
-  return parseCheckDocument(contents, paths.repoRoot, declaredRequirementIds(location), evidence, filename);
+  return parseCheckDocument(
+    contents,
+    paths.repoRoot,
+    declaredRequirementIds(location),
+    evidence,
+    filename,
+    location.task.verificationRevision
+  );
 }
-function parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename) {
+function parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename, expectedVerificationRevision) {
   if (contents === "") return [];
   const firstLineEnd = contents.indexOf("\n");
   const firstLine = firstLineEnd === -1 ? contents : contents.slice(0, firstLineEnd);
@@ -3550,14 +3968,110 @@ function parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename)
   } catch (error) {
     throw new SchemaError(`Invalid authoritative check payload in ${filename}`, error);
   }
-  if (!isRecord7(value) || Object.keys(value).some((key) => key !== "schemaVersion" && key !== "rows") || value.schemaVersion !== SCHEMA_VERSION || !Array.isArray(value.rows)) {
+  if (!isRecord8(value) || Object.keys(value).some((key) => key !== "schemaVersion" && key !== "rows") || value.schemaVersion !== SCHEMA_VERSION || !Array.isArray(value.rows)) {
+    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
+  }
+  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
+  const seen = /* @__PURE__ */ new Set();
+  let previousDeclarationIndex = -1;
+  const rows = value.rows.map((candidate, index) => {
+    const row = validateStoredRow(candidate, repoRoot, filename, index + 1);
+    if (expectedVerificationRevision !== void 0 && row.verificationRevision !== expectedVerificationRevision) {
+      throw new SchemaError(
+        `Check row ${row.requirementId} uses verification revision ${row.verificationRevision}, but current revision is ${expectedVerificationRevision} in ${filename}`
+      );
+    }
+    const declarationIndex = declaredIds.indexOf(row.requirementId);
+    if (declarationIndex === -1) {
+      throw new SchemaError(`Check row references undeclared requirement ${row.requirementId} in ${filename}`);
+    }
+    if (declarationIndex <= previousDeclarationIndex) {
+      throw new SchemaError(`Check rows are not in declaration order in ${filename}`);
+    }
+    previousDeclarationIndex = declarationIndex;
+    if (seen.has(row.requirementId)) {
+      throw new SchemaError(`Duplicate check row for ${row.requirementId} in ${filename}`);
+    }
+    seen.add(row.requirementId);
+    const missingEvidence = row.evidenceIds.find((id) => !evidenceById.has(id));
+    if (missingEvidence !== void 0) {
+      throw new SchemaError(`Check row references absent evidence ${missingEvidence} in ${filename}`);
+    }
+    if (expectedVerificationRevision !== void 0) {
+      const staleEvidence = row.evidenceIds.find(
+        (id) => evidenceById.get(id)?.verificationRevision !== expectedVerificationRevision
+      );
+      if (staleEvidence !== void 0) {
+        throw new SchemaError(
+          `Check row references evidence ${staleEvidence} outside current verification revision ${expectedVerificationRevision} in ${filename}`
+        );
+      }
+    }
+    if (row.result === "pass" && row.evidenceIds.length === 0) {
+      throw new SchemaError(`Passing check row ${row.requirementId} has no evidence in ${filename}`);
+    }
+    return row;
+  });
+  if (contents !== renderCheckDocument(rows)) {
+    throw new SchemaError(`Check table does not match its authoritative payload in ${filename}`);
+  }
+  return rows;
+}
+function assertEvidenceFromCurrentRevision(evidenceById, evidenceIds, verificationRevision, taskId) {
+  const staleEvidence = evidenceIds.find(
+    (id) => evidenceById.get(id)?.verificationRevision !== verificationRevision
+  );
+  if (staleEvidence !== void 0) {
+    throw new ValidationError(
+      `Evidence ID is not from the current verification revision ${verificationRevision} for ${taskId}: ${staleEvidence}`
+    );
+  }
+}
+function migrateLegacyCheckDocument(contents, repoRoot, declaredIds, evidence, filename) {
+  if (contents === "") return "";
+  const firstLineEnd = contents.indexOf("\n");
+  const firstLine = firstLineEnd === -1 ? contents : contents.slice(0, firstLineEnd);
+  if (firstLine.startsWith(CHECK_PREFIX)) {
+    return renderCheckDocument(parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename));
+  }
+  if (!firstLine.startsWith(LEGACY_CHECK_PREFIX) || !firstLine.endsWith(CHECK_SUFFIX)) {
+    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
+  }
+  const encoded = firstLine.slice(LEGACY_CHECK_PREFIX.length, -CHECK_SUFFIX.length);
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new SchemaError(`Invalid authoritative check payload encoding in ${filename}`);
+  }
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch (error) {
+    throw new SchemaError(`Invalid authoritative check payload in ${filename}`, error);
+  }
+  if (!isRecord8(payload) || Object.keys(payload).some((key) => key !== "schemaVersion" && key !== "rows") || payload.schemaVersion !== LEGACY_SCHEMA_VERSION || !Array.isArray(payload.rows)) {
     throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
   }
   const evidenceIds = new Set(evidence.map(({ id }) => id));
   const seen = /* @__PURE__ */ new Set();
   let previousDeclarationIndex = -1;
-  const rows = value.rows.map((candidate, index) => {
-    const row = validateStoredRow(candidate, repoRoot, filename, index + 1);
+  const rows = payload.rows.map((candidate, index) => {
+    if (!isRecord8(candidate) || Object.keys(candidate).some((key) => ![
+      "schemaVersion",
+      "requirementId",
+      "planItem",
+      "paths",
+      "evidenceIds",
+      "result",
+      "summary",
+      "checkedAt"
+    ].includes(key)) || candidate.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+      throw new SchemaError(`Invalid check row ${index + 1} in ${filename}`);
+    }
+    const row = validateStoredRow(
+      { ...candidate, schemaVersion: SCHEMA_VERSION, verificationRevision: 0 },
+      repoRoot,
+      filename,
+      index + 1
+    );
     const declarationIndex = declaredIds.indexOf(row.requirementId);
     if (declarationIndex === -1) {
       throw new SchemaError(`Check row references undeclared requirement ${row.requirementId} in ${filename}`);
@@ -3579,15 +4093,16 @@ function parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename)
     }
     return row;
   });
-  if (contents !== renderCheckDocument(rows)) {
+  if (contents !== renderLegacyCheckDocument(rows)) {
     throw new SchemaError(`Check table does not match its authoritative payload in ${filename}`);
   }
-  return rows;
+  return renderCheckDocument(rows);
 }
 function validateStoredRow(value, repoRoot, filename, rowNumber) {
-  if (!isRecord7(value)) throw new SchemaError(`Invalid check row ${rowNumber} in ${filename}`);
+  if (!isRecord8(value)) throw new SchemaError(`Invalid check row ${rowNumber} in ${filename}`);
   const fields = [
     "schemaVersion",
+    "verificationRevision",
     "requirementId",
     "planItem",
     "paths",
@@ -3596,7 +4111,7 @@ function validateStoredRow(value, repoRoot, filename, rowNumber) {
     "summary",
     "checkedAt"
   ];
-  if (Object.keys(value).some((key) => !fields.includes(key)) || value.schemaVersion !== SCHEMA_VERSION || typeof value.requirementId !== "string" || typeof value.planItem !== "string" || !Array.isArray(value.paths) || !value.paths.every((path) => typeof path === "string") || !Array.isArray(value.evidenceIds) || !value.evidenceIds.every((id) => typeof id === "string") || typeof value.summary !== "string" || typeof value.checkedAt !== "string") {
+  if (Object.keys(value).some((key) => !fields.includes(key)) || value.schemaVersion !== SCHEMA_VERSION || typeof value.verificationRevision !== "number" || !Number.isSafeInteger(value.verificationRevision) || value.verificationRevision < 0 || typeof value.requirementId !== "string" || typeof value.planItem !== "string" || !Array.isArray(value.paths) || !value.paths.every((path) => typeof path === "string") || !Array.isArray(value.evidenceIds) || !value.evidenceIds.every((id) => typeof id === "string") || typeof value.summary !== "string" || typeof value.checkedAt !== "string") {
     throw new SchemaError(`Invalid check row ${rowNumber} in ${filename}`);
   }
   if (value.requirementId.trim() === "" || Buffer.byteLength(value.requirementId.trim(), "utf8") > MAX_ID_BYTES || value.planItem.trim() === "" || Buffer.byteLength(value.planItem.trim(), "utf8") > MAX_TEXT_BYTES || value.summary.trim() === "" || Buffer.byteLength(value.summary.trim(), "utf8") > MAX_TEXT_BYTES || value.paths.length === 0) {
@@ -3630,6 +4145,7 @@ function validateStoredRow(value, repoRoot, filename, rowNumber) {
   }
   return {
     schemaVersion: SCHEMA_VERSION,
+    verificationRevision: value.verificationRevision,
     requirementId: value.requirementId,
     planItem: value.planItem,
     paths: uniqueStrings(normalizedPaths),
@@ -3660,13 +4176,18 @@ async function readEvidence(paths, location) {
       throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`);
     }
     seen.add(value.id);
-    return value;
+    return {
+      ...value,
+      schemaVersion: SCHEMA_VERSION,
+      verificationRevision: value.schemaVersion === LEGACY_SCHEMA_VERSION ? 0 : value.verificationRevision
+    };
   });
 }
 function isEvidenceRecord2(value) {
-  if (!isRecord7(value)) return false;
+  if (!isRecord8(value)) return false;
   const fields = [
     "schemaVersion",
+    "verificationRevision",
     "id",
     "kind",
     "summary",
@@ -3680,19 +4201,49 @@ function isEvidenceRecord2(value) {
   const timestamp = typeof value.recordedAt === "string" ? new Date(value.recordedAt) : null;
   const exitCodeValid = value.exitCode === void 0 || typeof value.exitCode === "number" && Number.isSafeInteger(value.exitCode) && value.exitCode >= 0;
   if (!exitCodeValid) return false;
+  const validRevision = value.schemaVersion === LEGACY_SCHEMA_VERSION || typeof value.verificationRevision === "number" && Number.isSafeInteger(value.verificationRevision) && value.verificationRevision >= 0;
+  if (!validRevision) return false;
   if (value.result === "pass" && value.exitCode !== void 0 && value.exitCode !== 0) return false;
   if (value.result === "fail" && value.exitCode === 0) return false;
   if (value.kind === "tdd-red" && (value.result !== "fail" || typeof value.exitCode !== "number" || value.exitCode === 0)) {
     return false;
   }
   if (value.kind === "tdd-green" && (value.result !== "pass" || value.exitCode !== 0)) return false;
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind)) && typeof value.summary === "string" && value.summary.trim() !== "" && ["pass", "fail"].includes(String(value.result)) && timestamp !== null && !Number.isNaN(timestamp.valueOf()) && timestamp.toISOString() === value.recordedAt && typeof value.actor === "string" && value.actor.trim() !== "" && (value.command === void 0 || typeof value.command === "string" && value.command.trim() !== "");
+  return (value.schemaVersion === LEGACY_SCHEMA_VERSION || value.schemaVersion === SCHEMA_VERSION) && typeof value.id === "string" && value.id.trim() !== "" && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind)) && typeof value.summary === "string" && value.summary.trim() !== "" && ["pass", "fail"].includes(String(value.result)) && timestamp !== null && !Number.isNaN(timestamp.valueOf()) && timestamp.toISOString() === value.recordedAt && typeof value.actor === "string" && value.actor.trim() !== "" && (value.command === void 0 || typeof value.command === "string" && value.command.trim() !== "");
 }
 function renderCheckDocument(rows) {
   const payload = { schemaVersion: SCHEMA_VERSION, rows };
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   const lines = [
     `${CHECK_PREFIX}${encoded}${CHECK_SUFFIX}`,
+    "",
+    "# Check matrix",
+    "",
+    "| Requirement/acceptance ID | Task item | Implementation/change paths | Test/verification evidence | Result | Summary |",
+    "| --- | --- | --- | --- | --- | --- |",
+    ...rows.map((row) => [
+      row.requirementId,
+      row.planItem,
+      row.paths.map((path) => `\`${path.replace(/`/g, "\\`")}\``).join("<br>"),
+      row.evidenceIds.map((id) => `\`${id.replace(/`/g, "\\`")}\``).join("<br>") || "none",
+      row.result,
+      row.summary
+    ].map(escapeTableCell).join(" | ")).map((line) => `| ${line} |`),
+    ""
+  ];
+  return lines.join("\n");
+}
+function renderLegacyCheckDocument(rows) {
+  const payload = {
+    schemaVersion: LEGACY_SCHEMA_VERSION,
+    rows: rows.map(({ schemaVersion: _schemaVersion, verificationRevision: _verificationRevision, ...row }) => ({
+      schemaVersion: LEGACY_SCHEMA_VERSION,
+      ...row
+    }))
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const lines = [
+    `${LEGACY_CHECK_PREFIX}${encoded}${CHECK_SUFFIX}`,
     "",
     "# Check matrix",
     "",
@@ -3745,10 +4296,10 @@ function validateResult2(value) {
   }
   return value;
 }
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-var CHECK_PREFIX, CHECK_SUFFIX, MAX_TEXT_BYTES, MAX_ID_BYTES;
+var CHECK_PREFIX, LEGACY_CHECK_PREFIX, CHECK_SUFFIX, MAX_TEXT_BYTES, MAX_ID_BYTES;
 var init_check = __esm({
   "src/core/check.ts"() {
     "use strict";
@@ -3757,130 +4308,16 @@ var init_check = __esm({
     init_paths();
     init_task_store();
     init_types();
-    CHECK_PREFIX = "<!-- vinea-checks:v1:";
+    CHECK_PREFIX = "<!-- vinea-checks:v2:";
+    LEGACY_CHECK_PREFIX = "<!-- vinea-checks:v1:";
     CHECK_SUFFIX = " -->";
     MAX_TEXT_BYTES = 4e3;
     MAX_ID_BYTES = 200;
   }
 });
 
-// package.json
-var package_default = {
-  name: "vinea",
-  version: "0.1.0",
-  private: true,
-  type: "module",
-  engines: {
-    node: ">=18.18"
-  },
-  scripts: {
-    build: "node scripts/build.mjs",
-    typecheck: "tsc --noEmit",
-    test: "vitest run",
-    "package:plugin": "node scripts/package-public-plugin.mjs",
-    "check:plugin": "node scripts/check-public-plugin.mjs",
-    check: "npm run typecheck && npm test && npm run package:plugin && npm run check:plugin",
-    "test:e2e:manual": "node dist/vinea.mjs --help"
-  },
-  devDependencies: {
-    "@types/node": "^18.19.76",
-    esbuild: "^0.25.2",
-    typescript: "^5.8.3",
-    vitest: "^2.1.9"
-  }
-};
-
-// src/cli/args.ts
-var UsageError = class extends Error {
-  constructor(message, details) {
-    super(message);
-    this.details = details;
-    this.name = "UsageError";
-  }
-  exitCode = 2;
-  code = "VINEA_VALIDATION_INVALID";
-};
-function parseOptions(args, valueOptions, booleanOptions) {
-  const parsed = /* @__PURE__ */ new Map();
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (parsed.has(argument)) throw new UsageError(`Duplicate option: ${argument}`);
-    if (booleanOptions.has(argument)) {
-      parsed.set(argument, true);
-      continue;
-    }
-    if (!valueOptions.has(argument)) throw new UsageError(`Unknown option: ${argument}`);
-    const value = args[index + 1];
-    if (value === void 0 || value.startsWith("--")) {
-      throw new UsageError(`Missing value for ${argument}.`);
-    }
-    parsed.set(argument, value);
-    index += 1;
-  }
-  return parsed;
-}
-function requiredOption(options, name) {
-  const value = options.get(name);
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new UsageError(`Missing required option: ${name}.`);
-  }
-  return value;
-}
-function optionalValue(options, name) {
-  const value = options.get(name);
-  return typeof value === "string" ? value : void 0;
-}
-function requiredTaskId(value) {
-  if (value === void 0 || value.startsWith("--") || value.trim() === "") {
-    throw new UsageError("Missing task ID.");
-  }
-  return value;
-}
-function oneOf(value, allowed, option) {
-  if (!allowed.includes(value)) {
-    throw new UsageError(`Invalid ${option} value: ${value}. Expected ${allowed.join("|")}.`);
-  }
-  return value;
-}
-function parseExitCode(value) {
-  if (!/^\d+$/.test(value)) {
-    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
-  }
-  return parsed;
-}
-function commaList(value, option) {
-  const values = value.split(",").map((item) => item.trim());
-  if (values.some((item) => item === "")) {
-    throw new UsageError(`${option} must be a comma-separated list of nonempty values.`);
-  }
-  return values;
-}
-function requestsJson(args) {
-  return args.includes("--json");
-}
-
-// src/cli/render.ts
-init_errors();
-
-// src/core/workflow.ts
-init_config();
-init_check();
-import { execFile as execFile2 } from "node:child_process";
-import { lstat as lstat10, readFile as readFile9 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5, join as join9, resolve as resolve7 } from "node:path";
-import { promisify as promisify2 } from "node:util";
-
 // src/core/context.ts
-init_config();
-init_errors();
-init_paths();
-init_task_store();
-init_types();
-import { lstat as lstat9, readFile as readFile8, realpath } from "node:fs/promises";
+import { lstat as lstat10, readFile as readFile8, realpath } from "node:fs/promises";
 import {
   isAbsolute as isAbsolute4,
   relative as relative6,
@@ -3919,7 +4356,8 @@ async function addContextReferenceLocked(paths, taskId, input, now) {
     const current = await findTask(paths, taskId);
     assertTaskMutable(current);
     const currentFilename = resolve5(current.directory, "context.jsonl");
-    const references = await readContextReferences(paths.repoRoot, currentFilename);
+    const existing = await readContextFile(paths.repoRoot, currentFilename);
+    const references = existing.references;
     if (references.some((reference3) => reference3.path === normalizedPath)) {
       if (recovering) {
         throw new SchemaError(`Pending context mutation already contains ${normalizedPath}, but its managed target does not match.`);
@@ -3948,7 +4386,7 @@ async function addContextReferenceLocked(paths, taskId, input, now) {
       estimatedBytes,
       addedAt: timestamp
     };
-    const contents = renderContextReferences([...references, reference2]);
+    const contents = appendContextReference(existing.contents, reference2);
     return {
       expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ path: normalizedPath }, reference2)),
       completion: {
@@ -4006,12 +4444,12 @@ async function inspectContextFile(repoRoot, repositoryPath) {
   try {
     for (const segment of segments) {
       current = resolve5(current, segment);
-      const entry2 = await lstat9(current);
+      const entry2 = await lstat10(current);
       if (entry2.isSymbolicLink()) {
         throw new ValidationError(`Context path must not contain symbolic links: ${repositoryPath}`);
       }
     }
-    const entry = await lstat9(candidate);
+    const entry = await lstat10(candidate);
     if (!entry.isFile()) {
       throw new ValidationError(`Context path must reference a regular file: ${repositoryPath}`);
     }
@@ -4023,13 +4461,16 @@ async function inspectContextFile(repoRoot, repositoryPath) {
     return entry.size;
   } catch (error) {
     if (error instanceof ValidationError) throw error;
-    if (isMissing5(error)) {
+    if (isMissing6(error)) {
       throw new ValidationError(`Context path does not exist: ${repositoryPath}`, error);
     }
     throw new ValidationError(`Unable to inspect context path: ${repositoryPath}`, error);
   }
 }
 async function readContextReferences(repoRoot, filename) {
+  return (await readContextFile(repoRoot, filename)).references;
+}
+async function readContextFile(repoRoot, filename) {
   await assertNoSymlink(repoRoot, filename);
   let contents;
   try {
@@ -4037,7 +4478,7 @@ async function readContextReferences(repoRoot, filename) {
   } catch (error) {
     throw new SchemaError(`Unable to read context manifest ${filename}`, error);
   }
-  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
+  const references = contents.split("\n").filter((line) => line !== "").map((line, index) => {
     let value;
     try {
       value = JSON.parse(line);
@@ -4047,16 +4488,19 @@ async function readContextReferences(repoRoot, filename) {
     if (!isContextReference(value)) {
       throw new SchemaError(`Invalid context record in ${filename} at line ${index + 1}`);
     }
-    return value;
+    return { ...value, schemaVersion: SCHEMA_VERSION };
   });
+  return { contents, references };
 }
 function isContextReference(value) {
   if (typeof value !== "object" || value === null) return false;
   const record = value;
-  return record.schemaVersion === SCHEMA_VERSION && typeof record.path === "string" && typeof record.purpose === "string" && typeof record.estimatedBytes === "number" && Number.isSafeInteger(record.estimatedBytes) && record.estimatedBytes >= 0 && typeof record.addedAt === "string";
+  return (record.schemaVersion === LEGACY_SCHEMA_VERSION || record.schemaVersion === SCHEMA_VERSION) && typeof record.path === "string" && typeof record.purpose === "string" && typeof record.estimatedBytes === "number" && Number.isSafeInteger(record.estimatedBytes) && record.estimatedBytes >= 0 && typeof record.addedAt === "string";
 }
-function renderContextReferences(references) {
-  return references.map((reference) => JSON.stringify(reference)).join("\n") + "\n";
+function appendContextReference(contents, reference) {
+  const separator = contents === "" || contents.endsWith("\n") ? "" : "\n";
+  return `${contents}${separator}${JSON.stringify(reference)}
+`;
 }
 function assertNonempty(value, label) {
   if (value.trim() === "") throw new ValidationError(`${label} must not be empty.`);
@@ -4067,19 +4511,24 @@ function assertBoundedNonempty(value, label, maxBytes) {
     throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
   }
 }
-function isMissing5(error) {
+function isMissing6(error) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
-
-// src/core/workflow.ts
-init_errors();
-init_evidence();
+var init_context = __esm({
+  "src/core/context.ts"() {
+    "use strict";
+    init_config();
+    init_errors();
+    init_paths();
+    init_task_store();
+    init_types();
+  }
+});
 
 // src/core/git.ts
 import { execFile } from "node:child_process";
 import { resolve as resolve6 } from "node:path";
 import { promisify } from "node:util";
-var execFileAsync = promisify(execFile);
 async function inspectBusinessGitStatus(repoRoot) {
   let porcelain;
   try {
@@ -4137,25 +4586,45 @@ function parsePorcelainPaths(porcelain) {
 function isVineaPath(path) {
   return path === ".vinea" || path.startsWith(".vinea/");
 }
+var execFileAsync;
+var init_git = __esm({
+  "src/core/git.ts"() {
+    "use strict";
+    execFileAsync = promisify(execFile);
+  }
+});
 
 // src/core/workflow.ts
-init_task_store();
-init_paths();
-init_schema();
-init_validate();
-init_types();
-init_json();
-var execFileAsync2 = promisify2(execFile2);
-var DEFAULT_ARCHIVE_OPERATIONS = { removeTaskSessionBindings };
-var FORWARD_TRANSITIONS2 = {
-  planning: "ready",
-  ready: "in_progress",
-  in_progress: "checking",
-  checking: "finished",
-  finished: "archived"
-};
-var BLOCKABLE = /* @__PURE__ */ new Set(["planning", "ready", "in_progress", "checking"]);
-var UNBLOCK_TARGETS2 = /* @__PURE__ */ new Set(["ready", "in_progress", "checking"]);
+var workflow_exports = {};
+__export(workflow_exports, {
+  addAcceptanceCriterion: () => addAcceptanceCriterion,
+  addRequirement: () => addRequirement,
+  appendInlineAudit: () => appendInlineAudit,
+  archiveTask: () => archiveTask,
+  continueTask: () => continueTask,
+  createTask: () => createTask,
+  failedOrUncoveredCheckIds: () => failedOrUncoveredCheckIds,
+  finishTask: () => finishTask,
+  incompleteRequirements: () => incompleteRequirements,
+  isReworkEligible: () => isReworkEligible,
+  listCheckHistory: () => listCheckHistory,
+  listTasks: () => listTasks,
+  nextGate: () => nextGate,
+  orientWorkspace: () => orientWorkspace,
+  readCheckHistoryRevision: () => readCheckHistoryRevision,
+  readTask: () => readTask,
+  recoverPendingRework: () => recoverPendingRework,
+  reworkTask: () => reworkTask,
+  setTaskBrief: () => setTaskBrief,
+  setTaskPlan: () => setTaskPlan,
+  suggestRisk: () => suggestRisk,
+  taskView: () => taskView,
+  transitionTask: () => transitionTask
+});
+import { execFile as execFile2 } from "node:child_process";
+import { lstat as lstat11, readFile as readFile9 } from "node:fs/promises";
+import { isAbsolute as isAbsolute5, join as join9, resolve as resolve7 } from "node:path";
+import { promisify as promisify2 } from "node:util";
 function suggestRisk(title, description, changedPaths = [], rules = DEFAULT_CONFIG.riskRules) {
   const searchable = normalize([title, description, ...changedPaths].join(" "));
   const matchedHigh = matchedRules(searchable, rules.high);
@@ -4180,6 +4649,7 @@ async function createTask(paths, input, now = () => /* @__PURE__ */ new Date()) 
     risk: { level: input.risk.level, reasons: [...input.risk.reasons] },
     qualityMode: input.qualityMode,
     executionMode: input.executionMode,
+    verificationRevision: 0,
     requirements: [],
     acceptanceCriteria: [],
     commit: null,
@@ -4218,6 +4688,8 @@ async function readTask(paths, taskId) {
 }
 async function listTasks(paths, status) {
   await readConfig(paths);
+  const locations = await listStoredTasks(paths, status);
+  await Promise.all(locations.map(({ task }) => recoverPendingRework(paths, task.id)));
   return (await listStoredTasks(paths, status)).map(({ task }) => task);
 }
 async function orientWorkspace(paths, input) {
@@ -4235,7 +4707,11 @@ async function orientWorkspace(paths, input) {
     );
   }
   const canInspectTasks = health.initialized && health.supportedSchema;
-  const locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
+  let locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
+  if (canInspectTasks) {
+    await Promise.all(locations.map(({ task }) => recoverPendingRework(paths, task.id)));
+    locations = await listStoredTasks(paths, "active");
+  }
   const candidates = await Promise.all(locations.map(async (location) => {
     const [context, latestEvidence, latestCheckEvent, check] = await Promise.all([
       listContextReferences(paths, location.task.id),
@@ -4247,9 +4723,13 @@ async function orientWorkspace(paths, input) {
       id: location.task.id,
       title: location.task.title,
       status: location.task.status,
+      verificationRevision: location.task.verificationRevision,
       qualityMode: location.task.qualityMode,
       executionMode: location.task.executionMode,
       requirementsNotCovered: incompleteRequirements(location.task, check.summary.rows),
+      failedOrUncoveredIds: failedOrUncoveredCheckIds(check.summary.rows),
+      reworkEligible: isReworkEligible(location.task, check.summary.rows),
+      nextAction: nextGate(location.task, check.summary.rows),
       contextReferences: context.references,
       latestEvidence,
       latestCheckEvent
@@ -4365,6 +4845,351 @@ async function transitionTaskLocked(paths, taskId, newStatus, options) {
 async function finishTask(paths, taskId, input) {
   return withTaskLock(paths, taskId, () => finishTaskLocked(paths, taskId, input));
 }
+async function reworkTask(paths, taskId, input, now = input.now ?? (() => /* @__PURE__ */ new Date()), operationOverrides = {}) {
+  return withTaskLock(paths, taskId, () => reworkTaskLocked(
+    paths,
+    taskId,
+    input,
+    now,
+    operationOverrides
+  ));
+}
+async function recoverPendingRework(paths, taskId) {
+  await readConfig(paths);
+  const location = await findTask(paths, taskId, { recoverPendingRework: false });
+  const pending = await readPendingReworkIntent(paths, join9(location.directory, "journal.md"));
+  if (pending === null) return null;
+  return withTaskLock(paths, taskId, () => recoverPendingReworkLocked(paths, taskId));
+}
+async function recoverPendingReworkLocked(paths, taskId) {
+  await readConfig(paths);
+  const location = await findTask(paths, taskId, { recoverPendingRework: false });
+  const pending = await readPendingReworkIntent(paths, join9(location.directory, "journal.md"));
+  if (pending === null) return null;
+  await assertNoPendingTaskTransition(paths, location);
+  await assertNoPendingTaskMutation(paths, location);
+  return recoverReworkIntent(paths, location, pending, DEFAULT_REWORK_OPERATIONS);
+}
+async function listCheckHistory(paths, taskId) {
+  await readConfig(paths);
+  const location = await findTask(paths, taskId);
+  const snapshots = await readCheckHistory(paths, join9(location.directory, "check-history.jsonl"));
+  if (snapshots.some((snapshot) => snapshot.taskId !== taskId)) {
+    throw new SchemaError(`Check history for ${taskId} contains a snapshot for another task.`);
+  }
+  return {
+    taskId,
+    revisions: snapshots.sort((left, right) => left.verificationRevision - right.verificationRevision).map(summarizeCheckHistorySnapshot)
+  };
+}
+async function readCheckHistoryRevision(paths, taskId, verificationRevision) {
+  if (!isNonNegativeRevision(verificationRevision)) {
+    throw new ValidationError("Check-history revision must be a non-negative safe integer.");
+  }
+  await readConfig(paths);
+  const location = await findTask(paths, taskId);
+  const snapshots = await readCheckHistory(paths, join9(location.directory, "check-history.jsonl"));
+  const snapshot = snapshots.find((candidate) => candidate.taskId === taskId && candidate.verificationRevision === verificationRevision);
+  if (snapshot === void 0) {
+    throw new ValidationError(`No check-history snapshot exists for ${taskId} revision ${verificationRevision}.`);
+  }
+  return snapshot;
+}
+function summarizeCheckHistorySnapshot(snapshot) {
+  return {
+    verificationRevision: snapshot.verificationRevision,
+    archivedAt: snapshot.archivedAt,
+    reworkReason: snapshot.reworkReason,
+    operationId: snapshot.operationId,
+    totals: {
+      total: snapshot.rows.length,
+      pass: snapshot.rows.filter(({ result }) => result === "pass").length,
+      fail: snapshot.rows.filter(({ result }) => result === "fail").length,
+      uncovered: snapshot.rows.filter(({ result }) => result === "uncovered").length
+    }
+  };
+}
+async function reworkTaskLocked(paths, taskId, input, now, operationOverrides) {
+  await readConfig(paths);
+  const actor = boundedTrimmed(input.actor, "Rework actor", 200);
+  const reason = boundedTrimmed(input.reason, "Rework reason", 4e3);
+  const operations = { ...DEFAULT_REWORK_OPERATIONS, ...operationOverrides };
+  const location = await findTask(paths, taskId, { recoverPendingRework: false });
+  if (location.scope !== "active") {
+    throw new TransitionError(`Rework requires task ${taskId} to remain active; found archived task storage.`);
+  }
+  await assertNoPendingTaskTransition(paths, location);
+  await assertNoPendingTaskMutation(paths, location);
+  const journalPath = join9(location.directory, "journal.md");
+  const pending = await readPendingReworkIntent(paths, journalPath);
+  if (pending !== null) {
+    return recoverReworkIntent(paths, location, pending, operations);
+  }
+  if (location.task.status !== "checking") {
+    throw new TransitionError(
+      `Rework requires task ${taskId} to have status checking; found ${location.task.status}.`
+    );
+  }
+  await assertTaskLifecycleStructure(paths, location);
+  const { summary } = await readCheckForLocation(paths, location);
+  if (!summary.rows.some(({ result }) => result === "fail" || result === "uncovered")) {
+    throw new ValidationError(
+      `Rework requires a failed or uncovered current verification check for ${taskId}.`
+    );
+  }
+  const timestamp = now().toISOString();
+  const sourceVerificationRevision = location.task.verificationRevision;
+  const operationId = reworkOperationId(taskId, sourceVerificationRevision);
+  const snapshot = {
+    schemaVersion: SCHEMA_VERSION,
+    taskId,
+    verificationRevision: sourceVerificationRevision,
+    archivedAt: timestamp,
+    reworkReason: reason,
+    operationId,
+    rows: summary.rows.map(cloneCheckRow)
+  };
+  const intent = {
+    schemaVersion: SCHEMA_VERSION,
+    type: "rework_intent",
+    operationId,
+    timestamp,
+    actor,
+    reason,
+    sourceVerificationRevision,
+    snapshot
+  };
+  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  return recoverReworkIntent(paths, location, intent, operations);
+}
+async function recoverReworkIntent(paths, initialLocation, intent, operations) {
+  const location = await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false });
+  if (location.scope !== "active") {
+    throw new SchemaError(`Pending rework ${intent.operationId} is not in active task storage.`);
+  }
+  assertReworkIntentMatchesTask(intent, location.task);
+  const historyPath = join9(location.directory, "check-history.jsonl");
+  await ensureReworkHistory(paths, historyPath, intent.snapshot, operations);
+  const checkPath = join9(location.directory, "check.md");
+  const sourceCheck = renderCheckDocument(intent.snapshot.rows);
+  const currentCheck = await readTaskArtifact(paths, checkPath, "current check matrix");
+  if (currentCheck === sourceCheck) {
+    try {
+      await operations.writeCheck(paths, initialLocation, "");
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to clear current checks for rework ${intent.operationId}; rework intent remains pending for retry`,
+        error
+      );
+    }
+  } else if (currentCheck !== "") {
+    throw new SchemaError(
+      `Pending rework ${intent.operationId} has a current check matrix that does not match its recorded source snapshot.`
+    );
+  }
+  const current = await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false });
+  let task = current.task;
+  if (task.status === "checking" && task.verificationRevision === intent.sourceVerificationRevision) {
+    task = {
+      ...task,
+      status: "in_progress",
+      verificationRevision: intent.sourceVerificationRevision + 1,
+      updatedAt: intent.timestamp
+    };
+    try {
+      await operations.writeTask(join9(current.directory, "task.json"), task, paths.repoRoot);
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to commit rework ${intent.operationId}; rework intent remains pending for retry`,
+        error
+      );
+    }
+  } else if (task.status !== "in_progress" || task.verificationRevision !== intent.sourceVerificationRevision + 1 || task.updatedAt !== intent.timestamp) {
+    throw new SchemaError(
+      `Pending rework ${intent.operationId} does not match task.json status or verification revision.`
+    );
+  }
+  const journalPath = join9(current.directory, "journal.md");
+  const completed = await hasReworkCompletion(paths, journalPath, intent);
+  if (!completed) {
+    const completion = {
+      schemaVersion: SCHEMA_VERSION,
+      type: "reworked",
+      operationId: intent.operationId,
+      timestamp: intent.timestamp,
+      actor: intent.actor,
+      reason: intent.reason,
+      sourceVerificationRevision: intent.sourceVerificationRevision,
+      verificationRevision: intent.sourceVerificationRevision + 1,
+      status: "in_progress"
+    };
+    try {
+      await operations.appendJournal(journalPath, completion, paths.repoRoot);
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to complete rework ${intent.operationId}; rework intent remains pending for retry`,
+        error
+      );
+    }
+  }
+  return (await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false })).task;
+}
+function reworkOperationId(taskId, verificationRevision) {
+  return `rework-${taskId}-r${verificationRevision}`;
+}
+function cloneCheckRow(row) {
+  return { ...row, paths: [...row.paths], evidenceIds: [...row.evidenceIds] };
+}
+function assertReworkIntentMatchesTask(intent, task) {
+  const snapshot = intent.snapshot;
+  if (snapshot.schemaVersion !== SCHEMA_VERSION || snapshot.taskId !== task.id || snapshot.verificationRevision !== intent.sourceVerificationRevision || snapshot.operationId !== intent.operationId || snapshot.reworkReason !== intent.reason || !Number.isSafeInteger(intent.sourceVerificationRevision) || intent.sourceVerificationRevision < 0) {
+    throw new SchemaError(`Pending rework ${intent.operationId} has an invalid source snapshot.`);
+  }
+}
+async function ensureReworkHistory(paths, filename, snapshot, operations) {
+  const snapshots = await readCheckHistory(paths, filename);
+  const matching = snapshots.filter((candidate) => candidate.operationId === snapshot.operationId || candidate.taskId === snapshot.taskId && candidate.verificationRevision === snapshot.verificationRevision);
+  if (matching.length > 1 || matching.length === 1 && stableJson3(matching[0]) !== stableJson3(snapshot)) {
+    throw new SchemaError(`Rework history for ${snapshot.operationId} is duplicate or does not match its journal intent.`);
+  }
+  if (matching.length === 0) {
+    try {
+      await operations.appendHistory(filename, snapshot, paths.repoRoot);
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to archive checks for rework ${snapshot.operationId}; rework intent remains pending for retry`,
+        error
+      );
+    }
+  }
+}
+async function hasReworkCompletion(paths, filename, intent) {
+  const journal = await readJsonlObjects(paths, filename, "task journal");
+  const completions = journal.filter((event) => isJournalReworked(event) && event.operationId === intent.operationId);
+  if (completions.length > 1) {
+    throw new SchemaError(`Rework ${intent.operationId} has duplicate completion events.`);
+  }
+  if (completions.length === 0) return false;
+  const completion = completions[0];
+  if (!isJournalReworked(completion)) {
+    throw new SchemaError(`Rework ${intent.operationId} has an invalid completion event.`);
+  }
+  if (!reworkCompletionMatchesIntent(completion, intent)) {
+    throw new SchemaError(`Rework completion ${intent.operationId} does not match its rework intent.`);
+  }
+  return true;
+}
+async function readPendingReworkIntent(paths, filename) {
+  const journal = await readJsonlObjects(paths, filename, "task journal");
+  const intents = /* @__PURE__ */ new Map();
+  const completions = /* @__PURE__ */ new Map();
+  for (const event of journal) {
+    if (event.type === "rework_intent") {
+      if (!isJournalReworkIntent(event) || intents.has(event.operationId)) {
+        throw new SchemaError(`Task journal ${filename} has an invalid or duplicate rework intent.`);
+      }
+      intents.set(event.operationId, event);
+    } else if (event.type === "reworked") {
+      if (!isJournalReworked(event) || completions.has(event.operationId)) {
+        throw new SchemaError(`Task journal ${filename} has an invalid or duplicate rework completion.`);
+      }
+      completions.set(event.operationId, event);
+    }
+  }
+  const pending = [...intents.values()].filter((intent) => !completions.has(intent.operationId));
+  for (const [operationId, completion] of completions) {
+    const intent = intents.get(operationId);
+    if (intent === void 0) {
+      throw new SchemaError(`Rework completion ${operationId} has no matching rework intent.`);
+    }
+    if (!reworkCompletionMatchesIntent(completion, intent)) {
+      throw new SchemaError(`Rework completion ${operationId} does not match its rework intent.`);
+    }
+  }
+  if (pending.length > 1) {
+    throw new SchemaError(`Task journal ${filename} has more than one pending rework intent.`);
+  }
+  return pending[0] ?? null;
+}
+function reworkCompletionMatchesIntent(completion, intent) {
+  return completion.operationId === intent.operationId && completion.sourceVerificationRevision === intent.sourceVerificationRevision && completion.verificationRevision === intent.sourceVerificationRevision + 1 && completion.timestamp === intent.timestamp && completion.actor === intent.actor && completion.reason === intent.reason && completion.status === "in_progress";
+}
+async function readCheckHistory(paths, filename) {
+  const records = await readJsonlObjects(paths, filename, "check history", true);
+  const operationIds = /* @__PURE__ */ new Set();
+  const revisions = /* @__PURE__ */ new Set();
+  return records.map((record) => {
+    if (!isCheckHistorySnapshot2(record)) {
+      throw new SchemaError(`Invalid check-history record in ${filename}.`);
+    }
+    const revisionKey = `${record.taskId}:${record.verificationRevision}`;
+    if (operationIds.has(record.operationId) || revisions.has(revisionKey)) {
+      throw new SchemaError(`Check history ${filename} has duplicate operation or task revision ${record.operationId}.`);
+    }
+    operationIds.add(record.operationId);
+    revisions.add(revisionKey);
+    return record;
+  });
+}
+async function readJsonlObjects(paths, filename, label, allowMissing = false) {
+  await assertNoSymlink(paths.repoRoot, filename);
+  let contents;
+  try {
+    contents = await readFile9(filename, "utf8");
+  } catch (error) {
+    if (allowMissing && isMissingFile(error)) return [];
+    throw new SchemaError(`Unable to read ${label} ${filename}`, error);
+  }
+  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
+    try {
+      const value = JSON.parse(line);
+      if (!isRecord9(value)) throw new Error("record is not an object");
+      return value;
+    } catch (error) {
+      throw new SchemaError(`Invalid JSONL in ${label} ${filename} at line ${index + 1}`, error);
+    }
+  });
+}
+async function readTaskArtifact(paths, filename, label) {
+  await assertNoSymlink(paths.repoRoot, filename);
+  try {
+    return await readFile9(filename, "utf8");
+  } catch (error) {
+    throw new SchemaError(`Unable to read ${label} ${filename}`, error);
+  }
+}
+function isJournalReworkIntent(value) {
+  return value.schemaVersion === SCHEMA_VERSION && value.type === "rework_intent" && typeof value.operationId === "string" && value.operationId !== "" && isIsoTimestamp5(value.timestamp) && typeof value.actor === "string" && value.actor.trim() !== "" && typeof value.reason === "string" && value.reason.trim() !== "" && isNonNegativeRevision(value.sourceVerificationRevision) && isCheckHistorySnapshot2(value.snapshot) && value.snapshot.taskId !== "" && value.snapshot.verificationRevision === value.sourceVerificationRevision && value.snapshot.operationId === value.operationId && value.snapshot.reworkReason === value.reason;
+}
+function isJournalReworked(value) {
+  return value.schemaVersion === SCHEMA_VERSION && value.type === "reworked" && typeof value.operationId === "string" && value.operationId !== "" && isIsoTimestamp5(value.timestamp) && typeof value.actor === "string" && value.actor.trim() !== "" && typeof value.reason === "string" && value.reason.trim() !== "" && isNonNegativeRevision(value.sourceVerificationRevision) && isNonNegativeRevision(value.verificationRevision) && value.verificationRevision === value.sourceVerificationRevision + 1 && value.status === "in_progress";
+}
+function isCheckHistorySnapshot2(value) {
+  if (!isRecord9(value) || value.schemaVersion !== SCHEMA_VERSION || typeof value.taskId !== "string" || value.taskId.trim() === "" || !isNonNegativeRevision(value.verificationRevision) || !isIsoTimestamp5(value.archivedAt) || typeof value.reworkReason !== "string" || value.reworkReason.trim() === "" || typeof value.operationId !== "string" || value.operationId.trim() === "" || !Array.isArray(value.rows)) {
+    return false;
+  }
+  const verificationRevision = value.verificationRevision;
+  return value.rows.every((row) => isCheckRowSnapshot(row, verificationRevision));
+}
+function isCheckRowSnapshot(value, verificationRevision) {
+  if (!isRecord9(value) || value.schemaVersion !== SCHEMA_VERSION || value.verificationRevision !== verificationRevision || typeof value.requirementId !== "string" || value.requirementId.trim() === "" || typeof value.planItem !== "string" || value.planItem.trim() === "" || !Array.isArray(value.paths) || !value.paths.every((path) => typeof path === "string") || !Array.isArray(value.evidenceIds) || !value.evidenceIds.every((id) => typeof id === "string") || value.result !== "pass" && value.result !== "fail" && value.result !== "uncovered" || typeof value.summary !== "string" || value.summary.trim() === "" || !isIsoTimestamp5(value.checkedAt)) {
+    return false;
+  }
+  return true;
+}
+function isNonNegativeRevision(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function isMissingFile(error) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+function stableJson3(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson3).join(",")}]`;
+  if (isRecord9(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson3(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
 async function finishTaskLocked(paths, taskId, input) {
   if (!input.confirmed) throw new ValidationError("Finish requires explicit --confirmed.");
   await readConfig(paths);
@@ -4392,7 +5217,9 @@ async function finishTaskLocked(paths, taskId, input) {
       `Finish is blocked by failed or uncovered check rows: ${unsuccessful.map(({ requirementId }) => requirementId).join(", ")}.`
     );
   }
-  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
+  const evidenceById = new Map(
+    evidence.filter((record) => record.verificationRevision === location.task.verificationRevision).map((record) => [record.id, record])
+  );
   const withoutPassingEvidence = summary.rows.filter(
     (row) => !row.evidenceIds.some((id) => evidenceById.get(id)?.result === "pass")
   );
@@ -4471,14 +5298,33 @@ async function setTaskBrief(paths, taskId, sourceFile, actor = "cli", now = () =
 async function setTaskPlan(paths, taskId, sourceFile, actor = "cli", now = () => /* @__PURE__ */ new Date()) {
   return setTaskDocument(paths, taskId, sourceFile, "plan.md", actor, now);
 }
-function nextGate(task) {
+function nextGate(task, rows = []) {
   if (task.status === "blocked") return "unblock to ready, in_progress, or checking";
   if (task.status === "archived") return "none";
+  if (task.status === "checking") {
+    if (isReworkEligible(task, rows)) return "task rework";
+    if (incompleteRequirements(task, rows).length > 0) return "continue checking";
+    return "finish";
+  }
   return FORWARD_TRANSITIONS2[task.status] ?? "none";
 }
 function incompleteRequirements(task, rows = []) {
   const passingIds = new Set(rows.filter((row) => row.result === "pass").map((row) => row.requirementId));
   return [...task.requirements, ...task.acceptanceCriteria].map((requirement) => requirement.id).filter((id) => !passingIds.has(id));
+}
+function taskView(task, rows) {
+  return {
+    ...task,
+    failedOrUncoveredIds: failedOrUncoveredCheckIds(rows),
+    reworkEligible: isReworkEligible(task, rows),
+    nextAction: nextGate(task, rows)
+  };
+}
+function failedOrUncoveredCheckIds(rows) {
+  return rows.filter(({ result }) => result === "fail" || result === "uncovered").map(({ requirementId }) => requirementId);
+}
+function isReworkEligible(task, rows) {
+  return task.status === "checking" && failedOrUncoveredCheckIds(rows).length > 0;
 }
 function assertTransitionAllowed(oldStatus, newStatus, unblock) {
   if (oldStatus === "blocked") {
@@ -4633,7 +5479,7 @@ async function readTaskDocumentSource(paths, sourceFile) {
   }
   let entry;
   try {
-    entry = await lstat10(filename);
+    entry = await lstat11(filename);
   } catch (error) {
     throw new ValidationError(`Unable to inspect task document source ${sourceFile}`, error);
   }
@@ -4705,6 +5551,10 @@ function assertBoundedNonempty2(value, label, maxBytes) {
     throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
   }
 }
+function boundedTrimmed(value, label, maxBytes) {
+  assertBoundedNonempty2(value, label, maxBytes);
+  return value.trim();
+}
 function assertHost(value) {
   if (value !== "codex" && value !== "claude") {
     throw new ValidationError(`Invalid host: ${value}. Expected codex|claude.`);
@@ -4717,17 +5567,17 @@ function assertLearningCandidatesClassified(task) {
     throw new FinishGateError("Finish learning candidate data is malformed.");
   }
   for (const candidate of candidates) {
-    if (!isRecord8(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp4(candidate.proposedAt)) {
+    if (!isRecord9(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp5(candidate.proposedAt)) {
       throw new FinishGateError("Finish learning candidate data is malformed.");
     }
     if (candidate.status === "accepted") {
-      if (candidate.confirmedBy !== "user" || !isIsoTimestamp4(candidate.acceptedAt)) {
+      if (candidate.confirmedBy !== "user" || !isIsoTimestamp5(candidate.acceptedAt)) {
         throw new FinishGateError(`Finish learning candidate ${candidate.id} is not validly accepted.`);
       }
       continue;
     }
     if (candidate.status === "archived") {
-      if (!isIsoTimestamp4(candidate.archivedAt) || typeof candidate.archiveReason !== "string" || candidate.archiveReason.trim() === "") {
+      if (!isIsoTimestamp5(candidate.archivedAt) || typeof candidate.archiveReason !== "string" || candidate.archiveReason.trim() === "") {
         throw new FinishGateError(`Finish learning candidate ${candidate.id} is not validly archived.`);
       }
       continue;
@@ -4737,12 +5587,12 @@ function assertLearningCandidatesClassified(task) {
     );
   }
 }
-function isIsoTimestamp4(value) {
+function isIsoTimestamp5(value) {
   if (typeof value !== "string") return false;
   const parsed = new Date(value);
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
 }
-function isRecord8(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 async function inspectGitStatus(repoRoot) {
@@ -4764,17 +5614,170 @@ async function inspectGitStatus(repoRoot) {
     };
   }
 }
+var execFileAsync2, DEFAULT_ARCHIVE_OPERATIONS, DEFAULT_REWORK_OPERATIONS, FORWARD_TRANSITIONS2, BLOCKABLE, UNBLOCK_TARGETS2;
+var init_workflow = __esm({
+  "src/core/workflow.ts"() {
+    "use strict";
+    init_config();
+    init_check();
+    init_context();
+    init_errors();
+    init_evidence();
+    init_git();
+    init_task_store();
+    init_paths();
+    init_schema();
+    init_validate();
+    init_types();
+    init_json();
+    execFileAsync2 = promisify2(execFile2);
+    DEFAULT_ARCHIVE_OPERATIONS = { removeTaskSessionBindings };
+    DEFAULT_REWORK_OPERATIONS = {
+      appendJournal: appendJsonl,
+      appendHistory: appendJsonl,
+      writeCheck: (paths, location, contents) => writeManagedMutationTarget(
+        paths,
+        location,
+        join9(location.directory, "check.md"),
+        contents
+      ),
+      writeTask: writeJsonAtomic
+    };
+    FORWARD_TRANSITIONS2 = {
+      planning: "ready",
+      ready: "in_progress",
+      in_progress: "checking",
+      checking: "finished",
+      finished: "archived"
+    };
+    BLOCKABLE = /* @__PURE__ */ new Set(["planning", "ready", "in_progress", "checking"]);
+    UNBLOCK_TARGETS2 = /* @__PURE__ */ new Set(["ready", "in_progress", "checking"]);
+  }
+});
+
+// package.json
+var package_default = {
+  name: "vinea",
+  version: "0.1.0",
+  private: true,
+  type: "module",
+  engines: {
+    node: ">=18.18"
+  },
+  scripts: {
+    build: "node scripts/build.mjs",
+    typecheck: "tsc --noEmit",
+    test: "vitest run",
+    "package:plugin": "node scripts/package-public-plugin.mjs",
+    "check:plugin": "node scripts/check-public-plugin.mjs",
+    check: "npm run typecheck && npm test && npm run package:plugin && npm run check:plugin",
+    "test:e2e:manual": "node dist/vinea.mjs --help"
+  },
+  devDependencies: {
+    "@types/node": "^18.19.76",
+    esbuild: "^0.25.2",
+    typescript: "^5.8.3",
+    vitest: "^2.1.9"
+  }
+};
+
+// src/cli/args.ts
+var UsageError = class extends Error {
+  constructor(message, details) {
+    super(message);
+    this.details = details;
+    this.name = "UsageError";
+  }
+  exitCode = 2;
+  code = "VINEA_VALIDATION_INVALID";
+};
+function parseOptions(args, valueOptions, booleanOptions) {
+  const parsed = /* @__PURE__ */ new Map();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (parsed.has(argument)) throw new UsageError(`Duplicate option: ${argument}`);
+    if (booleanOptions.has(argument)) {
+      parsed.set(argument, true);
+      continue;
+    }
+    if (!valueOptions.has(argument)) throw new UsageError(`Unknown option: ${argument}`);
+    const value = args[index + 1];
+    if (value === void 0 || value.startsWith("--")) {
+      throw new UsageError(`Missing value for ${argument}.`);
+    }
+    parsed.set(argument, value);
+    index += 1;
+  }
+  return parsed;
+}
+function requiredOption(options, name) {
+  const value = options.get(name);
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new UsageError(`Missing required option: ${name}.`);
+  }
+  return value;
+}
+function optionalValue(options, name) {
+  const value = options.get(name);
+  return typeof value === "string" ? value : void 0;
+}
+function requiredTaskId(value) {
+  if (value === void 0 || value.startsWith("--") || value.trim() === "") {
+    throw new UsageError("Missing task ID.");
+  }
+  return value;
+}
+function oneOf(value, allowed, option) {
+  if (!allowed.includes(value)) {
+    throw new UsageError(`Invalid ${option} value: ${value}. Expected ${allowed.join("|")}.`);
+  }
+  return value;
+}
+function parseExitCode(value) {
+  if (!/^\d+$/.test(value)) {
+    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
+  }
+  return parsed;
+}
+function parseNonNegativeInteger(value, option) {
+  if (!/^\d+$/.test(value)) {
+    throw new UsageError(`Invalid ${option} value: ${value}. Expected a non-negative integer.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UsageError(`Invalid ${option} value: ${value}. Expected a non-negative integer.`);
+  }
+  return parsed;
+}
+function commaList(value, option) {
+  const values = value.split(",").map((item) => item.trim());
+  if (values.some((item) => item === "")) {
+    throw new UsageError(`${option} must be a comma-separated list of nonempty values.`);
+  }
+  return values;
+}
+function requestsJson(args) {
+  return args.includes("--json");
+}
 
 // src/cli/render.ts
+init_errors();
+init_workflow();
 var helpText = `Usage: vinea <command>
 
 Commands:
   init
+  migrate
   orient
   propose
   continue
   check
   check show
+  check history
   finish
   archive
   doctor
@@ -4782,6 +5785,7 @@ Commands:
   task list
   task show
   task transition
+  task rework
   task unblock
   task require
   task accept
@@ -4839,15 +5843,19 @@ function renderInlineAudit(record) {
 }
 function renderTask(task, checkRows = []) {
   const incomplete = incompleteRequirements(task, checkRows);
+  const failedOrUncovered = failedOrUncoveredCheckIds(checkRows);
   return [
     `task ID: ${task.id}`,
     `status: ${task.status}`,
+    `verification revision: ${task.verificationRevision}`,
     `quality mode: ${task.qualityMode}`,
     `execution mode: ${task.executionMode}`,
     `risk: ${task.risk.level}`,
     `risk reasons: ${task.risk.reasons.length ? task.risk.reasons.join(", ") : "none"}`,
     `incomplete requirements: ${incomplete.length ? incomplete.join(", ") : "none"}`,
-    `next gate: ${nextGate(task)}`,
+    `failed or uncovered checks: ${failedOrUncovered.length ? failedOrUncovered.join(", ") : "none"}`,
+    `rework eligible: ${isReworkEligible(task, checkRows)}`,
+    `next gate: ${nextGate(task, checkRows)}`,
     ""
   ].join("\n");
 }
@@ -4883,6 +5891,28 @@ function renderCheckSummary(summary) {
   );
   return lines.join("\n");
 }
+function renderCheckHistoryListing(history) {
+  if (history.revisions.length === 0) return `No check-history snapshots for ${history.taskId}.
+`;
+  return [
+    `Check history for ${history.taskId}:`,
+    ...history.revisions.map((revision) => [
+      `revision ${revision.verificationRevision}: ${revision.archivedAt}; ${revision.reworkReason}`,
+      `  ${revision.totals.pass} pass; ${revision.totals.fail} fail; ${revision.totals.uncovered} uncovered.`
+    ].join("\n")),
+    ""
+  ].join("\n");
+}
+function renderCheckHistorySnapshot(snapshot) {
+  return [
+    `Check history for ${snapshot.taskId}, revision ${snapshot.verificationRevision}:`,
+    `archived at: ${snapshot.archivedAt}`,
+    `reason: ${snapshot.reworkReason}`,
+    `operation: ${snapshot.operationId}`,
+    ...snapshot.rows.map((row) => `${row.requirementId}: ${row.result}; paths: ${row.paths.join(", ")}; evidence: ${row.evidenceIds.join(", ") || "none"}; ${row.summary}`),
+    ""
+  ].join("\n");
+}
 function renderOrient(summary) {
   const lines = [
     `workspace healthy: ${summary.health.healthy}`,
@@ -4894,7 +5924,11 @@ function renderOrient(summary) {
   for (const candidate of summary.candidates) {
     lines.push(
       `${candidate.id}: ${candidate.title} [${candidate.status}; ${candidate.qualityMode}; ${candidate.executionMode}]`,
+      `  verification revision: ${candidate.verificationRevision}`,
       `  requirements not covered: ${candidate.requirementsNotCovered.length ? candidate.requirementsNotCovered.join(", ") : "none"}`,
+      `  failed or uncovered checks: ${candidate.failedOrUncoveredIds.length ? candidate.failedOrUncoveredIds.join(", ") : "none"}`,
+      `  rework eligible: ${candidate.reworkEligible}`,
+      `  next action: ${candidate.nextAction}`,
       `  context references: ${candidate.contextReferences.length ? candidate.contextReferences.map(({ path }) => path).join(", ") : "none"}`,
       `  latest evidence: ${candidate.latestEvidence?.id ?? "none"}`,
       `  latest check event: ${String(candidate.latestCheckEvent?.type ?? "none")}`
@@ -4913,6 +5947,11 @@ function renderDoctorReport(report) {
     `healthy: ${report.healthy}`
   ];
   if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
+  for (const rework of report.rework) {
+    lines.push(
+      `rework: ${rework.taskId}; status: ${rework.status}; issues: ${rework.issues.map(({ code }) => code).join(", ")}`
+    );
+  }
   if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
   for (const lock of report.taskLocks) {
     const label = lock.path === ".vinea/.runtime/learning-promotion.lock" ? "learning promotion lock" : "task lock";
@@ -4952,24 +5991,391 @@ function normalizeError(error) {
 
 // src/cli.ts
 init_config();
+
+// src/core/migrate.ts
 init_check();
+init_evidence();
+init_errors();
+init_json();
+init_migration_state();
+init_paths();
+init_schema();
+init_task_store();
+init_types();
+import { createHash as createHash3 } from "node:crypto";
+import { lstat as lstat12, readFile as readFile10, readdir as readdir4 } from "node:fs/promises";
+import { join as join10 } from "node:path";
+var TASK_ID_PATTERN4 = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+var TASK_STATUSES = /* @__PURE__ */ new Set([
+  "planning",
+  "ready",
+  "in_progress",
+  "checking",
+  "finished",
+  "archived",
+  "blocked"
+]);
+async function migrateWorkspace(paths) {
+  const savedState = await readSchemaMigrationState(paths);
+  await assertNoSymlink(paths.repoRoot, paths.config);
+  const config = await readJson(paths.config, paths.repoRoot);
+  if (isCurrentConfig(config)) {
+    assertSupportedSchema(config, paths.config);
+    if (savedState?.phase === "intent") {
+      const taskDirectories2 = await listAllTaskDirectories(paths);
+      assertStateMatchesTaskDirectories(savedState, taskDirectories2);
+      await migrateTaskDirectories(paths, taskDirectories2);
+      await migrateSessionBindings(paths);
+      await completeMigrationState(paths, savedState);
+      return migrationResult(savedState.migratedTaskIds);
+    }
+    const migratedSessionBindings = await migrateSessionBindings(paths);
+    if (migratedSessionBindings.length > 0) {
+      return migrationResult([], SCHEMA_VERSION);
+    }
+    return {
+      status: "already-current",
+      fromSchemaVersion: SCHEMA_VERSION,
+      toSchemaVersion: SCHEMA_VERSION,
+      migratedTaskIds: []
+    };
+  }
+  if (!isLegacyConfig(config)) {
+    throw new SchemaError(`Vinea migration supports only schema version ${LEGACY_SCHEMA_VERSION} workspaces.`);
+  }
+  if (savedState?.phase === "completed") {
+    throw new SchemaError("Schema migration state is completed while config.json still uses schema version 1.");
+  }
+  const taskDirectories = await listAllTaskDirectories(paths);
+  const state = savedState ?? createMigrationState(taskDirectories);
+  assertStateMatchesTaskDirectories(state, taskDirectories);
+  if (savedState === null) await writeSchemaMigrationState(paths, state);
+  await migrateTaskDirectories(paths, taskDirectories);
+  await migrateSessionBindings(paths);
+  await writeJsonAtomic(paths.config, {
+    ...config,
+    schemaVersion: SCHEMA_VERSION
+  }, paths.repoRoot);
+  await completeMigrationState(paths, state);
+  return migrationResult(state.migratedTaskIds);
+}
+function createMigrationState(taskDirectories) {
+  const taskIds = taskDirectories.map(({ taskId }) => taskId);
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: "schema_migration",
+    operationId: `schema-v1-to-v2-${createHash3("sha256").update(taskIds.join("\n")).digest("hex").slice(0, 16)}`,
+    fromSchemaVersion: LEGACY_SCHEMA_VERSION,
+    toSchemaVersion: SCHEMA_VERSION,
+    phase: "intent",
+    taskIds,
+    migratedTaskIds: [...taskIds],
+    startedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function completeMigrationState(paths, state) {
+  await writeSchemaMigrationState(paths, {
+    ...state,
+    phase: "completed",
+    completedAt: (/* @__PURE__ */ new Date()).toISOString()
+  });
+}
+function migrationResult(migratedTaskIds, fromSchemaVersion = LEGACY_SCHEMA_VERSION) {
+  return {
+    status: "migrated",
+    fromSchemaVersion,
+    toSchemaVersion: SCHEMA_VERSION,
+    migratedTaskIds
+  };
+}
+async function listAllTaskDirectories(paths) {
+  const taskDirectories = [
+    ...await listTaskDirectories(paths, paths.activeTasks, "active"),
+    ...await listTaskDirectories(paths, paths.archivedTasks, "archive")
+  ].sort((left, right) => left.taskId.localeCompare(right.taskId));
+  const ids = taskDirectories.map(({ taskId }) => taskId);
+  if (new Set(ids).size !== ids.length) {
+    throw new SchemaError("A schema migration cannot process duplicate task IDs across active and archive storage.");
+  }
+  return taskDirectories;
+}
+function assertStateMatchesTaskDirectories(state, taskDirectories) {
+  const taskIds = taskDirectories.map(({ taskId }) => taskId);
+  if (taskIds.length !== state.taskIds.length || taskIds.some((taskId, index) => taskId !== state.taskIds[index])) {
+    throw new SchemaError("Task storage changed during schema migration; rerun only after the workspace is stable.");
+  }
+}
+async function migrateTaskDirectories(paths, taskDirectories) {
+  for (const { directory, taskId, scope } of taskDirectories) {
+    const taskPath = join10(directory, "task.json");
+    await assertNoSymlink(paths.repoRoot, taskPath);
+    const task = await readJson(taskPath, paths.repoRoot);
+    const currentTask = isCurrentTaskRecord(task) ? task : isLegacyTaskRecord(task) && task.id === taskId ? migrateTaskRecord(task) : null;
+    if (currentTask === null) {
+      throw new SchemaError(`Unable to migrate invalid schema-v1 task record in ${taskPath}.`);
+    }
+    const taskWasMigrated = !isCurrentTaskRecord(task);
+    const checkPath = join10(directory, "check.md");
+    await assertNoSymlink(paths.repoRoot, checkPath);
+    const currentCheck = await readFile10(checkPath, "utf8");
+    const migratedCheck = migrateLegacyCheckDocument(
+      currentCheck,
+      paths.repoRoot,
+      [...currentTask.requirements, ...currentTask.acceptanceCriteria].map(({ id }) => id),
+      await readEvidenceForMigration(paths, directory),
+      checkPath
+    );
+    if (migratedCheck !== currentCheck) {
+      await writeManagedMutationTarget(
+        paths,
+        { task: currentTask, directory, scope },
+        checkPath,
+        migratedCheck
+      );
+    }
+    await ensureCheckHistoryArtifact(paths, { task: currentTask, directory, scope });
+    if (taskWasMigrated) await writeJsonAtomic(taskPath, currentTask, paths.repoRoot);
+  }
+}
+async function ensureCheckHistoryArtifact(paths, location) {
+  const filename = join10(location.directory, "check-history.jsonl");
+  await assertNoSymlink(paths.repoRoot, filename);
+  try {
+    const contents = await readFile10(filename, "utf8");
+    if (contents !== "") {
+      throw new SchemaError(`Legacy workspace has unexpected check history at ${filename}.`);
+    }
+  } catch (error) {
+    if (!isMissingFile2(error)) throw error;
+    await writeManagedMutationTarget(paths, location, filename, "");
+  }
+}
+async function migrateSessionBindings(paths) {
+  await assertNoSymlink(paths.repoRoot, paths.sessions);
+  let entries;
+  try {
+    entries = await readdir4(paths.sessions, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingFile2(error)) return [];
+    throw new SchemaError(`Unable to list session bindings in ${paths.sessions} during migration.`, error);
+  }
+  const migrated = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const filename = join10(paths.sessions, entry.name);
+    if (!isSessionBindingFilename(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+      throw new SchemaError(`Invalid session binding ${filename} during migration.`);
+    }
+    await assertNoSymlink(paths.repoRoot, filename);
+    const value = await readJson(filename, paths.repoRoot);
+    if (isCurrentSessionBinding(value)) continue;
+    if (!isLegacySessionBinding(value)) {
+      throw new SchemaError(`Unable to migrate invalid schema-v1 session binding ${filename}.`);
+    }
+    await writeJsonAtomic(filename, {
+      ...value,
+      schemaVersion: SCHEMA_VERSION
+    }, paths.repoRoot);
+    migrated.push(filename);
+  }
+  return migrated;
+}
+function migrateTaskRecord(task) {
+  const {
+    schemaVersion: _schemaVersion,
+    requirements,
+    acceptanceCriteria,
+    learningCandidates,
+    ...taskBase
+  } = task;
+  return {
+    ...taskBase,
+    schemaVersion: SCHEMA_VERSION,
+    verificationRevision: 0,
+    requirements: requirements.map(migrateRequirement),
+    acceptanceCriteria: acceptanceCriteria.map(migrateRequirement),
+    ...learningCandidates === void 0 ? {} : { learningCandidates: learningCandidates.map(migrateLearningCandidate) }
+  };
+}
+function migrateRequirement(requirement) {
+  return { ...requirement, schemaVersion: SCHEMA_VERSION };
+}
+function migrateLearningCandidate(candidate) {
+  return { ...candidate, schemaVersion: SCHEMA_VERSION };
+}
+async function listTaskDirectories(paths, root, scope) {
+  await assertNoSymlink(paths.repoRoot, root);
+  let entries;
+  try {
+    entries = await readdir4(root, { withFileTypes: true });
+  } catch (error) {
+    throw new SchemaError(`Unable to list task directory ${root} during migration.`, error);
+  }
+  const result = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    if (!TASK_ID_PATTERN4.test(entry.name)) {
+      throw new SchemaError(`Invalid task directory ${entry.name} during migration.`);
+    }
+    const directory = join10(root, entry.name);
+    await assertNoSymlink(paths.repoRoot, directory);
+    const stat = await lstat12(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new SchemaError(`Invalid task directory ${directory} during migration.`);
+    }
+    result.push({ directory, taskId: entry.name, scope });
+  }
+  return result;
+}
+async function readEvidenceForMigration(paths, directory) {
+  const filename = join10(directory, "evidence.jsonl");
+  await assertNoSymlink(paths.repoRoot, filename);
+  let contents;
+  try {
+    contents = await readFile10(filename, "utf8");
+  } catch (error) {
+    throw new SchemaError(`Unable to read evidence records ${filename} during migration.`, error);
+  }
+  const seen = /* @__PURE__ */ new Set();
+  return contents.split("\n").filter(Boolean).map((line, index) => {
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch (error) {
+      throw new SchemaError(`Invalid evidence JSONL in ${filename} at line ${index + 1}`, error);
+    }
+    let evidence;
+    try {
+      evidence = normalizeEvidenceRecord(value, true);
+    } catch (error) {
+      throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`, error);
+    }
+    if (seen.has(evidence.id)) {
+      throw new SchemaError(`Duplicate evidence ID ${evidence.id} in ${filename} during migration.`);
+    }
+    seen.add(evidence.id);
+    return evidence;
+  });
+}
+function isCurrentConfig(value) {
+  return isRecord10(value) && value.schemaVersion === SCHEMA_VERSION;
+}
+function isLegacyConfig(value) {
+  return isRecord10(value) && value.schemaVersion === LEGACY_SCHEMA_VERSION && hasOnlyKeys2(value, ["schemaVersion", "riskRules", "context"]) && isRiskRules(value.riskRules) && isContextLimits(value.context);
+}
+function isCurrentTaskRecord(value) {
+  return isRecord10(value) && value.schemaVersion === SCHEMA_VERSION && isTaskBase(value) && isNonNegativeSafeInteger3(value.verificationRevision) && isRequirements(value.requirements, SCHEMA_VERSION) && isRequirements(value.acceptanceCriteria, SCHEMA_VERSION) && isLearningCandidates2(value.learningCandidates, SCHEMA_VERSION) && isCommitMetadata3(value.commit);
+}
+function isCurrentSessionBinding(value) {
+  return isRecord10(value) && value.schemaVersion === SCHEMA_VERSION && isSessionBindingBase(value);
+}
+function isLegacySessionBinding(value) {
+  return isRecord10(value) && value.schemaVersion === LEGACY_SCHEMA_VERSION && isSessionBindingBase(value);
+}
+function isSessionBindingBase(value) {
+  return hasOnlyKeys2(value, ["schemaVersion", "taskId", "boundAt"]) && typeof value.taskId === "string" && TASK_ID_PATTERN4.test(value.taskId) && isIsoTimestamp6(value.boundAt);
+}
+function isLegacyTaskRecord(value) {
+  return isRecord10(value) && value.schemaVersion === LEGACY_SCHEMA_VERSION && hasOnlyKeys2(value, [
+    "schemaVersion",
+    "id",
+    "title",
+    "status",
+    "risk",
+    "qualityMode",
+    "executionMode",
+    "requirements",
+    "acceptanceCriteria",
+    "learningCandidates",
+    "commit",
+    "createdAt",
+    "updatedAt"
+  ]) && isTaskBase(value) && isRequirements(value.requirements, LEGACY_SCHEMA_VERSION) && isRequirements(value.acceptanceCriteria, LEGACY_SCHEMA_VERSION) && isLearningCandidates2(value.learningCandidates, LEGACY_SCHEMA_VERSION) && isCommitMetadata3(value.commit);
+}
+function isTaskBase(value) {
+  return typeof value.id === "string" && TASK_ID_PATTERN4.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && typeof value.status === "string" && TASK_STATUSES.has(value.status) && isRisk(value.risk) && (value.qualityMode === "standard" || value.qualityMode === "tdd") && (value.executionMode === "single-agent" || value.executionMode === "delegated") && isIsoTimestamp6(value.createdAt) && isIsoTimestamp6(value.updatedAt);
+}
+function isRequirements(value, schemaVersion) {
+  return Array.isArray(value) && value.every(
+    (requirement) => isRecord10(requirement) && hasOnlyKeys2(requirement, ["schemaVersion", "id", "text", "createdAt"]) && requirement.schemaVersion === schemaVersion && typeof requirement.id === "string" && requirement.id.trim() !== "" && typeof requirement.text === "string" && requirement.text.trim() !== "" && isIsoTimestamp6(requirement.createdAt)
+  );
+}
+function isLearningCandidates2(value, schemaVersion) {
+  if (value === void 0) return true;
+  if (!Array.isArray(value)) return false;
+  const ids = /* @__PURE__ */ new Set();
+  return value.every((candidate) => {
+    if (!isRecord10(candidate) || candidate.schemaVersion !== schemaVersion || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp6(candidate.proposedAt)) {
+      return false;
+    }
+    ids.add(candidate.id);
+    if (candidate.status === "proposed") return true;
+    if (candidate.status === "accepted") {
+      return candidate.confirmedBy === "user" && isIsoTimestamp6(candidate.acceptedAt);
+    }
+    return candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp6(candidate.archivedAt);
+  });
+}
+function isRiskRules(value) {
+  return isRecord10(value) && hasOnlyKeys2(value, ["medium", "high"]) && isStringArray2(value.medium) && isStringArray2(value.high);
+}
+function isContextLimits(value) {
+  return isRecord10(value) && hasOnlyKeys2(value, ["maxFiles", "maxEstimatedBytes"]) && isNonNegativeSafeInteger3(value.maxFiles) && isNonNegativeSafeInteger3(value.maxEstimatedBytes);
+}
+function isRisk(value) {
+  return isRecord10(value) && hasOnlyKeys2(value, ["level", "reasons"]) && (value.level === "low" || value.level === "medium" || value.level === "high") && isStringArray2(value.reasons);
+}
+function isCommitMetadata3(value) {
+  return value === null || isRecord10(value) && hasOnlyKeys2(value, ["sha", "message"]) && typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
+}
+function isStringArray2(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function isNonNegativeSafeInteger3(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function isIsoTimestamp6(value) {
+  if (typeof value !== "string") return false;
+  const timestamp = new Date(value);
+  return !Number.isNaN(timestamp.valueOf()) && timestamp.toISOString() === value;
+}
+function hasOnlyKeys2(value, keys) {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+function isRecord10(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isSessionBindingFilename(value) {
+  return /^(codex|claude)-sid-[0-9a-f]+\.json$/u.test(value);
+}
+function isMissingFile2(error) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+// src/cli.ts
+init_check();
+init_context();
 init_evidence();
 
 // src/core/doctor.ts
 init_paths();
+init_migration_state();
 init_schema();
 init_task_locks();
+init_validate();
 import { execFile as execFile3 } from "node:child_process";
-import { lstat as lstat11, readdir as readdir4 } from "node:fs/promises";
+import { lstat as lstat13, readdir as readdir5 } from "node:fs/promises";
 import { promisify as promisify3 } from "node:util";
 var execFileAsync3 = promisify3(execFile3);
 async function diagnoseWorkspace(paths) {
-  const [workspace, runtimeSessions, taskLocks, gitStatus] = await Promise.all([
+  const [workspace, runtimeSessions, taskLocks, migration, gitStatus, validation] = await Promise.all([
     inspectWorkspace(paths),
     inspectRuntimeSessions(paths),
     inspectTaskLocks(paths),
-    inspectGitAvailability(paths.repoRoot)
+    inspectSchemaMigration(paths),
+    inspectGitAvailability(paths.repoRoot),
+    validateWorkspace(paths)
   ]);
+  const rework = workspace.supportedSchema ? collectReworkDiagnostics(validation.issues) : [];
   const missingRequiredDirectories = workspace.missingRequiredDirectories.filter(
     (directory) => directory !== ".runtime/sessions" || runtimeSessions !== "missing"
   );
@@ -4979,21 +6385,53 @@ async function diagnoseWorkspace(paths) {
   return {
     ...workspace,
     missingRequiredDirectories,
-    migrationGuidance: runtimeSessions === "invalid" && workspace.migrationGuidance === null ? "Repair or remove malformed local .runtime/sessions state before using session recovery." : workspace.migrationGuidance,
-    healthy: workspace.supportedSchema && missingRequiredDirectories.length === 0 && taskLocks.length === 0,
+    migrationGuidance: migration.status === "pending" ? `Schema migration ${migration.operationId} is incomplete. Run \`vinea migrate\` to resume it.` : migration.status === "invalid" ? "Repair or restore .runtime/schema-migration.json before using lifecycle commands." : rework.length > 0 && rework[0].status === "pending" ? `Task ${rework[0].taskId} has a pending rework. Run \`vinea task show ${rework[0].taskId}\` to resume it before continuing work.` : rework.length > 0 ? `Task ${rework[0].taskId} has invalid rework history. Run \`vinea validate\` and repair the reported records before continuing work.` : runtimeSessions === "invalid" && workspace.migrationGuidance === null ? "Repair or remove malformed local .runtime/sessions state before using session recovery." : workspace.migrationGuidance,
+    healthy: workspace.supportedSchema && missingRequiredDirectories.length === 0 && taskLocks.length === 0 && rework.length === 0 && migration.status !== "pending" && migration.status !== "invalid",
     taskLocks,
+    rework,
+    migration,
     gitStatus
   };
+}
+function collectReworkDiagnostics(issues) {
+  const byTask = /* @__PURE__ */ new Map();
+  for (const issue of issues) {
+    if (!isReworkValidationIssue(issue.code)) continue;
+    const taskId = issue.path.match(/^\.vinea\/tasks\/(?:active|archive)\/([^/]+)\//u)?.[1] ?? "unknown";
+    const taskIssues = byTask.get(taskId) ?? [];
+    taskIssues.push(issue);
+    byTask.set(taskId, taskIssues);
+  }
+  return [...byTask.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([taskId, taskIssues]) => ({
+    taskId,
+    status: taskIssues.some(({ code }) => isInvalidReworkCode(code)) ? "invalid" : "pending",
+    issues: taskIssues
+  }));
+}
+function isReworkValidationIssue(code) {
+  return code.startsWith("REWORK_") || code.startsWith("CHECK_HISTORY_") || code === "JOURNAL_REWORK_DISCONTINUITY" || code === "JOURNAL_TASK_REVISION_MISMATCH" || code === "EVIDENCE_REVISION_INVALID" || code === "CHECK_PAYLOAD_INVALID";
+}
+function isInvalidReworkCode(code) {
+  return code === "REWORK_COMPLETION_ORPHAN" || code === "REWORK_COMPLETION_MISMATCH" || code === "REWORK_INTENT_DUPLICATE" || code === "JOURNAL_REWORK_DISCONTINUITY" || code === "CHECK_HISTORY_OPERATION_DUPLICATE" || code === "CHECK_HISTORY_REVISION_DUPLICATE" || code === "CHECK_HISTORY_ORPHAN" || code === "JOURNAL_TASK_REVISION_MISMATCH" || code === "EVIDENCE_REVISION_INVALID" || code === "CHECK_PAYLOAD_INVALID";
+}
+async function inspectSchemaMigration(paths) {
+  try {
+    const state = await readSchemaMigrationState(paths);
+    if (state === null) return { status: "none" };
+    return state.phase === "intent" ? { status: "pending", operationId: state.operationId } : { status: "completed", operationId: state.operationId };
+  } catch {
+    return { status: "invalid" };
+  }
 }
 async function inspectRuntimeSessions(paths) {
   try {
     await assertNoSymlink(paths.repoRoot, paths.sessions);
-    const entry = await lstat11(paths.sessions);
+    const entry = await lstat13(paths.sessions);
     if (!entry.isDirectory() || entry.isSymbolicLink()) return "invalid";
-    await readdir4(paths.sessions);
+    await readdir5(paths.sessions);
     return "usable";
   } catch (error) {
-    return isMissing6(error) ? "missing" : "invalid";
+    return isMissing7(error) ? "missing" : "invalid";
   }
 }
 async function inspectGitAvailability(repoRoot) {
@@ -5011,7 +6449,7 @@ async function inspectGitAvailability(repoRoot) {
     };
   }
 }
-function isMissing6(error) {
+function isMissing7(error) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
@@ -5019,6 +6457,7 @@ function isMissing6(error) {
 init_learning();
 init_paths();
 init_validate();
+init_workflow();
 async function main(args) {
   const json = requestsJson(args);
   try {
@@ -5045,6 +6484,19 @@ async function main(args) {
       const report = await diagnoseWorkspace(resolveVineaPaths(process.cwd()));
       writeOutput(report, options.has("--json"), renderDoctorReport(report));
       return report.healthy ? 0 : 1;
+    }
+    if (command === "migrate") {
+      const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
+      const result = await migrateWorkspace(resolveVineaPaths(process.cwd()));
+      writeOutput(
+        result,
+        options.has("--json"),
+        result.status === "migrated" ? result.fromSchemaVersion === result.toSchemaVersion ? `Migrated Vinea runtime state for schema ${result.toSchemaVersion}.
+` : `Migrated Vinea workspace from schema ${result.fromSchemaVersion} to ${result.toSchemaVersion}.
+` : `Vinea workspace already uses schema ${result.toSchemaVersion}.
+`
+      );
+      return 0;
     }
     if (command === "validate") {
       const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
@@ -5209,7 +6661,17 @@ async function handleTask(args) {
     const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
     const task = await readTask(paths, taskId);
     const check = await showCheck(paths, taskId);
-    writeOutput(task, options.has("--json"), renderTask(task, check.rows));
+    writeOutput(taskView(task, check.rows), options.has("--json"), renderTask(task, check.rows));
+    return 0;
+  }
+  if (subcommand === "rework") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--reason"]), /* @__PURE__ */ new Set(["--json"]));
+    const task = await reworkTask(paths, taskId, {
+      actor: "cli",
+      reason: requiredOption(options, "--reason")
+    });
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
   if (subcommand === "transition" || subcommand === "unblock") {
@@ -5375,6 +6837,23 @@ async function handleLearning(args) {
 }
 async function handleCheck(args) {
   const paths = resolveVineaPaths(process.cwd());
+  if (args[0] === "history") {
+    const taskId2 = requiredTaskId(args[1]);
+    const options2 = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--revision"]), /* @__PURE__ */ new Set(["--json"]));
+    const revision = optionalValue(options2, "--revision");
+    if (revision === void 0) {
+      const history = await listCheckHistory(paths, taskId2);
+      writeOutput(history, options2.has("--json"), renderCheckHistoryListing(history));
+    } else {
+      const snapshot = await readCheckHistoryRevision(
+        paths,
+        taskId2,
+        parseNonNegativeInteger(revision, "--revision")
+      );
+      writeOutput(snapshot, options2.has("--json"), renderCheckHistorySnapshot(snapshot));
+    }
+    return 0;
+  }
   if (args[0] === "show") {
     const taskId2 = requiredTaskId(args[1]);
     const options2 = parseOptions(args.slice(2), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));

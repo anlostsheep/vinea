@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
@@ -30,6 +30,7 @@ test("check upserts one authoritative row and renders stable machine and human s
   expect(JSON.parse(first.stdout)).toMatchObject({
     taskId: task.id,
     rows: [{
+      verificationRevision: 0,
       requirementId: "R1",
       planItem: "Implement | verify",
       paths: ["src/core/check.ts", "tests/core/check.test.ts"],
@@ -53,6 +54,7 @@ test("check upserts one authoritative row and renders stable machine and human s
   expect(updated.exitCode).toBe(0);
   expect(JSON.parse(updated.stdout)).toMatchObject({
     rows: [{
+      verificationRevision: 0,
       requirementId: "R1",
       planItem: "Implement and verify",
       paths: ["src/core/check.ts"],
@@ -67,6 +69,7 @@ test("check upserts one authoritative row and renders stable machine and human s
   expect(shown.exitCode).toBe(0);
   expect(JSON.parse(shown.stdout)).toEqual(JSON.parse(updated.stdout));
   const markdown = await readFile(checkArtifact(cwd, task.id), "utf8");
+  expect(markdown.startsWith("<!-- vinea-checks:v2:")).toBe(true);
   expect(markdown).toContain("| Requirement/acceptance ID | Task item | Implementation/change paths | Test/verification evidence | Result | Summary |");
   expect(markdown).toContain("| R1 | Implement and verify | `src/core/check.ts` |");
   expect(markdown.match(/\| R1 \|/g)).toHaveLength(1);
@@ -160,6 +163,33 @@ test("check rejects absent requirement and evidence IDs, escaping paths, and pas
     });
     expect(await readFile(checkPath, "utf8")).toBe(before);
   }
+});
+
+test("check rejects evidence from an earlier verification revision", async () => {
+  const { cwd, task } = await initializedTask();
+  const evidence = await recordPassingEvidence(cwd, task.id, "Revision zero proof");
+  const taskPath = join(cwd, ".vinea", "tasks", "active", task.id, "task.json");
+  const revisionZeroTask = JSON.parse(await readFile(taskPath, "utf8")) as TaskRecord;
+  await writeFile(taskPath, `${JSON.stringify({ ...revisionZeroTask, verificationRevision: 1 }, null, 2)}\n`, "utf8");
+
+  const result = await runCli([
+    "check", task.id,
+    "--requirement", "R1",
+    "--plan-item", "Must use current proof",
+    "--paths", "src/core/check.ts",
+    "--evidence", evidence.id,
+    "--result", "pass",
+    "--summary", "Old evidence must be rejected",
+    "--json",
+  ], cwd);
+
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    error: {
+      code: "VINEA_VALIDATION_INVALID",
+      message: expect.stringContaining("current verification revision"),
+    },
+  });
 });
 
 async function initializedTask(): Promise<{ cwd: string; task: TaskRecord }> {

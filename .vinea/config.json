@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "riskRules": {
+    "medium": [
+      "behavior",
+      "bug",
+      "cross-file",
+      "external",
+      "security",
+      "data",
+      "deploy"
+    ],
+    "high": [
+      "production",
+      "migration",
+      "credential",
+      "permission",
+      "delete"
+    ]
+  },
+  "context": {
+    "maxFiles": 12,
+    "maxEstimatedBytes": 80000
+  }
+}

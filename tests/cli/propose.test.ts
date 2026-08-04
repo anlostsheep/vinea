@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
-import type { TaskRecord } from "../../src/core/types.js";
+import { SCHEMA_VERSION, type TaskRecord } from "../../src/core/types.js";
 import { createTempRepo, readJson, runCli, writeJson } from "../helpers/fixture.js";
 
 const execFileAsync = promisify(execFile);
@@ -73,7 +73,7 @@ test("an explicit inline skip appends one versioned audit record and no active t
   expect(result.stderr).toBe("");
   const output = JSON.parse(result.stdout) as Record<string, unknown>;
   expect(output).toEqual({
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     timestamp: expect.any(String),
     requestSummary: "Fix typo: Correct one label",
     proposedRisk: { level: "low", reasons: [] },
@@ -134,6 +134,7 @@ test("confirmed proposal creates the task and records user confirmation", async 
   const taskDirectory = join(cwd, ".vinea", "tasks", "active", task.id);
   expect((await readdir(taskDirectory)).sort()).toEqual([
     "brief.md",
+    "check-history.jsonl",
     "check.md",
     "context.jsonl",
     "evidence.jsonl",
@@ -157,7 +158,12 @@ test("task list and show provide parseable JSON and human gate details", async (
   const showResult = await runCli(["task", "show", task.id, "--json"], cwd);
   expect(showResult.exitCode).toBe(0);
   expect(showResult.stderr).toBe("");
-  expect(JSON.parse(showResult.stdout)).toEqual(task);
+  expect(JSON.parse(showResult.stdout)).toMatchObject({
+    ...task,
+    failedOrUncoveredIds: [],
+    reworkEligible: false,
+    nextAction: "ready",
+  });
 
   const human = await runCli(["task", "show", task.id], cwd);
   expect(human.stdout).toContain(`task ID: ${task.id}`);
@@ -196,7 +202,7 @@ test("task transition rejects skips and task unblock is the only blocked exit", 
   const taskDirectory = join(cwd, ".vinea", "tasks", "active", task.id);
   const stored = await readJson<TaskRecord>(join(taskDirectory, "task.json"));
   stored.requirements.push({
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     id: "R1",
     text: "Access is available",
     createdAt: new Date().toISOString(),

@@ -13,7 +13,7 @@ Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the ta
 
 ## Recovery
 
-Run `orient --host codex|claude --json` read-only. Summarize workspace health, Git state, task phase, modes, uncovered requirements, context references, and latest check/evidence.
+Run `orient --host codex|claude --json` read-only. Summarize workspace health, Git state, task phase, verification revision, modes, uncovered requirements, failed or uncovered checks, rework eligibility, context references, and latest check/evidence.
 
 In Codex, use `CODEX_THREAD_ID` only when the current host actually exposes a
 nonempty value. In that case pass it explicitly as
@@ -28,3 +28,5 @@ environment-variable fallback in this release; use `orient --host claude
 - With exactly one candidate, ask the user to confirm it before running `continue <task-id> --confirmed ...`.
 - With several candidates, present their summaries and ask the user to select one; never guess by time or name.
 - If diagnostics are unhealthy, direct the user to `vinea:doctor` before further work.
+
+For a `checking` task, route an all-pass current matrix to `finish`; keep an incomplete matrix in checking; and route a confirmed implementation defect through explicit `task rework <task-id> --reason <text>`. Do not use `blocked` for ordinary repair work.

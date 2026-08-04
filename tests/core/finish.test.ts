@@ -7,7 +7,7 @@ import { beforeAll, expect, test } from "vitest";
 import { SchemaError } from "../../src/core/errors.js";
 import { appendJsonl } from "../../src/core/json.js";
 import { resolveVineaPaths } from "../../src/core/paths.js";
-import type { EvidenceRecord, LearningCandidate, TaskRecord } from "../../src/core/types.js";
+import { SCHEMA_VERSION, type EvidenceRecord, type LearningCandidate, type TaskRecord } from "../../src/core/types.js";
 import { archiveTask, readTask } from "../../src/core/workflow.js";
 import { createTempRepo, readJson, runCli, writeJson } from "../helpers/fixture.js";
 
@@ -64,6 +64,24 @@ test("finish blocks missing requirement or acceptance coverage and failed or unc
     "pass",
   );
   await expectFinishBlocked(onlyFailedEvidence.cwd, onlyFailedEvidence.task.id, "passing evidence");
+});
+
+test("finish cannot consume check rows or evidence from an earlier verification revision", async () => {
+  const fixture = await createCheckingTask();
+  await coverTask(fixture);
+  const taskPath = join(taskDirectory(fixture.cwd, fixture.task.id, "active"), "task.json");
+  const revisionZeroTask = await readJson<TaskRecord>(taskPath);
+  await writeJson(taskPath, { ...revisionZeroTask, verificationRevision: 1 });
+
+  const result = await finish(fixture.cwd, fixture.task.id);
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    error: {
+      code: "VINEA_SCHEMA_INVALID",
+      message: expect.stringContaining("CHECK_PAYLOAD_INVALID"),
+    },
+  });
+  expect((await readJson<TaskRecord>(taskPath)).status).toBe("checking");
 });
 
 test("finish blocks a TDD task whose evidence no longer has red before green", async () => {
@@ -124,7 +142,7 @@ test("finish blocks unclassified learning candidates and accepts classified cand
   const proposed = await createCheckingTask();
   await coverTask(proposed);
   await setLearningCandidates(proposed, [{
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     id: "L1",
     domain: "testing",
     text: "Keep finish gates fail closed.",
@@ -137,7 +155,7 @@ test("finish blocks unclassified learning candidates and accepts classified cand
   const classified = await createCheckingTask();
   await coverTask(classified);
   await setLearningCandidates(classified, [{
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     id: "L1",
     domain: "testing",
     text: "Keep finish gates fail closed.",
@@ -198,7 +216,7 @@ test("archive retries a durable move whose final archived status write did not c
   expect((await finish(fixture.cwd, fixture.task.id)).exitCode).toBe(0);
   const activeDirectory = taskDirectory(fixture.cwd, fixture.task.id, "active");
   await appendJsonl(join(activeDirectory, "journal.md"), {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "transition_intent",
     operationId: "op-archive-retry",
     timestamp: "2026-07-31T14:00:00.000Z",

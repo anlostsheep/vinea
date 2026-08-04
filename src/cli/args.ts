@@ -76,6 +76,17 @@ export function parseExitCode(value: string): number {
   return parsed;
 }
 
+export function parseNonNegativeInteger(value: string, option: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new UsageError(`Invalid ${option} value: ${value}. Expected a non-negative integer.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UsageError(`Invalid ${option} value: ${value}. Expected a non-negative integer.`);
+  }
+  return parsed;
+}
+
 export function commaList(value: string, option: string): string[] {
   const values = value.split(",").map((item) => item.trim());
   if (values.some((item) => item === "")) {

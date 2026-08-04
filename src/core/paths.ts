@@ -14,6 +14,7 @@ export interface VineaPaths {
   archivedTasks: string;
   runtime: string;
   sessions: string;
+  migrationState: string;
 }
 
 export function resolveVineaPaths(repoRoot: string): VineaPaths {
@@ -33,6 +34,7 @@ export function resolveVineaPaths(repoRoot: string): VineaPaths {
     archivedTasks: inside(tasks, "archive"),
     runtime,
     sessions: inside(runtime, "sessions"),
+    migrationState: inside(runtime, "schema-migration.json"),
   };
 }
 

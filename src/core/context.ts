@@ -18,6 +18,7 @@ import {
   writeManagedMutationTarget,
 } from "./task-store.js";
 import {
+  LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
   type ContextReference,
   type VineaConfig,
@@ -84,7 +85,8 @@ async function addContextReferenceLocked(
     const current = await findTask(paths, taskId);
     assertTaskMutable(current);
     const currentFilename = resolve(current.directory, "context.jsonl");
-    const references = await readContextReferences(paths.repoRoot, currentFilename);
+    const existing = await readContextFile(paths.repoRoot, currentFilename);
+    const references = existing.references;
     if (references.some((reference) => reference.path === normalizedPath)) {
       if (recovering) {
         throw new SchemaError(`Pending context mutation already contains ${normalizedPath}, but its managed target does not match.`);
@@ -113,7 +115,7 @@ async function addContextReferenceLocked(
       estimatedBytes,
       addedAt: timestamp,
     };
-    const contents = renderContextReferences([...references, reference]);
+    const contents = appendContextReference(existing.contents, reference);
     return {
       expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ path: normalizedPath }, reference)),
       completion: {
@@ -202,6 +204,13 @@ async function inspectContextFile(repoRoot: string, repositoryPath: string): Pro
 }
 
 async function readContextReferences(repoRoot: string, filename: string): Promise<ContextReference[]> {
+  return (await readContextFile(repoRoot, filename)).references;
+}
+
+async function readContextFile(
+  repoRoot: string,
+  filename: string,
+): Promise<{ contents: string; references: ContextReference[] }> {
   await assertNoSymlink(repoRoot, filename);
   let contents: string;
   try {
@@ -209,7 +218,7 @@ async function readContextReferences(repoRoot: string, filename: string): Promis
   } catch (error) {
     throw new SchemaError(`Unable to read context manifest ${filename}`, error);
   }
-  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
+  const references = contents.split("\n").filter((line) => line !== "").map((line, index) => {
     let value: unknown;
     try {
       value = JSON.parse(line);
@@ -219,14 +228,15 @@ async function readContextReferences(repoRoot: string, filename: string): Promis
     if (!isContextReference(value)) {
       throw new SchemaError(`Invalid context record in ${filename} at line ${index + 1}`);
     }
-    return value;
+    return { ...value, schemaVersion: SCHEMA_VERSION };
   });
+  return { contents, references };
 }
 
 function isContextReference(value: unknown): value is ContextReference {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
-  return record.schemaVersion === SCHEMA_VERSION
+  return (record.schemaVersion === LEGACY_SCHEMA_VERSION || record.schemaVersion === SCHEMA_VERSION)
     && typeof record.path === "string"
     && typeof record.purpose === "string"
     && typeof record.estimatedBytes === "number"
@@ -235,8 +245,9 @@ function isContextReference(value: unknown): value is ContextReference {
     && typeof record.addedAt === "string";
 }
 
-function renderContextReferences(references: ContextReference[]): string {
-  return references.map((reference) => JSON.stringify(reference)).join("\n") + "\n";
+function appendContextReference(contents: string, reference: ContextReference): string {
+  const separator = contents === "" || contents.endsWith("\n") ? "" : "\n";
+  return `${contents}${separator}${JSON.stringify(reference)}\n`;
 }
 
 function assertNonempty(value: string, label: string): void {

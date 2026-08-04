@@ -23,7 +23,7 @@ test("init creates the versioned Vinea workspace without touching root guidance"
   expect(result.exitCode).toBe(0);
   expect(result.stderr).toBe("");
   expect(await readJson(join(cwd, ".vinea", "config.json"))).toEqual({
-    schemaVersion: 1,
+    schemaVersion: 2,
     riskRules: {
       medium: ["behavior", "bug", "cross-file", "external", "security", "data", "deploy"],
       high: ["production", "migration", "credential", "permission", "delete"],
@@ -69,7 +69,7 @@ test("init rejects future schemas with safe migration guidance and preserves con
   const cwd = await createTempRepo();
   const configPath = join(cwd, ".vinea", "config.json");
   await mkdir(join(cwd, ".vinea"), { recursive: true });
-  const contents = JSON.stringify({ schemaVersion: 2 });
+  const contents = JSON.stringify({ schemaVersion: 3 });
   await writeFile(configPath, contents, "utf8");
 
   const result = await runCli(["init"], cwd);

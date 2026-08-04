@@ -6,6 +6,7 @@ import { AmbiguousTaskError, SchemaError, TransitionError, ValidationError } fro
 import { appendJsonl, readJson, writeJsonAtomic } from "./json.js";
 import { assertInside, assertNoSymlink, ensureDirectory, type VineaPaths } from "./paths.js";
 import {
+  LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
   type EvidenceRecord,
   type Host,
@@ -28,6 +29,7 @@ const ARTIFACTS = [
   "context.jsonl",
   "evidence.jsonl",
   "check.md",
+  "check-history.jsonl",
   "journal.md",
 ] as const;
 const TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -40,6 +42,10 @@ export interface TaskLocation {
   task: TaskRecord;
   directory: string;
   scope: "active" | "archive";
+}
+
+export interface FindTaskOptions {
+  recoverPendingRework?: boolean;
 }
 
 export interface MutationTargetOwner {
@@ -130,7 +136,11 @@ export async function createTaskArtifacts(
   return { task, directory, scope: "active" };
 }
 
-export async function findTask(paths: VineaPaths, taskId: string): Promise<TaskLocation> {
+export async function findTask(
+  paths: VineaPaths,
+  taskId: string,
+  options: FindTaskOptions = {},
+): Promise<TaskLocation> {
   if (!TASK_ID_PATTERN.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
   const matches = (await Promise.all([
     findInScope(paths, paths.activeTasks, "active", taskId),
@@ -138,7 +148,15 @@ export async function findTask(paths: VineaPaths, taskId: string): Promise<TaskL
   ])).flat();
   if (matches.length === 0) throw new ValidationError(`Task not found: ${taskId}`);
   if (matches.length > 1) throw new AmbiguousTaskError(`Task ID is present in multiple locations: ${taskId}`);
-  return matches[0]!;
+  const location = matches[0]!;
+  if (options.recoverPendingRework === false) return location;
+  // Rework owns a multi-file, append-only recovery protocol. Keep the
+  // dependency dynamic because workflow already depends on task storage; by
+  // the time a task is looked up, both modules have finished initialization.
+  const { recoverPendingRework } = await import("./workflow.js");
+  const recovered = await recoverPendingRework(paths, taskId);
+  if (recovered === null) return location;
+  return findTask(paths, taskId, { recoverPendingRework: false });
 }
 
 export async function listStoredTasks(
@@ -511,7 +529,15 @@ function sameMutationTargetSet(actual: string[], expected: string[]): boolean {
 function isPotentialMutationTarget(paths: VineaPaths, location: TaskLocation, target: string): boolean {
   const taskDirectory = relative(paths.repoRoot, location.directory).split("\\").join("/");
   const artifact = target.startsWith(`${taskDirectory}/`) ? target.slice(taskDirectory.length + 1) : "";
-  return ["task.json", "brief.md", "plan.md", "context.jsonl", "evidence.jsonl", "check.md"].includes(artifact)
+  return [
+    "task.json",
+    "brief.md",
+    "plan.md",
+    "context.jsonl",
+    "evidence.jsonl",
+    "check.md",
+    "check-history.jsonl",
+  ].includes(artifact)
     || target === ".vinea/specs/index.md"
     || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
 }
@@ -838,7 +864,13 @@ export async function readLatestEvidence(paths: VineaPaths, location: TaskLocati
     if (!isEvidenceRecord(record)) {
       throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`);
     }
-    return record;
+    return {
+      ...record,
+      schemaVersion: SCHEMA_VERSION,
+      verificationRevision: (record as unknown as Record<string, unknown>).schemaVersion === LEGACY_SCHEMA_VERSION
+        ? 0
+        : record.verificationRevision,
+    };
   });
   return evidence.at(-1)!;
 }
@@ -1111,7 +1143,8 @@ function isSessionBinding(value: unknown): value is SessionBinding {
 
 function isEvidenceRecord(value: unknown): value is EvidenceRecord {
   if (!isRecord(value)) return false;
-  return value.schemaVersion === SCHEMA_VERSION
+  return (value.schemaVersion === LEGACY_SCHEMA_VERSION || value.schemaVersion === SCHEMA_VERSION)
+    && (value.schemaVersion === LEGACY_SCHEMA_VERSION || isNonNegativeSafeInteger(value.verificationRevision))
     && typeof value.id === "string"
     && value.id.trim() !== ""
     && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind))
@@ -1148,6 +1181,7 @@ function isTaskRecordBaseShape(value: unknown): value is TaskRecord {
     && risk.reasons.every((reason) => typeof reason === "string")
     && ["standard", "tdd"].includes(String(value.qualityMode))
     && ["single-agent", "delegated"].includes(String(value.executionMode))
+    && isNonNegativeSafeInteger(value.verificationRevision)
     && Array.isArray(value.requirements)
     && Array.isArray(value.acceptanceCriteria)
     && isIsoTimestamp(value.createdAt)
@@ -1267,6 +1301,10 @@ function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string") return false;
   const parsed = new Date(value);
   return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

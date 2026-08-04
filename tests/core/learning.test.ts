@@ -32,7 +32,7 @@ test("learning propose stores a task-local candidate and rejects invalid or term
   expect(proposed.stderr).toBe("");
   const stored = await readJson<TaskRecord>(join(taskDirectory, "task.json"));
   expect(stored.learningCandidates).toEqual([{
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "L1",
     domain: "testing-practice",
     text: "Keep completion gates fail closed.",

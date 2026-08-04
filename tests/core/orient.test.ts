@@ -77,9 +77,13 @@ test("orient summarizes one shared task and cross-host recovery does not require
       id: created.task.id,
       title: "Resume shared work",
       status: "planning",
+      verificationRevision: 0,
       qualityMode: "tdd",
       executionMode: "single-agent",
       requirementsNotCovered: ["R1", "A1"],
+      failedOrUncoveredIds: [],
+      reworkEligible: false,
+      nextAction: "ready",
       contextReferences: [
         expect.objectContaining({
           path: "resume-context.txt",
@@ -98,7 +102,7 @@ test("orient summarizes one shared task and cross-host recovery does not require
   });
   expect(continued.task.status).toBe("planning");
   expect(continued.binding).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId: created.task.id,
     boundAt: expect.any(String),
   });
@@ -197,7 +201,7 @@ test("orient reports a stale local binding and still requires confirmation for t
     fixedNow,
   );
   await writeJson(join(paths.sessions, "codex-sid-7374616c652d73657373696f6e.json"), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     taskId: "t-20260730-010203-missing-task",
     boundAt: "2026-07-31T08:00:00.000Z",
   });

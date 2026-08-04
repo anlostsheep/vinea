@@ -28,6 +28,8 @@ test("help lists every planned top-level command", async () => {
   ]) {
     expect(result.stdout).toContain(command);
   }
+  expect(result.stdout).toContain("task rework");
+  expect(result.stdout).toContain("check history");
 });
 
 test("version comes from the root package metadata", async () => {

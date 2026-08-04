@@ -108,3 +108,22 @@ test("Codex session binding is explicit and Claude has no invented environment f
   expect(continueSkill).toMatch(/otherwise omit it/i);
   expect(`${orient}\n${continueSkill}`).not.toContain("CLAUDE_SESSION_ID");
 });
+
+test("checker, continuation, orientation, and diagnostics describe the explicit revision-scoped rework loop", async () => {
+  const inventory = await readSkillInventory();
+  const source = new Map(inventory.skills.map(({ directory, source }) => [directory, source]));
+  const check = source.get("check")!;
+  const continueSkill = source.get("continue")!;
+  const orient = source.get("orient")!;
+  const doctor = source.get("doctor")!;
+
+  expect(check).toContain("task rework <task-id> --reason <text>");
+  expect(check).toMatch(/must not edit business code/i);
+  expect(check).toContain("check history <task-id>");
+  expect(continueSkill).toMatch(/current verification revision/i);
+  expect(continueSkill).toMatch(/fresh.*evidence/i);
+  expect(orient).toMatch(/verification revision/i);
+  expect(orient).toMatch(/failed or uncovered/i);
+  expect(orient).toContain("task rework");
+  expect(doctor).toMatch(/pending rework/i);
+});

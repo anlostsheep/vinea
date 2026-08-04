@@ -3,13 +3,15 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { DEFAULT_CONFIG, readConfig } from "./config.js";
-import { readCheckForLocation } from "./check.js";
+import { readCheckForLocation, renderCheckDocument } from "./check.js";
 import { listContextReferences } from "./context.js";
 import { FinishGateError, SchemaError, TransitionError, ValidationError } from "./errors.js";
 import { assertTddReadyForCheck } from "./evidence.js";
 import { inspectBusinessGitStatus } from "./git.js";
 import {
   appendTaskContinuation,
+  assertNoPendingTaskMutation,
+  assertNoPendingTaskTransition,
   assertTaskMutable,
   createTaskArtifacts,
   executeTaskMutation,
@@ -37,11 +39,14 @@ import {
   SCHEMA_VERSION,
   type ContinuationResult,
   type CheckRow,
+  type CheckHistorySnapshot,
   type ExecutionMode,
   type Host,
   type InlineAuditRecord,
   type JournalContinuationEvent,
   type JournalCreationEvent,
+  type JournalReworkIntentEvent,
+  type JournalReworkedEvent,
   type JournalTransitionDetails,
   type OrientBinding,
   type OrientCandidate,
@@ -51,6 +56,7 @@ import {
   type SessionBinding,
   type TaskRecord,
   type TaskStatus,
+  type TaskView,
   type VineaConfig,
 } from "./types.js";
 import { appendJsonl, writeJsonAtomic } from "./json.js";
@@ -118,11 +124,53 @@ export interface CompletionInput {
   now?: Clock;
 }
 
+export interface ReworkInput {
+  actor: string;
+  reason: string;
+  now?: Clock;
+}
+
+export interface CheckHistoryRevisionSummary {
+  verificationRevision: number;
+  archivedAt: string;
+  reworkReason: string;
+  operationId: string;
+  totals: {
+    total: number;
+    pass: number;
+    fail: number;
+    uncovered: number;
+  };
+}
+
+export interface CheckHistoryListing {
+  taskId: string;
+  revisions: CheckHistoryRevisionSummary[];
+}
+
 export interface ArchiveOperations {
   removeTaskSessionBindings(paths: VineaPaths, taskId: string): Promise<string[]>;
 }
 
+export interface ReworkPersistenceOperations {
+  appendJournal(filename: string, value: unknown, repoRoot: string): Promise<void>;
+  appendHistory(filename: string, value: unknown, repoRoot: string): Promise<void>;
+  writeCheck(paths: VineaPaths, location: TaskLocation, contents: string): Promise<void>;
+  writeTask(filename: string, value: unknown, repoRoot: string): Promise<void>;
+}
+
 const DEFAULT_ARCHIVE_OPERATIONS: ArchiveOperations = { removeTaskSessionBindings };
+const DEFAULT_REWORK_OPERATIONS: ReworkPersistenceOperations = {
+  appendJournal: appendJsonl,
+  appendHistory: appendJsonl,
+  writeCheck: (paths, location, contents) => writeManagedMutationTarget(
+    paths,
+    location,
+    join(location.directory, "check.md"),
+    contents,
+  ),
+  writeTask: writeJsonAtomic,
+};
 
 const FORWARD_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus>> = {
   planning: "ready",
@@ -169,6 +217,7 @@ export async function createTask(
     risk: { level: input.risk.level, reasons: [...input.risk.reasons] },
     qualityMode: input.qualityMode,
     executionMode: input.executionMode,
+    verificationRevision: 0,
     requirements: [],
     acceptanceCriteria: [],
     commit: null,
@@ -214,6 +263,8 @@ export async function readTask(paths: VineaPaths, taskId: string): Promise<TaskR
 
 export async function listTasks(paths: VineaPaths, status: "active" | "all"): Promise<TaskRecord[]> {
   await readConfig(paths);
+  const locations = await listStoredTasks(paths, status);
+  await Promise.all(locations.map(({ task }) => recoverPendingRework(paths, task.id)));
   return (await listStoredTasks(paths, status)).map(({ task }) => task);
 }
 
@@ -239,7 +290,11 @@ export async function orientWorkspace(
     );
   }
   const canInspectTasks = health.initialized && health.supportedSchema;
-  const locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
+  let locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
+  if (canInspectTasks) {
+    await Promise.all(locations.map(({ task }) => recoverPendingRework(paths, task.id)));
+    locations = await listStoredTasks(paths, "active");
+  }
   const candidates = await Promise.all(locations.map(async (location): Promise<OrientCandidate> => {
     const [context, latestEvidence, latestCheckEvent, check] = await Promise.all([
       listContextReferences(paths, location.task.id),
@@ -251,9 +306,13 @@ export async function orientWorkspace(
       id: location.task.id,
       title: location.task.title,
       status: location.task.status,
+      verificationRevision: location.task.verificationRevision,
       qualityMode: location.task.qualityMode,
       executionMode: location.task.executionMode,
       requirementsNotCovered: incompleteRequirements(location.task, check.summary.rows),
+      failedOrUncoveredIds: failedOrUncoveredCheckIds(check.summary.rows),
+      reworkEligible: isReworkEligible(location.task, check.summary.rows),
+      nextAction: nextGate(location.task, check.summary.rows),
       contextReferences: context.references,
       latestEvidence,
       latestCheckEvent,
@@ -406,6 +465,500 @@ export async function finishTask(
   return withTaskLock(paths, taskId, () => finishTaskLocked(paths, taskId, input));
 }
 
+export async function reworkTask(
+  paths: VineaPaths,
+  taskId: string,
+  input: ReworkInput,
+  now: Clock = input.now ?? (() => new Date()),
+  operationOverrides: Partial<ReworkPersistenceOperations> = {},
+): Promise<TaskRecord> {
+  return withTaskLock(paths, taskId, () => reworkTaskLocked(
+    paths,
+    taskId,
+    input,
+    now,
+    operationOverrides,
+  ));
+}
+
+export async function recoverPendingRework(
+  paths: VineaPaths,
+  taskId: string,
+): Promise<TaskRecord | null> {
+  await readConfig(paths);
+  const location = await findTask(paths, taskId, { recoverPendingRework: false });
+  const pending = await readPendingReworkIntent(paths, join(location.directory, "journal.md"));
+  if (pending === null) return null;
+  return withTaskLock(paths, taskId, () => recoverPendingReworkLocked(paths, taskId));
+}
+
+async function recoverPendingReworkLocked(paths: VineaPaths, taskId: string): Promise<TaskRecord | null> {
+  await readConfig(paths);
+  const location = await findTask(paths, taskId, { recoverPendingRework: false });
+  const pending = await readPendingReworkIntent(paths, join(location.directory, "journal.md"));
+  if (pending === null) return null;
+  await assertNoPendingTaskTransition(paths, location);
+  await assertNoPendingTaskMutation(paths, location);
+  return recoverReworkIntent(paths, location, pending, DEFAULT_REWORK_OPERATIONS);
+}
+
+export async function listCheckHistory(
+  paths: VineaPaths,
+  taskId: string,
+): Promise<CheckHistoryListing> {
+  await readConfig(paths);
+  const location = await findTask(paths, taskId);
+  const snapshots = await readCheckHistory(paths, join(location.directory, "check-history.jsonl"));
+  if (snapshots.some((snapshot) => snapshot.taskId !== taskId)) {
+    throw new SchemaError(`Check history for ${taskId} contains a snapshot for another task.`);
+  }
+  return {
+    taskId,
+    revisions: snapshots
+      .sort((left, right) => left.verificationRevision - right.verificationRevision)
+      .map(summarizeCheckHistorySnapshot),
+  };
+}
+
+export async function readCheckHistoryRevision(
+  paths: VineaPaths,
+  taskId: string,
+  verificationRevision: number,
+): Promise<CheckHistorySnapshot> {
+  if (!isNonNegativeRevision(verificationRevision)) {
+    throw new ValidationError("Check-history revision must be a non-negative safe integer.");
+  }
+  await readConfig(paths);
+  const location = await findTask(paths, taskId);
+  const snapshots = await readCheckHistory(paths, join(location.directory, "check-history.jsonl"));
+  const snapshot = snapshots.find((candidate) => candidate.taskId === taskId
+    && candidate.verificationRevision === verificationRevision);
+  if (snapshot === undefined) {
+    throw new ValidationError(`No check-history snapshot exists for ${taskId} revision ${verificationRevision}.`);
+  }
+  return snapshot;
+}
+
+function summarizeCheckHistorySnapshot(snapshot: CheckHistorySnapshot): CheckHistoryRevisionSummary {
+  return {
+    verificationRevision: snapshot.verificationRevision,
+    archivedAt: snapshot.archivedAt,
+    reworkReason: snapshot.reworkReason,
+    operationId: snapshot.operationId,
+    totals: {
+      total: snapshot.rows.length,
+      pass: snapshot.rows.filter(({ result }) => result === "pass").length,
+      fail: snapshot.rows.filter(({ result }) => result === "fail").length,
+      uncovered: snapshot.rows.filter(({ result }) => result === "uncovered").length,
+    },
+  };
+}
+
+async function reworkTaskLocked(
+  paths: VineaPaths,
+  taskId: string,
+  input: ReworkInput,
+  now: Clock,
+  operationOverrides: Partial<ReworkPersistenceOperations>,
+): Promise<TaskRecord> {
+  await readConfig(paths);
+  const actor = boundedTrimmed(input.actor, "Rework actor", 200);
+  const reason = boundedTrimmed(input.reason, "Rework reason", 4000);
+  const operations = { ...DEFAULT_REWORK_OPERATIONS, ...operationOverrides };
+  const location = await findTask(paths, taskId, { recoverPendingRework: false });
+  if (location.scope !== "active") {
+    throw new TransitionError(`Rework requires task ${taskId} to remain active; found archived task storage.`);
+  }
+  await assertNoPendingTaskTransition(paths, location);
+  await assertNoPendingTaskMutation(paths, location);
+
+  const journalPath = join(location.directory, "journal.md");
+  const pending = await readPendingReworkIntent(paths, journalPath);
+  if (pending !== null) {
+    return recoverReworkIntent(paths, location, pending, operations);
+  }
+  if (location.task.status !== "checking") {
+    throw new TransitionError(
+      `Rework requires task ${taskId} to have status checking; found ${location.task.status}.`,
+    );
+  }
+  await assertTaskLifecycleStructure(paths, location);
+  const { summary } = await readCheckForLocation(paths, location);
+  if (!summary.rows.some(({ result }) => result === "fail" || result === "uncovered")) {
+    throw new ValidationError(
+      `Rework requires a failed or uncovered current verification check for ${taskId}.`,
+    );
+  }
+  const timestamp = now().toISOString();
+  const sourceVerificationRevision = location.task.verificationRevision;
+  const operationId = reworkOperationId(taskId, sourceVerificationRevision);
+  const snapshot: CheckHistorySnapshot = {
+    schemaVersion: SCHEMA_VERSION,
+    taskId,
+    verificationRevision: sourceVerificationRevision,
+    archivedAt: timestamp,
+    reworkReason: reason,
+    operationId,
+    rows: summary.rows.map(cloneCheckRow),
+  };
+  const intent: JournalReworkIntentEvent = {
+    schemaVersion: SCHEMA_VERSION,
+    type: "rework_intent",
+    operationId,
+    timestamp,
+    actor,
+    reason,
+    sourceVerificationRevision,
+    snapshot,
+  };
+  await operations.appendJournal(journalPath, intent, paths.repoRoot);
+  return recoverReworkIntent(paths, location, intent, operations);
+}
+
+async function recoverReworkIntent(
+  paths: VineaPaths,
+  initialLocation: TaskLocation,
+  intent: JournalReworkIntentEvent,
+  operations: ReworkPersistenceOperations,
+): Promise<TaskRecord> {
+  const location = await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false });
+  if (location.scope !== "active") {
+    throw new SchemaError(`Pending rework ${intent.operationId} is not in active task storage.`);
+  }
+  assertReworkIntentMatchesTask(intent, location.task);
+  const historyPath = join(location.directory, "check-history.jsonl");
+  await ensureReworkHistory(paths, historyPath, intent.snapshot, operations);
+
+  const checkPath = join(location.directory, "check.md");
+  const sourceCheck = renderCheckDocument(intent.snapshot.rows);
+  const currentCheck = await readTaskArtifact(paths, checkPath, "current check matrix");
+  if (currentCheck === sourceCheck) {
+    try {
+      await operations.writeCheck(paths, initialLocation, "");
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to clear current checks for rework ${intent.operationId}; rework intent remains pending for retry`,
+        error,
+      );
+    }
+  } else if (currentCheck !== "") {
+    throw new SchemaError(
+      `Pending rework ${intent.operationId} has a current check matrix that does not match its recorded source snapshot.`,
+    );
+  }
+
+  const current = await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false });
+  let task = current.task;
+  if (task.status === "checking" && task.verificationRevision === intent.sourceVerificationRevision) {
+    task = {
+      ...task,
+      status: "in_progress",
+      verificationRevision: intent.sourceVerificationRevision + 1,
+      updatedAt: intent.timestamp,
+    };
+    try {
+      await operations.writeTask(join(current.directory, "task.json"), task, paths.repoRoot);
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to commit rework ${intent.operationId}; rework intent remains pending for retry`,
+        error,
+      );
+    }
+  } else if (task.status !== "in_progress"
+    || task.verificationRevision !== intent.sourceVerificationRevision + 1
+    || task.updatedAt !== intent.timestamp) {
+    throw new SchemaError(
+      `Pending rework ${intent.operationId} does not match task.json status or verification revision.`,
+    );
+  }
+
+  const journalPath = join(current.directory, "journal.md");
+  const completed = await hasReworkCompletion(paths, journalPath, intent);
+  if (!completed) {
+    const completion: JournalReworkedEvent = {
+      schemaVersion: SCHEMA_VERSION,
+      type: "reworked",
+      operationId: intent.operationId,
+      timestamp: intent.timestamp,
+      actor: intent.actor,
+      reason: intent.reason,
+      sourceVerificationRevision: intent.sourceVerificationRevision,
+      verificationRevision: intent.sourceVerificationRevision + 1,
+      status: "in_progress",
+    };
+    try {
+      await operations.appendJournal(journalPath, completion, paths.repoRoot);
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to complete rework ${intent.operationId}; rework intent remains pending for retry`,
+        error,
+      );
+    }
+  }
+  return (await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false })).task;
+}
+
+function reworkOperationId(taskId: string, verificationRevision: number): string {
+  return `rework-${taskId}-r${verificationRevision}`;
+}
+
+function cloneCheckRow(row: CheckRow): CheckRow {
+  return { ...row, paths: [...row.paths], evidenceIds: [...row.evidenceIds] };
+}
+
+function assertReworkIntentMatchesTask(intent: JournalReworkIntentEvent, task: TaskRecord): void {
+  const snapshot = intent.snapshot;
+  if (snapshot.schemaVersion !== SCHEMA_VERSION
+    || snapshot.taskId !== task.id
+    || snapshot.verificationRevision !== intent.sourceVerificationRevision
+    || snapshot.operationId !== intent.operationId
+    || snapshot.reworkReason !== intent.reason
+    || !Number.isSafeInteger(intent.sourceVerificationRevision)
+    || intent.sourceVerificationRevision < 0) {
+    throw new SchemaError(`Pending rework ${intent.operationId} has an invalid source snapshot.`);
+  }
+}
+
+async function ensureReworkHistory(
+  paths: VineaPaths,
+  filename: string,
+  snapshot: CheckHistorySnapshot,
+  operations: ReworkPersistenceOperations,
+): Promise<void> {
+  const snapshots = await readCheckHistory(paths, filename);
+  const matching = snapshots.filter((candidate) => candidate.operationId === snapshot.operationId
+    || (candidate.taskId === snapshot.taskId && candidate.verificationRevision === snapshot.verificationRevision));
+  if (matching.length > 1 || (matching.length === 1 && stableJson(matching[0]) !== stableJson(snapshot))) {
+    throw new SchemaError(`Rework history for ${snapshot.operationId} is duplicate or does not match its journal intent.`);
+  }
+  if (matching.length === 0) {
+    try {
+      await operations.appendHistory(filename, snapshot, paths.repoRoot);
+    } catch (error) {
+      throw new SchemaError(
+        `Unable to archive checks for rework ${snapshot.operationId}; rework intent remains pending for retry`,
+        error,
+      );
+    }
+  }
+}
+
+async function hasReworkCompletion(
+  paths: VineaPaths,
+  filename: string,
+  intent: JournalReworkIntentEvent,
+): Promise<boolean> {
+  const journal = await readJsonlObjects(paths, filename, "task journal");
+  const completions = journal.filter((event) => isJournalReworked(event)
+    && event.operationId === intent.operationId);
+  if (completions.length > 1) {
+    throw new SchemaError(`Rework ${intent.operationId} has duplicate completion events.`);
+  }
+  if (completions.length === 0) return false;
+  const completion = completions[0]!;
+  if (!isJournalReworked(completion)) {
+    throw new SchemaError(`Rework ${intent.operationId} has an invalid completion event.`);
+  }
+  if (!reworkCompletionMatchesIntent(completion, intent)) {
+    throw new SchemaError(`Rework completion ${intent.operationId} does not match its rework intent.`);
+  }
+  return true;
+}
+
+async function readPendingReworkIntent(
+  paths: VineaPaths,
+  filename: string,
+): Promise<JournalReworkIntentEvent | null> {
+  const journal = await readJsonlObjects(paths, filename, "task journal");
+  const intents = new Map<string, JournalReworkIntentEvent>();
+  const completions = new Map<string, JournalReworkedEvent>();
+  for (const event of journal) {
+    if (event.type === "rework_intent") {
+      if (!isJournalReworkIntent(event) || intents.has(event.operationId)) {
+        throw new SchemaError(`Task journal ${filename} has an invalid or duplicate rework intent.`);
+      }
+      intents.set(event.operationId, event);
+    } else if (event.type === "reworked") {
+      if (!isJournalReworked(event) || completions.has(event.operationId)) {
+        throw new SchemaError(`Task journal ${filename} has an invalid or duplicate rework completion.`);
+      }
+      completions.set(event.operationId, event);
+    }
+  }
+  const pending = [...intents.values()].filter((intent) => !completions.has(intent.operationId));
+  for (const [operationId, completion] of completions) {
+    const intent = intents.get(operationId);
+    if (intent === undefined) {
+      throw new SchemaError(`Rework completion ${operationId} has no matching rework intent.`);
+    }
+    if (!reworkCompletionMatchesIntent(completion, intent)) {
+      throw new SchemaError(`Rework completion ${operationId} does not match its rework intent.`);
+    }
+  }
+  if (pending.length > 1) {
+    throw new SchemaError(`Task journal ${filename} has more than one pending rework intent.`);
+  }
+  return pending[0] ?? null;
+}
+
+function reworkCompletionMatchesIntent(
+  completion: JournalReworkedEvent,
+  intent: JournalReworkIntentEvent,
+): boolean {
+  return completion.operationId === intent.operationId
+    && completion.sourceVerificationRevision === intent.sourceVerificationRevision
+    && completion.verificationRevision === intent.sourceVerificationRevision + 1
+    && completion.timestamp === intent.timestamp
+    && completion.actor === intent.actor
+    && completion.reason === intent.reason
+    && completion.status === "in_progress";
+}
+
+async function readCheckHistory(paths: VineaPaths, filename: string): Promise<CheckHistorySnapshot[]> {
+  const records = await readJsonlObjects(paths, filename, "check history", true);
+  const operationIds = new Set<string>();
+  const revisions = new Set<string>();
+  return records.map((record) => {
+    if (!isCheckHistorySnapshot(record)) {
+      throw new SchemaError(`Invalid check-history record in ${filename}.`);
+    }
+    const revisionKey = `${record.taskId}:${record.verificationRevision}`;
+    if (operationIds.has(record.operationId) || revisions.has(revisionKey)) {
+      throw new SchemaError(`Check history ${filename} has duplicate operation or task revision ${record.operationId}.`);
+    }
+    operationIds.add(record.operationId);
+    revisions.add(revisionKey);
+    return record;
+  });
+}
+
+async function readJsonlObjects(
+  paths: VineaPaths,
+  filename: string,
+  label: string,
+  allowMissing = false,
+): Promise<Record<string, unknown>[]> {
+  await assertNoSymlink(paths.repoRoot, filename);
+  let contents: string;
+  try {
+    contents = await readFile(filename, "utf8");
+  } catch (error) {
+    if (allowMissing && isMissingFile(error)) return [];
+    throw new SchemaError(`Unable to read ${label} ${filename}`, error);
+  }
+  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
+    try {
+      const value = JSON.parse(line) as unknown;
+      if (!isRecord(value)) throw new Error("record is not an object");
+      return value;
+    } catch (error) {
+      throw new SchemaError(`Invalid JSONL in ${label} ${filename} at line ${index + 1}`, error);
+    }
+  });
+}
+
+async function readTaskArtifact(paths: VineaPaths, filename: string, label: string): Promise<string> {
+  await assertNoSymlink(paths.repoRoot, filename);
+  try {
+    return await readFile(filename, "utf8");
+  } catch (error) {
+    throw new SchemaError(`Unable to read ${label} ${filename}`, error);
+  }
+}
+
+function isJournalReworkIntent(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & JournalReworkIntentEvent {
+  return value.schemaVersion === SCHEMA_VERSION
+    && value.type === "rework_intent"
+    && typeof value.operationId === "string"
+    && value.operationId !== ""
+    && isIsoTimestamp(value.timestamp)
+    && typeof value.actor === "string"
+    && value.actor.trim() !== ""
+    && typeof value.reason === "string"
+    && value.reason.trim() !== ""
+    && isNonNegativeRevision(value.sourceVerificationRevision)
+    && isCheckHistorySnapshot(value.snapshot)
+    && value.snapshot.taskId !== ""
+    && value.snapshot.verificationRevision === value.sourceVerificationRevision
+    && value.snapshot.operationId === value.operationId
+    && value.snapshot.reworkReason === value.reason;
+}
+
+function isJournalReworked(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & JournalReworkedEvent {
+  return value.schemaVersion === SCHEMA_VERSION
+    && value.type === "reworked"
+    && typeof value.operationId === "string"
+    && value.operationId !== ""
+    && isIsoTimestamp(value.timestamp)
+    && typeof value.actor === "string"
+    && value.actor.trim() !== ""
+    && typeof value.reason === "string"
+    && value.reason.trim() !== ""
+    && isNonNegativeRevision(value.sourceVerificationRevision)
+    && isNonNegativeRevision(value.verificationRevision)
+    && value.verificationRevision === value.sourceVerificationRevision + 1
+    && value.status === "in_progress";
+}
+
+function isCheckHistorySnapshot(value: unknown): value is CheckHistorySnapshot {
+  if (!isRecord(value)
+    || value.schemaVersion !== SCHEMA_VERSION
+    || typeof value.taskId !== "string"
+    || value.taskId.trim() === ""
+    || !isNonNegativeRevision(value.verificationRevision)
+    || !isIsoTimestamp(value.archivedAt)
+    || typeof value.reworkReason !== "string"
+    || value.reworkReason.trim() === ""
+    || typeof value.operationId !== "string"
+    || value.operationId.trim() === ""
+    || !Array.isArray(value.rows)) {
+    return false;
+  }
+  const verificationRevision = value.verificationRevision;
+  return value.rows.every((row) => isCheckRowSnapshot(row, verificationRevision));
+}
+
+function isCheckRowSnapshot(value: unknown, verificationRevision: number): value is CheckRow {
+  if (!isRecord(value)
+    || value.schemaVersion !== SCHEMA_VERSION
+    || value.verificationRevision !== verificationRevision
+    || typeof value.requirementId !== "string"
+    || value.requirementId.trim() === ""
+    || typeof value.planItem !== "string"
+    || value.planItem.trim() === ""
+    || !Array.isArray(value.paths)
+    || !value.paths.every((path) => typeof path === "string")
+    || !Array.isArray(value.evidenceIds)
+    || !value.evidenceIds.every((id) => typeof id === "string")
+    || (value.result !== "pass" && value.result !== "fail" && value.result !== "uncovered")
+    || typeof value.summary !== "string"
+    || value.summary.trim() === ""
+    || !isIsoTimestamp(value.checkedAt)) {
+    return false;
+  }
+  return true;
+}
+
+function isNonNegativeRevision(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isMissingFile(error: unknown): error is NodeJS.ErrnoException {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 async function finishTaskLocked(
   paths: VineaPaths,
   taskId: string,
@@ -438,7 +991,11 @@ async function finishTaskLocked(
       `Finish is blocked by failed or uncovered check rows: ${unsuccessful.map(({ requirementId }) => requirementId).join(", ")}.`,
     );
   }
-  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
+  const evidenceById = new Map(
+    evidence
+      .filter((record) => record.verificationRevision === location.task.verificationRevision)
+      .map((record) => [record.id, record]),
+  );
   const withoutPassingEvidence = summary.rows.filter(
     (row) => !row.evidenceIds.some((id) => evidenceById.get(id)?.result === "pass"),
   );
@@ -559,9 +1116,14 @@ export async function setTaskPlan(
   return setTaskDocument(paths, taskId, sourceFile, "plan.md", actor, now);
 }
 
-export function nextGate(task: TaskRecord): string {
+export function nextGate(task: TaskRecord, rows: CheckRow[] = []): string {
   if (task.status === "blocked") return "unblock to ready, in_progress, or checking";
   if (task.status === "archived") return "none";
+  if (task.status === "checking") {
+    if (isReworkEligible(task, rows)) return "task rework";
+    if (incompleteRequirements(task, rows).length > 0) return "continue checking";
+    return "finish";
+  }
   return FORWARD_TRANSITIONS[task.status] ?? "none";
 }
 
@@ -570,6 +1132,25 @@ export function incompleteRequirements(task: TaskRecord, rows: CheckRow[] = []):
   return [...task.requirements, ...task.acceptanceCriteria]
     .map((requirement) => requirement.id)
     .filter((id) => !passingIds.has(id));
+}
+
+export function taskView(task: TaskRecord, rows: CheckRow[]): TaskView {
+  return {
+    ...task,
+    failedOrUncoveredIds: failedOrUncoveredCheckIds(rows),
+    reworkEligible: isReworkEligible(task, rows),
+    nextAction: nextGate(task, rows),
+  };
+}
+
+export function failedOrUncoveredCheckIds(rows: CheckRow[]): string[] {
+  return rows
+    .filter(({ result }) => result === "fail" || result === "uncovered")
+    .map(({ requirementId }) => requirementId);
+}
+
+export function isReworkEligible(task: TaskRecord, rows: CheckRow[]): boolean {
+  return task.status === "checking" && failedOrUncoveredCheckIds(rows).length > 0;
 }
 
 function assertTransitionAllowed(oldStatus: TaskStatus, newStatus: TaskStatus, unblock: boolean): void {
@@ -848,6 +1429,11 @@ function assertBoundedNonempty(value: string, label: string, maxBytes: number): 
   if (Buffer.byteLength(value.trim(), "utf8") > maxBytes) {
     throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
   }
+}
+
+function boundedTrimmed(value: string, label: string, maxBytes: number): string {
+  assertBoundedNonempty(value, label, maxBytes);
+  return value.trim();
 }
 
 function assertHost(value: string): asserts value is Host {

@@ -16,6 +16,7 @@ import {
   type TaskLocation,
 } from "./task-store.js";
 import {
+  LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
   type EvidenceRecord,
 } from "./types.js";
@@ -35,6 +36,7 @@ const EVIDENCE_KINDS = new Set<EvidenceRecord["kind"]>([
 const EVIDENCE_RESULTS = new Set<EvidenceRecord["result"]>(["pass", "fail"]);
 const EVIDENCE_FIELDS = new Set([
   "schemaVersion",
+  "verificationRevision",
   "id",
   "kind",
   "summary",
@@ -89,6 +91,7 @@ async function recordEvidenceLocked(
     timestamp: now().toISOString(),
     fingerprint: mutationFingerprint({
       schemaVersion: SCHEMA_VERSION,
+      verificationRevision: location.task.verificationRevision,
       type: "evidence_recorded",
       actor,
       kind,
@@ -103,6 +106,7 @@ async function recordEvidenceLocked(
     const evidenceId = pending?.expected.identity.evidenceId ?? randomUUID();
     const record: EvidenceRecord = {
       schemaVersion: SCHEMA_VERSION,
+      verificationRevision: current.task.verificationRevision,
       id: evidenceId,
       kind,
       summary,
@@ -114,14 +118,15 @@ async function recordEvidenceLocked(
     };
     validateEvidenceRecord(record);
     const currentFilename = join(current.directory, "evidence.jsonl");
-    const records = await readEvidenceRecords(paths.repoRoot, currentFilename);
+    const existing = await readEvidenceFile(paths.repoRoot, currentFilename, true);
+    const records = existing.records;
     if (records.some((candidate) => candidate.id === evidenceId)) {
       if (recovering) {
         throw new SchemaError(`Pending evidence mutation already contains ${evidenceId}, but its managed target does not match.`);
       }
       throw new SchemaError(`Generated evidence ID already exists in ${currentFilename}: ${evidenceId}`);
     }
-    const contents = renderEvidenceRecords([...records, record]);
+    const contents = appendEvidenceRecord(existing.contents, record);
     return {
       expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ evidenceId }, record)),
       completion: {
@@ -138,16 +143,17 @@ async function recordEvidenceLocked(
     };
   });
   const evidenceId = intent.expected.identity.evidenceId;
-  const record = (await readEvidenceRecords(paths.repoRoot, filename)).find((candidate) => candidate.id === evidenceId);
+  const record = (await readEvidenceRecords(paths.repoRoot, filename, true)).find((candidate) => candidate.id === evidenceId);
   if (record === undefined) throw new SchemaError(`Recovered evidence mutation did not record ${evidenceId}.`);
   return record;
 }
 
 export async function assertTddReadyForCheck(paths: VineaPaths, location: TaskLocation): Promise<void> {
   if (location.task.qualityMode !== "tdd") return;
-  const evidence = await readEvidenceRecords(paths.repoRoot, join(location.directory, "evidence.jsonl"));
+  const evidence = await readEvidenceRecords(paths.repoRoot, join(location.directory, "evidence.jsonl"), true);
   let hasValidRed = false;
   for (const record of evidence) {
+    if (record.verificationRevision !== location.task.verificationRevision) continue;
     if (isValidRed(record)) {
       hasValidRed = true;
       continue;
@@ -208,7 +214,19 @@ function boundedNonempty(value: string, label: string, maxBytes: number): string
   return normalized;
 }
 
-async function readEvidenceRecords(repoRoot: string, filename: string): Promise<EvidenceRecord[]> {
+async function readEvidenceRecords(
+  repoRoot: string,
+  filename: string,
+  allowLegacySchema = false,
+): Promise<EvidenceRecord[]> {
+  return (await readEvidenceFile(repoRoot, filename, allowLegacySchema)).records;
+}
+
+async function readEvidenceFile(
+  repoRoot: string,
+  filename: string,
+  allowLegacySchema: boolean,
+): Promise<{ contents: string; records: EvidenceRecord[] }> {
   await assertNoSymlink(repoRoot, filename);
   let contents: string;
   try {
@@ -216,7 +234,7 @@ async function readEvidenceRecords(repoRoot: string, filename: string): Promise<
   } catch (error) {
     throw new SchemaError(`Unable to read evidence records ${filename}`, error);
   }
-  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
+  const records = contents.split("\n").filter((line) => line !== "").map((line, index) => {
     let value: unknown;
     try {
       value = JSON.parse(line) as unknown;
@@ -224,15 +242,17 @@ async function readEvidenceRecords(repoRoot: string, filename: string): Promise<
       throw new SchemaError(`Invalid JSONL in ${filename} at line ${index + 1}`, error);
     }
     try {
-      return validateEvidenceRecord(value);
+      return normalizeEvidenceRecord(value, allowLegacySchema);
     } catch (error) {
       throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`, error);
     }
   });
+  return { contents, records };
 }
 
-function renderEvidenceRecords(records: EvidenceRecord[]): string {
-  return records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+function appendEvidenceRecord(contents: string, record: EvidenceRecord): string {
+  const separator = contents === "" || contents.endsWith("\n") ? "" : "\n";
+  return `${contents}${separator}${JSON.stringify(record)}\n`;
 }
 
 function isValidRed(value: EvidenceRecord): boolean {
@@ -251,13 +271,21 @@ function isValidGreen(value: EvidenceRecord): boolean {
 }
 
 export function validateEvidenceRecord(value: unknown): EvidenceRecord {
+  return normalizeEvidenceRecord(value);
+}
+
+export function normalizeEvidenceRecord(value: unknown, allowLegacySchema = false): EvidenceRecord {
   if (!isRecord(value)) throw new ValidationError("Evidence record must be an object.");
   if (Object.keys(value).some((field) => !EVIDENCE_FIELDS.has(field))) {
     throw new ValidationError("Evidence record contains unsupported fields.");
   }
-  if (value.schemaVersion !== SCHEMA_VERSION) {
+  if (value.schemaVersion !== SCHEMA_VERSION
+    && !(allowLegacySchema && value.schemaVersion === LEGACY_SCHEMA_VERSION)) {
     throw new ValidationError(`Evidence record schemaVersion must be ${SCHEMA_VERSION}.`);
   }
+  const verificationRevision = value.schemaVersion === LEGACY_SCHEMA_VERSION
+    ? 0
+    : validateVerificationRevision(value.verificationRevision);
   const id = boundedUnknownString(value.id, "Evidence ID", MAX_EVIDENCE_ID_BYTES);
   const kind = validateKind(value.kind);
   const summary = boundedUnknownString(
@@ -275,6 +303,7 @@ export function validateEvidenceRecord(value: unknown): EvidenceRecord {
   assertConsistentEvidence(kind, result, exitCode);
   return {
     schemaVersion: SCHEMA_VERSION,
+    verificationRevision,
     id,
     kind,
     summary,
@@ -284,6 +313,13 @@ export function validateEvidenceRecord(value: unknown): EvidenceRecord {
     ...(command === undefined ? {} : { command }),
     ...(exitCode === undefined ? {} : { exitCode }),
   };
+}
+
+function validateVerificationRevision(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ValidationError("Evidence verificationRevision must be a non-negative safe integer.");
+  }
+  return value;
 }
 
 function validateKind(value: unknown): EvidenceRecord["kind"] {

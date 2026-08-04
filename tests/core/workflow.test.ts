@@ -26,7 +26,7 @@ import {
   suggestRisk,
   transitionTask,
 } from "../../src/core/workflow.js";
-import type { TaskRecord } from "../../src/core/types.js";
+import { SCHEMA_VERSION, type TaskRecord } from "../../src/core/types.js";
 import { createTempRepo, readJson, writeJson } from "../helpers/fixture.js";
 
 const mutationCompletionFailure = vi.hoisted(() => ({ type: null as string | null }));
@@ -93,13 +93,14 @@ test("createTask generates a deterministic ID and the complete initial artifact 
   );
 
   expect(created.task).toEqual({
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "t-20260731-080910-add-safer-deploy",
     title: "Add safer deploy",
     status: "planning",
     risk: { level: "medium", reasons: ["deploy"] },
     qualityMode: "tdd",
     executionMode: "single-agent",
+    verificationRevision: 0,
     requirements: [],
     acceptanceCriteria: [],
     commit: null,
@@ -109,6 +110,7 @@ test("createTask generates a deterministic ID and the complete initial artifact 
   expect(created.directory).toBe(join(paths.activeTasks, created.task.id));
   expect((await readdir(created.directory)).sort()).toEqual([
     "brief.md",
+    "check-history.jsonl",
     "check.md",
     "context.jsonl",
     "evidence.jsonl",
@@ -122,9 +124,10 @@ test("createTask generates a deterministic ID and the complete initial artifact 
   expect(await readFile(join(created.directory, "context.jsonl"), "utf8")).toBe("");
   expect(await readFile(join(created.directory, "evidence.jsonl"), "utf8")).toBe("");
   expect(await readFile(join(created.directory, "check.md"), "utf8")).toBe("");
+  expect(await readFile(join(created.directory, "check-history.jsonl"), "utf8")).toBe("");
   expect(parseJournal(await readFile(join(created.directory, "journal.md"), "utf8"))).toEqual([
     {
-      schemaVersion: 1,
+      schemaVersion: 2,
       type: "created",
       timestamp: "2026-07-31T08:09:10.000Z",
       actor: "cli",
@@ -132,6 +135,28 @@ test("createTask generates a deterministic ID and the complete initial artifact 
       status: "planning",
     },
   ]);
+});
+
+test("task records require a non-negative safe verification revision", async () => {
+  const created = await createTask(
+    paths,
+    {
+      title: "Validate verification revision",
+      risk: { level: "low", reasons: [] },
+      qualityMode: "standard",
+      executionMode: "single-agent",
+      confirmation: "user",
+    },
+    fixedNow,
+  );
+  const taskPath = join(created.directory, "task.json");
+
+  for (const verificationRevision of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+    await writeJson(taskPath, { ...created.task, verificationRevision });
+    await expect(readTask(paths, created.task.id)).rejects.toMatchObject({
+      code: "VINEA_SCHEMA_INVALID",
+    });
+  }
 });
 
 test("createTask fails instead of overwriting a colliding deterministic ID", async () => {
@@ -202,7 +227,7 @@ test("invalid task journals block finish, transitions, and continuations without
 
   const journalPath = join(created.directory, "journal.md");
   await appendJsonl(journalPath, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "created",
     timestamp: "2026-07-31T08:10:00.000Z",
     actor: "cli",
@@ -324,7 +349,7 @@ test("ready transition requires meaningful brief and plan content plus a require
 
   const stored = await readJson<TaskRecord>(join(directory, "task.json"));
   stored.requirements.push({
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     id: "R1",
     text: "The workflow is guarded",
     createdAt: "2026-07-31T08:09:30.000Z",
@@ -358,7 +383,7 @@ test("ready transition rejects blank or structurally malformed requirement entri
   const stored = await readJson<TaskRecord>(join(directory, "task.json"));
   stored.requirements = [
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: " ",
       text: "Has no ID",
       createdAt: "2026-07-31T08:09:30.000Z",
@@ -367,7 +392,7 @@ test("ready transition rejects blank or structurally malformed requirement entri
   ];
   stored.acceptanceCriteria = [
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "A1",
       text: " ",
       createdAt: "2026-07-31T08:09:30.000Z",
@@ -465,7 +490,7 @@ test("late archive commit failure leaves only an intent and is recoverable by re
       location,
       archivedTask,
       {
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         timestamp: "2026-07-31T08:14:00.000Z",
         actor: "codex",
         reason: "Archive task",
@@ -551,7 +576,7 @@ test("a failed active task commit reuses its pending intent on retry and validat
       location,
       inProgress,
       {
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         timestamp: "2026-07-31T08:11:00.000Z",
         actor: "codex",
         reason: "Start work",
@@ -588,7 +613,7 @@ test("task mutation serialization prevents an interleaved pending transition fro
   const mutationTask: TaskRecord = {
     ...location.task,
     requirements: [...location.task.requirements, {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R2",
       text: "Serialized mutation",
       createdAt: "2026-07-31T08:11:00.000Z",
@@ -600,7 +625,7 @@ test("task mutation serialization prevents an interleaved pending transition fro
     location,
     mutationTask,
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "requirement_added",
       timestamp: "2026-07-31T08:11:00.000Z",
       actor: "codex",
@@ -621,7 +646,7 @@ test("task mutation serialization prevents an interleaved pending transition fro
     location,
     { ...location.task, status: "in_progress", updatedAt: "2026-07-31T08:12:00.000Z" },
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       timestamp: "2026-07-31T08:12:00.000Z",
       actor: "codex",
       reason: "Concurrent transition",
@@ -653,7 +678,7 @@ test("a failed task.json mutation keeps one recoverable intent and blocks unrela
   const mutated: TaskRecord = {
     ...location.task,
     requirements: [...location.task.requirements, {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R2",
       text: "Recover this requirement",
       createdAt: timestamp,
@@ -661,7 +686,7 @@ test("a failed task.json mutation keeps one recoverable intent and blocks unrela
     updatedAt: timestamp,
   };
   const event = {
-    schemaVersion: 1 as const,
+    schemaVersion: SCHEMA_VERSION,
     type: "requirement_added" as const,
     timestamp,
     actor: "codex",
@@ -682,14 +707,14 @@ test("a failed task.json mutation keeps one recoverable intent and blocks unrela
   await expect(persistTaskMutation(paths, location, {
     ...location.task,
     requirements: [...location.task.requirements, {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R3",
       text: "A different mutation must wait",
       createdAt: "2026-07-31T08:12:00.000Z",
     }],
     updatedAt: "2026-07-31T08:12:00.000Z",
   }, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "requirement_added",
     timestamp: "2026-07-31T08:12:00.000Z",
     actor: "codex",
@@ -701,7 +726,7 @@ test("a failed task.json mutation keeps one recoverable intent and blocks unrela
     location,
     { ...location.task, status: "in_progress", updatedAt: "2026-07-31T08:12:00.000Z" },
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       timestamp: "2026-07-31T08:12:00.000Z",
       actor: "codex",
       reason: "Must not bypass mutation recovery",
@@ -710,7 +735,7 @@ test("a failed task.json mutation keeps one recoverable intent and blocks unrela
     },
   )).rejects.toMatchObject({ code: "VINEA_TRANSITION_INVALID" });
   await expect(appendTaskContinuation(paths, location, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "continued",
     timestamp: "2026-07-31T08:12:00.000Z",
     actor: "codex",
@@ -737,7 +762,7 @@ test("requirement retry reuses the pending mutation timestamp after an interrupt
   const target: TaskRecord = {
     ...location.task,
     requirements: [...location.task.requirements, {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R2",
       text: "Reuse the original timestamp",
       createdAt: firstTimestamp,
@@ -745,7 +770,7 @@ test("requirement retry reuses the pending mutation timestamp after an interrupt
     updatedAt: firstTimestamp,
   };
   const event = {
-    schemaVersion: 1 as const,
+    schemaVersion: SCHEMA_VERSION,
     type: "requirement_added" as const,
     timestamp: firstTimestamp,
     actor: "codex",
@@ -811,7 +836,7 @@ test("task mutation recovery rejects a forged pending intent outside managed tar
   const target: TaskRecord = {
     ...location.task,
     requirements: [...location.task.requirements, {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R2",
       text: "Reject forged journal targets",
       createdAt: timestamp,
@@ -819,7 +844,7 @@ test("task mutation recovery rejects a forged pending intent outside managed tar
     updatedAt: timestamp,
   };
   const event = {
-    schemaVersion: 1 as const,
+    schemaVersion: SCHEMA_VERSION,
     type: "requirement_added" as const,
     timestamp,
     actor: "codex",
@@ -829,14 +854,14 @@ test("task mutation recovery rejects a forged pending intent outside managed tar
   await writeFile(unmanagedTarget, "outside managed task targets\n", "utf8");
   const completion = { ...event, mutationKind: "requirement_added" as const };
   await appendJsonl(join(directory, "journal.md"), {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "mutation_intent",
     operationId: "op-forged-target",
     timestamp,
     actor: "codex",
     mutationKind: "requirement_added",
     fingerprint: mutationFingerprint({
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "requirement_added",
       actor: "codex",
       requirementId: "R2",
@@ -865,7 +890,7 @@ test("task mutation writes an intent before its target and completes it with one
   const changed: TaskRecord = {
     ...location.task,
     requirements: [...location.task.requirements, {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R2",
       text: "A durable mutation is traceable.",
       createdAt: timestamp,
@@ -878,7 +903,7 @@ test("task mutation writes an intent before its target and completes it with one
     location,
     changed,
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "requirement_added",
       timestamp,
       actor: "codex",
@@ -936,7 +961,7 @@ test("blocked tasks require explicit unblock and both transitions are auditable"
   expect(unblocked.status).toBe("in_progress");
   expect(parseJournal(await readFile(join(directory, "journal.md"), "utf8")).slice(-2)).toMatchObject([
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "transition_intent",
       timestamp: "2026-07-31T08:11:00.000Z",
       actor: "codex",
@@ -945,7 +970,7 @@ test("blocked tasks require explicit unblock and both transitions are auditable"
       newStatus: "blocked",
     },
     {
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       type: "transition_intent",
       timestamp: "2026-07-31T08:12:00.000Z",
       actor: "codex",
@@ -970,7 +995,7 @@ async function createReadyTask() {
   );
   const task = await readJson<TaskRecord>(join(created.directory, "task.json"));
   task.requirements.push({
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     id: "R1",
     text: "Follow the lifecycle",
     createdAt: "2026-07-31T08:09:30.000Z",

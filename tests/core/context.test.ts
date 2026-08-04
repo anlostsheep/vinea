@@ -149,7 +149,7 @@ test("context add stores real repository-relative files and list reports cumulat
   expect(added.exitCode).toBe(0);
   expect(added.stderr).toBe("");
   expect(JSON.parse(added.stdout)).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: 2,
     path: "src/marker.ts",
     purpose: "Defines the behavior under test",
     estimatedBytes: Buffer.byteLength(contents),

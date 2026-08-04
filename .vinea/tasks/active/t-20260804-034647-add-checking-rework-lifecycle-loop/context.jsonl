@@ -1,0 +1,6 @@
+{"schemaVersion":1,"path":"src/core/workflow.ts","purpose":"Lifecycle transitions, next gate, finish behavior","estimatedBytes":31733,"addedAt":"2026-08-04T03:47:28.512Z"}
+{"schemaVersion":1,"path":"src/core/evidence.ts","purpose":"TDD evidence ordering and freshness boundary","estimatedBytes":11578,"addedAt":"2026-08-04T03:47:28.543Z"}
+{"schemaVersion":1,"path":"src/core/types.ts","purpose":"Task, transition, evidence, and check data contracts","estimatedBytes":6554,"addedAt":"2026-08-04T03:47:28.574Z"}
+{"schemaVersion":1,"path":"docs/superpowers/specs/2026-07-31-vinea-design.md","purpose":"Confirmed v1 lifecycle semantics and design principles","estimatedBytes":13461,"addedAt":"2026-08-04T03:47:28.604Z"}
+{"schemaVersion":1,"path":"tests/cli/propose.test.ts","purpose":"CLI transition and blocked-unblock contract coverage","estimatedBytes":9004,"addedAt":"2026-08-04T03:47:28.634Z"}
+{"schemaVersion":1,"path":"tests/core/check.test.ts","purpose":"Requirement check row and evidence contract coverage","estimatedBytes":6843,"addedAt":"2026-08-04T03:47:28.663Z"}

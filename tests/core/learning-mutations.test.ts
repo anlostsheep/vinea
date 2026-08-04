@@ -8,7 +8,7 @@ import { resolveVineaPaths, type VineaPaths } from "../../src/core/paths.js";
 import { findTask, persistTaskMutation } from "../../src/core/task-store.js";
 import { validateWorkspace } from "../../src/core/validate.js";
 import { createTask } from "../../src/core/workflow.js";
-import type { LearningCandidate, TaskRecord } from "../../src/core/types.js";
+import { SCHEMA_VERSION, type LearningCandidate, type TaskRecord } from "../../src/core/types.js";
 import { createTempRepo } from "../helpers/fixture.js";
 
 const mutationCompletionFailure = vi.hoisted(() => ({ type: null as string | null }));
@@ -41,7 +41,7 @@ test("learning proposal retry reuses its pending mutation timestamp", async () =
   const location = await findTask(paths, task.id);
   const firstTimestamp = "2026-07-31T08:11:00.000Z";
   const candidate: LearningCandidate = {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     id: "L1",
     domain: "testing-practice",
     text: "Reuse the proposal timestamp.",
@@ -55,7 +55,7 @@ test("learning proposal retry reuses its pending mutation timestamp", async () =
     updatedAt: firstTimestamp,
   };
   await expect(persistTaskMutation(paths, location, target, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "learning_proposed",
     timestamp: firstTimestamp,
     actor: "codex",
@@ -101,7 +101,7 @@ test("learning archive retry reuses its pending mutation timestamp", async () =>
     updatedAt: firstTimestamp,
   };
   await expect(persistTaskMutation(paths, location, target, {
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     type: "learning_archived",
     timestamp: firstTimestamp,
     actor: "codex",

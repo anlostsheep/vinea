@@ -4,6 +4,7 @@ import {
   oneOf,
   optionalValue,
   parseExitCode,
+  parseNonNegativeInteger,
   parseOptions,
   requestsJson,
   requiredOption,
@@ -13,6 +14,8 @@ import {
 import {
   helpText,
   renderCheckSummary,
+  renderCheckHistoryListing,
+  renderCheckHistorySnapshot,
   renderContextManifest,
   renderDoctorReport,
   renderEvidence,
@@ -25,6 +28,7 @@ import {
   writeOutput,
 } from "./cli/render.js";
 import { initializeWorkspace, readConfig } from "./core/config.js";
+import { migrateWorkspace } from "./core/migrate.js";
 import {
   showCheck,
   upsertCheck,
@@ -49,13 +53,17 @@ import {
   archiveTask,
   createTask,
   finishTask,
+  listCheckHistory,
   listTasks,
   orientWorkspace,
   readTask,
+  readCheckHistoryRevision,
+  reworkTask,
   continueTask,
   setTaskBrief,
   setTaskPlan,
   suggestRisk,
+  taskView,
   transitionTask,
 } from "./core/workflow.js";
 import type {
@@ -91,6 +99,21 @@ export async function main(args: string[]): Promise<number> {
       const report = await diagnoseWorkspace(resolveVineaPaths(process.cwd()));
       writeOutput(report, options.has("--json"), renderDoctorReport(report));
       return report.healthy ? 0 : 1;
+    }
+
+    if (command === "migrate") {
+      const options = parseOptions(args.slice(1), new Set(), new Set(["--json"]));
+      const result = await migrateWorkspace(resolveVineaPaths(process.cwd()));
+      writeOutput(
+        result,
+        options.has("--json"),
+        result.status === "migrated"
+          ? result.fromSchemaVersion === result.toSchemaVersion
+            ? `Migrated Vinea runtime state for schema ${result.toSchemaVersion}.\n`
+            : `Migrated Vinea workspace from schema ${result.fromSchemaVersion} to ${result.toSchemaVersion}.\n`
+          : `Vinea workspace already uses schema ${result.toSchemaVersion}.\n`,
+      );
+      return 0;
     }
 
     if (command === "validate") {
@@ -276,7 +299,18 @@ async function handleTask(args: string[]): Promise<number> {
     const options = parseOptions(args.slice(2), new Set(), new Set(["--json"]));
     const task = await readTask(paths, taskId);
     const check = await showCheck(paths, taskId);
-    writeOutput(task, options.has("--json"), renderTask(task, check.rows));
+    writeOutput(taskView(task, check.rows), options.has("--json"), renderTask(task, check.rows));
+    return 0;
+  }
+
+  if (subcommand === "rework") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), new Set(["--reason"]), new Set(["--json"]));
+    const task = await reworkTask(paths, taskId, {
+      actor: "cli",
+      reason: requiredOption(options, "--reason"),
+    });
+    await writeTaskOutput(paths, task, options.has("--json"));
     return 0;
   }
 
@@ -454,6 +488,23 @@ async function handleLearning(args: string[]): Promise<number> {
 
 async function handleCheck(args: string[]): Promise<number> {
   const paths = resolveVineaPaths(process.cwd());
+  if (args[0] === "history") {
+    const taskId = requiredTaskId(args[1]);
+    const options = parseOptions(args.slice(2), new Set(["--revision"]), new Set(["--json"]));
+    const revision = optionalValue(options, "--revision");
+    if (revision === undefined) {
+      const history = await listCheckHistory(paths, taskId);
+      writeOutput(history, options.has("--json"), renderCheckHistoryListing(history));
+    } else {
+      const snapshot = await readCheckHistoryRevision(
+        paths,
+        taskId,
+        parseNonNegativeInteger(revision, "--revision"),
+      );
+      writeOutput(snapshot, options.has("--json"), renderCheckHistorySnapshot(snapshot));
+    }
+    return 0;
+  }
   if (args[0] === "show") {
     const taskId = requiredTaskId(args[1]);
     const options = parseOptions(args.slice(2), new Set(), new Set(["--json"]));

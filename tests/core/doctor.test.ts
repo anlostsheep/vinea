@@ -22,12 +22,14 @@ test("doctor reports Git availability and treats missing local runtime as recove
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toEqual({
     initialized: true,
-    configSchemaVersion: 1,
+    configSchemaVersion: 2,
     missingRequiredDirectories: [],
     supportedSchema: true,
     migrationGuidance: null,
     healthy: true,
     taskLocks: [],
+    rework: [],
+    migration: { status: "none" },
     gitStatus: {
       available: true,
       error: null,

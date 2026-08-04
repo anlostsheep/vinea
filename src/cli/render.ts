@@ -3,7 +3,8 @@ import type { ContextManifest } from "../core/context.js";
 import type { DoctorReport } from "../core/doctor.js";
 import { VineaError } from "../core/errors.js";
 import type { ValidationReport } from "../core/validate.js";
-import { incompleteRequirements, nextGate } from "../core/workflow.js";
+import { failedOrUncoveredCheckIds, incompleteRequirements, isReworkEligible, nextGate } from "../core/workflow.js";
+import type { CheckHistoryListing } from "../core/workflow.js";
 import type {
   EvidenceRecord,
   CheckRow,
@@ -12,6 +13,7 @@ import type {
   QualityMode,
   RiskLevel,
   TaskRecord,
+  CheckHistorySnapshot,
 } from "../core/types.js";
 import { UsageError } from "./args.js";
 
@@ -19,11 +21,13 @@ export const helpText = `Usage: vinea <command>
 
 Commands:
   init
+  migrate
   orient
   propose
   continue
   check
   check show
+  check history
   finish
   archive
   doctor
@@ -31,6 +35,7 @@ Commands:
   task list
   task show
   task transition
+  task rework
   task unblock
   task require
   task accept
@@ -117,15 +122,19 @@ export function renderInlineAudit(record: {
 
 export function renderTask(task: TaskRecord, checkRows: CheckRow[] = []): string {
   const incomplete = incompleteRequirements(task, checkRows);
+  const failedOrUncovered = failedOrUncoveredCheckIds(checkRows);
   return [
     `task ID: ${task.id}`,
     `status: ${task.status}`,
+    `verification revision: ${task.verificationRevision}`,
     `quality mode: ${task.qualityMode}`,
     `execution mode: ${task.executionMode}`,
     `risk: ${task.risk.level}`,
     `risk reasons: ${task.risk.reasons.length ? task.risk.reasons.join(", ") : "none"}`,
     `incomplete requirements: ${incomplete.length ? incomplete.join(", ") : "none"}`,
-    `next gate: ${nextGate(task)}`,
+    `failed or uncovered checks: ${failedOrUncovered.length ? failedOrUncovered.join(", ") : "none"}`,
+    `rework eligible: ${isReworkEligible(task, checkRows)}`,
+    `next gate: ${nextGate(task, checkRows)}`,
     "",
   ].join("\n");
 }
@@ -164,6 +173,30 @@ export function renderCheckSummary(summary: CheckSummary): string {
   return lines.join("\n");
 }
 
+export function renderCheckHistoryListing(history: CheckHistoryListing): string {
+  if (history.revisions.length === 0) return `No check-history snapshots for ${history.taskId}.\n`;
+  return [
+    `Check history for ${history.taskId}:`,
+    ...history.revisions.map((revision) => [
+      `revision ${revision.verificationRevision}: ${revision.archivedAt}; ${revision.reworkReason}`,
+      `  ${revision.totals.pass} pass; ${revision.totals.fail} fail; ${revision.totals.uncovered} uncovered.`,
+    ].join("\n")),
+    "",
+  ].join("\n");
+}
+
+export function renderCheckHistorySnapshot(snapshot: CheckHistorySnapshot): string {
+  return [
+    `Check history for ${snapshot.taskId}, revision ${snapshot.verificationRevision}:`,
+    `archived at: ${snapshot.archivedAt}`,
+    `reason: ${snapshot.reworkReason}`,
+    `operation: ${snapshot.operationId}`,
+    ...snapshot.rows.map((row) =>
+      `${row.requirementId}: ${row.result}; paths: ${row.paths.join(", ")}; evidence: ${row.evidenceIds.join(", ") || "none"}; ${row.summary}`),
+    "",
+  ].join("\n");
+}
+
 export function renderOrient(summary: OrientSummary): string {
   const lines = [
     `workspace healthy: ${summary.health.healthy}`,
@@ -175,7 +208,11 @@ export function renderOrient(summary: OrientSummary): string {
   for (const candidate of summary.candidates) {
     lines.push(
       `${candidate.id}: ${candidate.title} [${candidate.status}; ${candidate.qualityMode}; ${candidate.executionMode}]`,
+      `  verification revision: ${candidate.verificationRevision}`,
       `  requirements not covered: ${candidate.requirementsNotCovered.length ? candidate.requirementsNotCovered.join(", ") : "none"}`,
+      `  failed or uncovered checks: ${candidate.failedOrUncoveredIds.length ? candidate.failedOrUncoveredIds.join(", ") : "none"}`,
+      `  rework eligible: ${candidate.reworkEligible}`,
+      `  next action: ${candidate.nextAction}`,
       `  context references: ${candidate.contextReferences.length ? candidate.contextReferences.map(({ path }) => path).join(", ") : "none"}`,
       `  latest evidence: ${candidate.latestEvidence?.id ?? "none"}`,
       `  latest check event: ${String(candidate.latestCheckEvent?.type ?? "none")}`,
@@ -194,6 +231,11 @@ export function renderDoctorReport(report: DoctorReport): string {
     `healthy: ${report.healthy}`,
   ];
   if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
+  for (const rework of report.rework) {
+    lines.push(
+      `rework: ${rework.taskId}; status: ${rework.status}; issues: ${rework.issues.map(({ code }) => code).join(", ")}`,
+    );
+  }
   if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
   for (const lock of report.taskLocks) {
     const label = lock.path === ".vinea/.runtime/learning-promotion.lock" ? "learning promotion lock" : "task lock";

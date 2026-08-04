@@ -21,7 +21,7 @@ test("doctor JSON reports a supported initialized workspace as healthy", async (
   expect(result.stderr).toBe("");
   expect(JSON.parse(result.stdout)).toEqual({
     initialized: true,
-    configSchemaVersion: 1,
+    configSchemaVersion: 2,
     missingRequiredDirectories: [],
     supportedSchema: true,
     migrationGuidance: null,
@@ -34,11 +34,36 @@ test("doctor JSON reports a supported initialized workspace as healthy", async (
   });
 });
 
+test("doctor identifies a version 1 workspace as requiring explicit migration", async () => {
+  const cwd = await createTempRepo();
+  expect((await runCli(["init"], cwd)).exitCode).toBe(0);
+
+  const configPath = join(cwd, ".vinea", "config.json");
+  const legacyConfig = JSON.stringify({
+    schemaVersion: 1,
+    riskRules: {
+      medium: ["behavior"],
+      high: ["migration"],
+    },
+    context: { maxFiles: 12, maxEstimatedBytes: 80000 },
+  });
+  await writeFile(configPath, legacyConfig, "utf8");
+
+  const result = await runCli(["doctor", "--json"], cwd);
+  const diagnostic = JSON.parse(result.stdout) as Record<string, unknown>;
+
+  expect(result.exitCode).toBe(1);
+  expect(diagnostic.configSchemaVersion).toBe(1);
+  expect(diagnostic.supportedSchema).toBe(false);
+  expect(diagnostic.migrationGuidance).toContain("vinea migrate");
+  expect(await (await import("node:fs/promises")).readFile(configPath, "utf8")).toBe(legacyConfig);
+});
+
 test("doctor identifies future schemas without changing the workspace", async () => {
   const cwd = await createTempRepo();
   await mkdir(join(cwd, ".vinea"), { recursive: true });
   const configPath = join(cwd, ".vinea", "config.json");
-  const contents = JSON.stringify({ schemaVersion: 2 });
+  const contents = JSON.stringify({ schemaVersion: 3 });
   await writeFile(configPath, contents, "utf8");
 
   const result = await runCli(["doctor", "--json"], cwd);

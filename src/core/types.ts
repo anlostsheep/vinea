@@ -1,4 +1,5 @@
-export const SCHEMA_VERSION = 1 as const;
+export const LEGACY_SCHEMA_VERSION = 1 as const;
+export const SCHEMA_VERSION = 2 as const;
 
 export type IsoTimestamp = string;
 export type Host = "codex" | "claude";
@@ -46,12 +47,19 @@ export interface TaskRecord {
   risk: { level: RiskLevel; reasons: string[] };
   qualityMode: QualityMode;
   executionMode: ExecutionMode;
+  verificationRevision: number;
   requirements: Requirement[];
   acceptanceCriteria: Requirement[];
   learningCandidates?: LearningCandidate[];
   commit: CommitMetadata | null;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
+}
+
+export interface TaskView extends TaskRecord {
+  failedOrUncoveredIds: string[];
+  reworkEligible: boolean;
+  nextAction: string;
 }
 
 export interface RiskSuggestion {
@@ -92,6 +100,39 @@ export interface JournalContinuationEvent {
   sessionBound: boolean;
   started: boolean;
   status: TaskStatus;
+}
+
+export interface CheckHistorySnapshot {
+  schemaVersion: typeof SCHEMA_VERSION;
+  taskId: string;
+  verificationRevision: number;
+  archivedAt: IsoTimestamp;
+  reworkReason: string;
+  operationId: string;
+  rows: CheckRow[];
+}
+
+export interface JournalReworkIntentEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "rework_intent";
+  operationId: string;
+  timestamp: IsoTimestamp;
+  actor: string;
+  reason: string;
+  sourceVerificationRevision: number;
+  snapshot: CheckHistorySnapshot;
+}
+
+export interface JournalReworkedEvent {
+  schemaVersion: typeof SCHEMA_VERSION;
+  type: "reworked";
+  operationId: string;
+  timestamp: IsoTimestamp;
+  actor: string;
+  reason: string;
+  sourceVerificationRevision: number;
+  verificationRevision: number;
+  status: "in_progress";
 }
 
 export type TaskMutationKind =
@@ -162,6 +203,8 @@ export type JournalEvent =
   | JournalCreationEvent
   | JournalTransitionIntentEvent
   | JournalContinuationEvent
+  | JournalReworkIntentEvent
+  | JournalReworkedEvent
   | TaskMutationJournalEvent
   | JournalCheckMutationEvent
   | JournalMutationIntentEvent;
@@ -202,9 +245,13 @@ export interface OrientCandidate {
   id: string;
   title: string;
   status: TaskStatus;
+  verificationRevision: number;
   qualityMode: QualityMode;
   executionMode: ExecutionMode;
   requirementsNotCovered: string[];
+  failedOrUncoveredIds: string[];
+  reworkEligible: boolean;
+  nextAction: string;
   contextReferences: ContextReference[];
   latestEvidence: EvidenceRecord | null;
   latestCheckEvent: Record<string, unknown> | null;
@@ -247,6 +294,7 @@ export interface ContextReference {
 
 export interface EvidenceRecord {
   schemaVersion: typeof SCHEMA_VERSION;
+  verificationRevision: number;
   id: string;
   kind: "command" | "manual" | "tdd-red" | "tdd-green";
   summary: string;
@@ -259,6 +307,7 @@ export interface EvidenceRecord {
 
 export interface CheckRow {
   schemaVersion: typeof SCHEMA_VERSION;
+  verificationRevision: number;
   requirementId: string;
   planItem: string;
   paths: string[];

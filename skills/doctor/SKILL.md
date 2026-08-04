@@ -17,4 +17,6 @@ Run `doctor --json` read-only and report initialization state, supported schema,
 
 Explain the exact next safe action: initialize only an uninitialized target repository, follow stated migration guidance for an unsupported schema, repair the named repository condition, or return to `vinea:orient` after diagnostics pass. Do not modify task files to hide a diagnostic.
 
+When doctor reports a pending rework, keep the task files intact and run the named task command (for example `task show <task-id>`) to resume its recorded recovery sequence before new work. If it reports invalid rework history, run `validate --json` and repair the exact reported record rather than writing a replacement snapshot.
+
 Lock diagnostics, including `.runtime/learning-promotion.lock`, are inventory only: do not infer liveness or delete them automatically. Inspect the reported owner and path, confirm no Vinea process is active, then remove only the exact reported lock directory if manual recovery is necessary.

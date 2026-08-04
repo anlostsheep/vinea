@@ -8,7 +8,7 @@ import { SchemaError } from "../../src/core/errors.js";
 import { resolveVineaPaths } from "../../src/core/paths.js";
 import { findTask, persistTaskTransition } from "../../src/core/task-store.js";
 import { createTask, transitionTask } from "../../src/core/workflow.js";
-import type { TaskRecord } from "../../src/core/types.js";
+import { SCHEMA_VERSION, type TaskRecord } from "../../src/core/types.js";
 import { createTempRepo, readJson, writeJson, runCli } from "../helpers/fixture.js";
 
 const execFileAsync = promisify(execFile);
@@ -123,7 +123,7 @@ async function createPreparedTask(
   await writeJson(taskPath, {
     ...task,
     requirements: [{
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       id: "R1",
       text: "Retry transitions safely",
       createdAt: "2026-07-31T08:09:10.000Z",
@@ -156,7 +156,7 @@ function transition(
   timestamp: string,
 ) {
   return {
-    schemaVersion: 1 as const,
+    schemaVersion: SCHEMA_VERSION,
     timestamp,
     actor: "codex",
     reason: "Injected failure",

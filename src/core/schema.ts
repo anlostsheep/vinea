@@ -23,6 +23,11 @@ export function assertSupportedSchema(value: unknown, filename: string): asserts
         `Vinea schema version ${value.schemaVersion} in ${filename} is newer than this CLI. Upgrade Vinea before modifying the workspace; do not recreate or overwrite it.`,
       );
     }
+    if (value.schemaVersion === 1) {
+      throw new SchemaError(
+        `Vinea schema version 1 in ${filename} requires explicit migration. Run \`vinea migrate\` before modifying the workspace.`,
+      );
+    }
     throw new SchemaError(
       `Unsupported Vinea schema version ${String(value.schemaVersion)} in ${filename}; supported version is ${SCHEMA_VERSION}.`,
     );
@@ -70,7 +75,9 @@ export async function inspectWorkspace(paths: VineaPaths): Promise<DoctorReport>
   } catch (error) {
     migrationGuidance = error instanceof SchemaError && configSchemaVersion !== null && configSchemaVersion > SCHEMA_VERSION
       ? "This workspace uses a newer schema. Upgrade Vinea before modifying it."
-      : "Repair or restore config.json with a supported Vinea schema before using lifecycle commands.";
+      : configSchemaVersion === 1
+        ? "This workspace requires explicit migration. Run `vinea migrate` before using lifecycle commands."
+        : "Repair or restore config.json with a supported Vinea schema before using lifecycle commands.";
   }
 
   return {

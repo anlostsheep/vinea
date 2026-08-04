@@ -3,7 +3,7 @@ import { access, readFile, readdir, rename, rm, symlink, writeFile } from "node:
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
-import type { SessionBinding, TaskRecord } from "../../src/core/types.js";
+import { SCHEMA_VERSION, type SessionBinding, type TaskRecord } from "../../src/core/types.js";
 import {
   createTempRepo,
   readJson,
@@ -39,7 +39,7 @@ test("continue binds only after confirmation and --start is required to move rea
   expect(await readJson<SessionBinding>(
     join(cwd, ".vinea", ".runtime", "sessions", "codex-sid-7468726561642d313233.json"),
   )).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     taskId: task.id,
     boundAt: expect.any(String),
   });
