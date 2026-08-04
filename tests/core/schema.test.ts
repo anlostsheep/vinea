@@ -27,6 +27,10 @@ test("doctor JSON reports a supported initialized workspace as healthy", async (
     migrationGuidance: null,
     healthy: true,
     taskLocks: [],
+    rework: [],
+    migration: {
+      status: "none",
+    },
     gitStatus: {
       available: true,
       error: null,
