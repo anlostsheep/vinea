@@ -20,6 +20,9 @@
       "Use Vinea to propose a safe task workflow for this change.",
       "Use Vinea to check this task before it is finished."
     ],
-    "brandColor": "#2F6F5E"
+    "brandColor": "#2F6F5E",
+    "composerIcon": "./assets/vinea-loop.png",
+    "logo": "./assets/vinea-loop.png",
+    "logoDark": "./assets/vinea-loop.png"
   }
 }

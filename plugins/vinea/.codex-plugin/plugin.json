@@ -1,6 +1,6 @@
 {
   "name": "vinea",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared task state and guided AI-coding workflows for Codex and Claude Code.",
   "author": {
     "name": "dengzhen"
@@ -30,6 +30,9 @@
       "Use Vinea to propose a safe task workflow for this change.",
       "Use Vinea to check this task before it is finished."
     ],
-    "brandColor": "#2F6F5E"
+    "brandColor": "#2F6F5E",
+    "composerIcon": "./assets/vinea-loop.png",
+    "logo": "./assets/vinea-loop.png",
+    "logoDark": "./assets/vinea-loop.png"
   }
 }

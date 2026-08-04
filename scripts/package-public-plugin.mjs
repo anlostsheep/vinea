@@ -19,12 +19,14 @@ await rm(publicRoot, { recursive: true, force: true });
 await mkdir(join(publicRoot, "bin"), { recursive: true });
 await mkdir(join(publicRoot, ".codex-plugin"), { recursive: true });
 await mkdir(join(publicRoot, ".claude-plugin"), { recursive: true });
+await mkdir(join(publicRoot, "assets"), { recursive: true });
 
 await cp(join(projectRoot, "dist", "vinea.mjs"), join(publicRoot, "bin", "vinea.mjs"));
 await chmod(join(publicRoot, "bin", "vinea.mjs"), 0o755);
 await cp(join(projectRoot, "skills"), join(publicRoot, "skills"), { recursive: true });
 await cp(join(projectRoot, "hosts", "public-plugin", "README.md"), join(publicRoot, "README.md"));
 await cp(join(projectRoot, "LICENSE"), join(publicRoot, "LICENSE"));
+await cp(join(projectRoot, "assets", "vinea-loop.png"), join(publicRoot, "assets", "vinea-loop.png"));
 
 for (const [host, manifestDirectory] of [
   ["codex", ".codex-plugin"],

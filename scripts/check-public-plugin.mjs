@@ -1,5 +1,5 @@
 import { access, readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
@@ -15,6 +15,7 @@ const expectedSkills = [
   "plan",
   "propose",
 ];
+const iconRelativePath = "./assets/vinea-loop.png";
 const rootPackage = await readJson(join(projectRoot, "package.json"));
 const version = requiredString(rootPackage.version, "package.json version");
 
@@ -22,7 +23,7 @@ const codexManifest = await readJson(join(publicRoot, ".codex-plugin", "plugin.j
 const claudeManifest = await readJson(join(publicRoot, ".claude-plugin", "plugin.json"));
 assertHostManifest("Codex", codexManifest, version);
 assertHostManifest("Claude", claudeManifest, version);
-assertCodexInterface(codexManifest.interface);
+await assertCodexInterface(codexManifest.interface, publicRoot);
 
 const cliPath = join(publicRoot, "bin", "vinea.mjs");
 await access(cliPath);
@@ -47,7 +48,7 @@ const publicReadme = await readFile(join(publicRoot, "README.md"), "utf8");
 assertPublicReadme(publicReadme);
 
 const publicTextPaths = [
-  ...(await walkFiles(publicRoot)),
+  ...(await walkFiles(publicRoot)).filter(isPublicTextPath),
   join(projectRoot, ".agents", "plugins", "marketplace.json"),
   join(projectRoot, ".claude-plugin", "marketplace.json"),
 ];
@@ -87,7 +88,7 @@ function assertHostManifest(host, manifest, expectedVersion) {
   }
 }
 
-function assertCodexInterface(value) {
+async function assertCodexInterface(value, pluginRoot) {
   if (value === null || typeof value !== "object") throw new Error("Codex manifest must include interface metadata.");
   const interfaceMetadata = value;
   for (const [field, expected] of Object.entries({
@@ -107,6 +108,12 @@ function assertCodexInterface(value) {
   if (!Array.isArray(interfaceMetadata.defaultPrompt) || interfaceMetadata.defaultPrompt.length === 0) {
     throw new Error("Codex interface defaultPrompt is required.");
   }
+  for (const field of ["composerIcon", "logo", "logoDark"]) {
+    if (interfaceMetadata[field] !== iconRelativePath) {
+      throw new Error(`Codex interface ${field} must be ${iconRelativePath}.`);
+    }
+  }
+  await access(join(pluginRoot, "assets", "vinea-loop.png"));
 }
 
 function assertCodexMarketplace(marketplace, expectedVersion) {
@@ -158,6 +165,10 @@ async function walkFiles(directory) {
     return entry.isDirectory() ? walkFiles(path) : [path];
   }));
   return paths.flat();
+}
+
+function isPublicTextPath(path) {
+  return [".json", ".md", ".mjs"].some((extension) => path.endsWith(extension)) || basename(path) === "LICENSE";
 }
 
 async function runNode(script, args) {

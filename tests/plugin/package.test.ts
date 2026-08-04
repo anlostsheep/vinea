@@ -8,6 +8,10 @@ import { beforeAll, expect, test } from "vitest";
 const execFileAsync = promisify(execFile);
 const repositoryRoot = process.cwd();
 const publicRoot = join(repositoryRoot, "plugins", "vinea");
+const expectedReleaseVersion = "0.2.0";
+const iconRelativePath = "./assets/vinea-loop.png";
+const sourceIconPath = join(repositoryRoot, "assets", "vinea-loop.svg");
+const packagedIconPath = join(publicRoot, "assets", "vinea-loop.png");
 const skillNames = [
   "brainstorm",
   "check",
@@ -28,6 +32,13 @@ test("packages parity manifests, all public skills, and one host-independent CLI
   const codexManifest = await readJson(join(publicRoot, ".codex-plugin", "plugin.json"));
   const claudeManifest = await readJson(join(publicRoot, ".claude-plugin", "plugin.json"));
 
+  await expect(access(sourceIconPath)).resolves.toBeUndefined();
+  expect(await readFile(sourceIconPath, "utf8")).toContain('viewBox="0 0 1024 1024"');
+  await expect(access(packagedIconPath)).resolves.toBeUndefined();
+  expect((await readFile(packagedIconPath)).subarray(0, 8)).toEqual(
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  );
+  expect(rootPackage.version).toBe(expectedReleaseVersion);
   expect(codexManifest.version).toBe(rootPackage.version);
   expect(claudeManifest.version).toBe(rootPackage.version);
   expect(codexManifest).toMatchObject({
@@ -43,6 +54,9 @@ test("packages parity manifests, all public skills, and one host-independent CLI
       category: "Developer Tools",
       capabilities: expect.arrayContaining(["Read", "Write", "Interactive"]),
       defaultPrompt: expect.arrayContaining([expect.any(String)]),
+      composerIcon: iconRelativePath,
+      logo: iconRelativePath,
+      logoDark: iconRelativePath,
     },
   });
   expect(claudeManifest).toMatchObject({
