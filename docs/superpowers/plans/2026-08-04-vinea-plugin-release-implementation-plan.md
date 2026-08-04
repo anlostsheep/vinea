@@ -53,7 +53,7 @@
 - Consumes: `diagnoseWorkspace()` 已返回的 `DoctorReport.rework: ReworkDiagnostic[]` 与 `DoctorReport.migration: { status: "none" | "pending" | "completed" | "invalid" }`。
 - Produces: 对健康 schema-v2 workspace 的完整 JSON 契约；不触碰 `src/core/doctor.ts`。
 
-- [ ] **Step 1：先复现当前基线失败**
+- [x] **Step 1：先复现当前基线失败**
 
   Run:
 
@@ -63,7 +63,7 @@
 
   Expected: 第一个测试失败，实际 JSON 比期望值多出 `rework: []` 与 `migration: { status: "none" }`；其余 doctor schema 测试保持通过。
 
-- [ ] **Step 2：只修正过期的期望对象**
+- [x] **Step 2：只修正过期的期望对象**
 
   在 `taskLocks` 后、`gitStatus` 前加入已由生产代码输出的两个字段：
 
@@ -81,7 +81,7 @@
 
   不修改 `src/core/doctor.ts`、schema 类型或 CLI 输出顺序。
 
-- [ ] **Step 3：确认聚焦测试转绿**
+- [x] **Step 3：确认聚焦测试转绿**
 
   Run:
 
@@ -91,7 +91,7 @@
 
   Expected: 3 个测试全部 PASS。
 
-- [ ] **Step 4：提交独立的测试契约修复**
+- [x] **Step 4：提交独立的测试契约修复**
 
   ```bash
   git add tests/core/schema.test.ts
@@ -117,7 +117,7 @@
 - Consumes: root `package.json.version`, source icon `assets/vinea-loop.png`, and the Codex `interface` object.
 - Produces: public package path `./assets/vinea-loop.png`; every consumer of the three Codex icon fields uses that exact string.
 
-- [ ] **Step 1：先为 0.2.0 和图标输出写失败测试**
+- [x] **Step 1：先为 0.2.0 和图标输出写失败测试**
 
   扩展 `tests/plugin/package.test.ts`。在读取根 `package.json` 后加入精确版本断言；在已打包 manifest 断言后加入三个图标字段、源 SVG、打包 PNG 和 PNG signature 的断言：
 
@@ -139,7 +139,7 @@
   );
   ```
 
-- [ ] **Step 2：运行测试，确认新契约确实先失败**
+- [x] **Step 2：运行测试，确认新契约确实先失败**
 
   Run:
 
@@ -149,7 +149,7 @@
 
   Expected: FAIL，至少显示根版本仍是 `0.1.0`，且 `assets/vinea-loop.svg`／公共 PNG 尚不存在；不要在失败前创建任何图标或改 manifest。
 
-- [ ] **Step 3：更新版本、创建 Vine Loop SVG 并生成 PNG**
+- [x] **Step 3：更新版本、创建 Vine Loop SVG 并生成 PNG**
 
   将 `package.json` 的 `version` 设为 `0.2.0`。创建如下 1024×1024 SVG 母版，使用深色圆角底面、青绿色闭环和白色 V：
 
@@ -178,7 +178,7 @@
 
   Expected: PNG 的 `pixelWidth` 与 `pixelHeight` 都是 `1024`。
 
-- [ ] **Step 4：实现最小的 manifest、打包与公共检查改动**
+- [x] **Step 4：实现最小的 manifest、打包与公共检查改动**
 
   在 Codex 模板的 `interface` 中加入：
 
@@ -217,7 +217,7 @@
   );
   ```
 
-- [ ] **Step 5：验证聚焦测试和发布校验均转绿**
+- [x] **Step 5：验证聚焦测试和发布校验均转绿**
 
   Run:
 
@@ -230,7 +230,7 @@
 
   Expected: package 测试 PASS，公共包含 PNG、两份 public manifest 为 `0.2.0`，`check:plugin` 与插件校验器均 PASS。
 
-- [ ] **Step 6：记录 TDD red/green 并提交图标与打包契约**
+- [x] **Step 6：记录 TDD red/green 并提交图标与打包契约**
 
   在 Step 2 的失败命令后记录 `tdd-red`；在 Step 5 的成功命令后记录 `tdd-green`。使用当前任务 ID，不记录完整命令输出或任何凭据：
 
@@ -256,7 +256,7 @@
 - Consumes: 当前用户已安装的 `vinea@personal` source `~/.codex/plugins/vinea` 与当前 Claude `vinea-local` marketplace。
 - Produces: Codex 重装时带一个 `0.2.0+codex.` build metadata 后缀的本地 manifest；Claude 更新后的 `0.2.0` manifest；两份脚本都要求启动新会话。
 
-- [ ] **Step 1：先扩展安装脚本静态测试**
+- [x] **Step 1：先扩展安装脚本静态测试**
 
   将 Codex 测试改为要求 cache-buster 和重装、禁止默认个人 marketplace 的 add／手工 entry 写入：
 
@@ -275,7 +275,7 @@
   expect(source).toContain("claude plugin install vinea@vinea-local --scope user");
   ```
 
-- [ ] **Step 2：运行脚本测试，确认旧实现失败**
+- [x] **Step 2：运行脚本测试，确认旧实现失败**
 
   Run:
 
@@ -285,7 +285,7 @@
 
   Expected: FAIL；现有 Codex 脚本仍调用 `codex plugin marketplace add` 并改写个人 marketplace，现有 Claude 脚本仍直接 install。
 
-- [ ] **Step 3：实现 Codex 的 cache-buster + 重装路径**
+- [x] **Step 3：实现 Codex 的 cache-buster + 重装路径**
 
   保留将 `plugins/vinea` 原子复制到 `$home_dir/.codex/plugins/vinea` 的步骤，因为它是已配置个人 marketplace 的 source，不是运行时缓存同步。删除写入 `$home_dir/.agents/plugins/marketplace.json` 的内嵌 Node 程序，改为只读验证：文件存在、包含 name 为 `vinea` 的 local entry，且其 source path 是 `./.codex/plugins/vinea`；输出已有 `marketplace.name`。
 
@@ -303,7 +303,7 @@
 
   CLI 不可用时打印同样两条手动命令，且不打印 `codex plugin marketplace add`。不要以递增 `package.json` patch 版本代替 cache-buster。
 
-- [ ] **Step 4：实现 Claude Code 的 update-first 路径**
+- [x] **Step 4：实现 Claude Code 的 update-first 路径**
 
   保留专用 `vinea-local` marketplace 的构建、插件校验与 `claude plugin marketplace update vinea-local`。在此之后用已安装插件列表决定操作：
 
@@ -317,7 +317,7 @@
 
   不要将 update 失败一概吞掉后直接 install：只有列表确认未安装时才能走 fallback。保留 `claude plugin validate "$plugin_root"` 与新会话提示。
 
-- [ ] **Step 5：更新根 README 的发布与刷新说明**
+- [x] **Step 5：更新根 README 的发布与刷新说明**
 
   在 “Install locally” 前加入 `## 发布版本规则`：所有会进入 `plugins/vinea` 的内容变更必须在同一提交更新根 semver；兼容修复／视觉或文档变更递增 patch，兼容能力递增 minor，不兼容契约递增 major；本次为 `0.2.0`。
 
@@ -330,7 +330,7 @@
 
   明确两端都需要新的会话，且脚本从不写入凭据或运行时 cache。
 
-- [ ] **Step 6：验证脚本语法与聚焦测试转绿**
+- [x] **Step 6：验证脚本语法与聚焦测试转绿**
 
   Run:
 
@@ -342,7 +342,7 @@
 
   Expected: 两份 Bash 脚本语法正确；2 个安装脚本测试 PASS。
 
-- [ ] **Step 7：提交宿主刷新和文档改动**
+- [x] **Step 7：提交宿主刷新和文档改动**
 
   ```bash
   git add scripts/install-codex-plugin.sh scripts/install-claude-plugin.sh tests/plugin/install-scripts.test.ts README.md
@@ -362,7 +362,7 @@
 - Consumes: Task 1–3 的已提交源变更、当前个人 Codex marketplace 和现有 `vinea-local` Claude marketplace。
 - Produces: 通过完整检查的公共 Vinea 0.2.0 产物；Codex 本机显示带 cache-buster 的 0.2.0、Claude Code 本机显示 0.2.0；按 R1–R5 覆盖的 Vinea 检查矩阵。
 
-- [ ] **Step 1：重新生成并检查所有分发元数据**
+- [x] **Step 1：重新生成并检查所有分发元数据**
 
   Run:
 
@@ -375,7 +375,10 @@
 
   Expected: 四份发布元数据都报告 `0.2.0`，公共 PNG 存在，两个校验命令 PASS。
 
-- [ ] **Step 2：运行全量代码与发布检查**
+  若本机系统 `python3` 缺少 PyYAML，可仅为本次校验将
+  `VINEA_PLUGIN_VALIDATOR_PYTHON` 指向 Codex workspace 自带的 Python；不要安装、提交或分发该环境依赖。
+
+- [x] **Step 2：运行全量代码与发布检查**
 
   Run:
 
@@ -390,7 +393,7 @@
 
   Expected: 全部 PASS；`npm test` 不再有 doctor JSON 基线失败。
 
-- [ ] **Step 3：执行已获用户授权的本机刷新**
+- [x] **Step 3：执行已获用户授权的本机刷新**
 
   Run:
 
@@ -401,7 +404,7 @@
 
   Expected: Codex 脚本只对已声明 source 应用一个 cache-buster 后调用 `codex plugin add`；Claude Code 脚本在已安装的 Vinea 上调用 `plugin update`；两者均提示新会话。
 
-- [ ] **Step 4：核对真实宿主状态和已安装资源**
+- [x] **Step 4：核对真实宿主状态和已安装资源**
 
   Run:
 
@@ -413,13 +416,13 @@
 
   Expected: Codex 列表显示 `vinea@personal` 已安装并启用，其版本是单个 `0.2.0+codex.*`；Claude Code 列表显示 `vinea@vinea-local` 版本 `0.2.0`、已启用；两份安装树均有 PNG。
 
-- [ ] **Step 5：记录命令证据并生成 R1–R5 检查矩阵**
+- [x] **Step 5：记录命令证据并生成 R1–R5 与 AC1–AC5 检查矩阵**
 
-  记录每个验证集的 `command` 证据：公共插件校验、全量 `npm run check`、Codex 刷新与列表核对、Claude 刷新与列表核对。每条证据都带实际 command、exit code 和 pass 结果。随后为 R1–R5 各写一行 `vinea check`，分别引用对应证据 ID，所有结果为 `pass`；R1 引用打包／图标证据，R2 引用版本元数据证据，R3 引用双宿主刷新证据，R4 引用 Task 1 聚焦测试证据，R5 引用 `npm run check` 与插件校验证据。
+  记录每个验证集的 `command` 证据：公共插件校验、全量 `npm run check`、Codex 刷新与列表核对、Claude 刷新与列表核对。每条证据都带实际 command、exit code 和 pass 结果。随后为 R1–R5 与 AC1–AC5 各写一行 `vinea check`，分别引用对应证据 ID，所有结果为 `pass`；R1／AC1 引用打包／图标证据，R2／AC2 引用版本元数据证据，R3／AC3 引用双宿主刷新证据，R4／AC4 引用 Task 1 聚焦测试证据，R5／AC5 引用 `npm run check`、插件校验与列表核对证据。Vinea 的完成门槛将 requirements 和 acceptance criteria 都视为必须覆盖的声明行。
 
   使用 `node plugins/vinea/bin/vinea.mjs check` 写入每行，并将同一轮 `evidence record --json` 返回的真实 `id` 传给该行的 `--evidence`。不编造 ID，也不把先前任务的证据用于本任务；提交前用 `node plugins/vinea/bin/vinea.mjs check show t-20260804-070507-release-vinea-0-2-0-icon-and-host-update-workflow --json` 确认 R1–R5 全部为 `pass`。
 
-- [ ] **Step 6：检查最终差异并提交生成产物与检查记录**
+- [x] **Step 6：检查最终差异并提交生成产物与检查记录**
 
   ```bash
   git status --short

@@ -9,3 +9,4 @@
 {"schemaVersion":2,"path":"tests/plugin/install-scripts.test.ts","purpose":"Host installer and refresh regression coverage.","estimatedBytes":2703,"addedAt":"2026-08-04T07:07:42.344Z"}
 {"schemaVersion":2,"path":"tests/core/schema.test.ts","purpose":"Stale doctor JSON assertion to repair.","estimatedBytes":2764,"addedAt":"2026-08-04T07:07:42.387Z"}
 {"schemaVersion":2,"path":"docs/superpowers/specs/2026-08-04-vinea-plugin-release-design.md","purpose":"Approved release design and scope boundary.","estimatedBytes":5511,"addedAt":"2026-08-04T07:07:42.431Z"}
+{"schemaVersion":2,"path":"docs/superpowers/plans/2026-08-04-vinea-plugin-release-implementation-plan.md","purpose":"Executable TDD single-agent release plan and evidence sequence.","estimatedBytes":22584,"addedAt":"2026-08-04T07:21:19.452Z"}

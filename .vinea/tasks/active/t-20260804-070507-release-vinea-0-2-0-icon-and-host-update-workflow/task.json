@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "t-20260804-070507-release-vinea-0-2-0-icon-and-host-update-workflow",
   "title": "Release Vinea 0.2.0 icon and host update workflow",
-  "status": "planning",
+  "status": "checking",
   "risk": {
     "level": "low",
     "reasons": []
@@ -10,9 +10,71 @@
   "qualityMode": "tdd",
   "executionMode": "single-agent",
   "verificationRevision": 0,
-  "requirements": [],
-  "acceptanceCriteria": [],
+  "requirements": [
+    {
+      "schemaVersion": 2,
+      "id": "R1",
+      "text": "The approved Vine Loop icon is packaged and referenced by the Codex plugin manifest.",
+      "createdAt": "2026-08-04T07:15:52.293Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R2",
+      "text": "Every distributed Vinea artifact derives the released 0.2.0 version from package.json.",
+      "createdAt": "2026-08-04T07:15:52.338Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R3",
+      "text": "Codex and Claude Code refresh through their supported plugin workflows without runtime-cache copying.",
+      "createdAt": "2026-08-04T07:15:52.380Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R4",
+      "text": "The doctor JSON schema regression is repaired without changing production behavior.",
+      "createdAt": "2026-08-04T07:15:52.424Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "R5",
+      "text": "The release has test, package, validator, and live dual-host verification evidence.",
+      "createdAt": "2026-08-04T07:15:52.468Z"
+    }
+  ],
+  "acceptanceCriteria": [
+    {
+      "schemaVersion": 2,
+      "id": "AC1",
+      "text": "The public plugin contains the Vine Loop PNG and Codex declares the same relative path for composerIcon, logo, and logoDark.",
+      "createdAt": "2026-08-04T07:15:52.510Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "AC2",
+      "text": "package.json, generated host manifests, and generated marketplace records report 0.2.0.",
+      "createdAt": "2026-08-04T07:15:52.554Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "AC3",
+      "text": "Codex reinstalls after a single cachebuster update and Claude Code updates an existing installation before any install fallback.",
+      "createdAt": "2026-08-04T07:15:52.597Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "AC4",
+      "text": "The doctor JSON focused test passes with migration status none and no rework diagnostics.",
+      "createdAt": "2026-08-04T07:15:52.641Z"
+    },
+    {
+      "schemaVersion": 2,
+      "id": "AC5",
+      "text": "npm run check, plugin validation, and post-refresh Codex and Claude Code list checks pass.",
+      "createdAt": "2026-08-04T07:15:52.684Z"
+    }
+  ],
   "commit": null,
   "createdAt": "2026-08-04T07:05:07.092Z",
-  "updatedAt": "2026-08-04T07:05:07.092Z"
+  "updatedAt": "2026-08-04T07:48:27.218Z"
 }
