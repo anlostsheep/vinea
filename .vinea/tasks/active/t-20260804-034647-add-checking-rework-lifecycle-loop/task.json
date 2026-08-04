@@ -1,7 +1,7 @@
 {
   "id": "t-20260804-034647-add-checking-rework-lifecycle-loop",
   "title": "Add checking rework lifecycle loop",
-  "status": "checking",
+  "status": "finished",
   "risk": {
     "level": "medium",
     "reasons": []
@@ -10,7 +10,7 @@
   "executionMode": "single-agent",
   "commit": null,
   "createdAt": "2026-08-04T03:46:47.345Z",
-  "updatedAt": "2026-08-04T05:51:53.488Z",
+  "updatedAt": "2026-08-04T06:25:19.028Z",
   "schemaVersion": 2,
   "verificationRevision": 0,
   "requirements": [
