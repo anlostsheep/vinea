@@ -58,7 +58,7 @@ printf 'Prepared Claude Code plugin files:\n  %s\n  %s\n' "$plugin_root" "$marke
 
 if ! command -v claude >/dev/null 2>&1; then
   printf 'Claude Code CLI is unavailable; plugin activation was not performed.\n' >&2
-  printf 'When Claude Code is available, run:\n  claude plugin validate %q\n  claude plugin marketplace add %q\n  claude plugin marketplace update vinea-local\n  claude plugin install vinea@vinea-local --scope user\n' "$plugin_root" "$marketplace_root"
+  printf 'When Claude Code is available, run:\n  claude plugin validate %q\n  claude plugin marketplace add %q\n  claude plugin marketplace update vinea-local\n  if claude plugin list | grep -Fq "vinea@vinea-local"; then\n    claude plugin update vinea@vinea-local --scope user\n  else\n    claude plugin install vinea@vinea-local --scope user\n  fi\n' "$plugin_root" "$marketplace_root"
   printf 'Then start a new Claude Code session: plugins and skills are not hot-reloaded.\n'
   exit 0
 fi
@@ -68,6 +68,10 @@ if ! claude plugin marketplace add "$marketplace_root"; then
   printf 'Claude Code marketplace add did not succeed; it may already be configured. Continuing with marketplace refresh.\n' >&2
 fi
 claude plugin marketplace update vinea-local
-claude plugin install vinea@vinea-local --scope user
+if claude plugin list | grep -Fq "vinea@vinea-local"; then
+  claude plugin update vinea@vinea-local --scope user
+else
+  claude plugin install vinea@vinea-local --scope user
+fi
 
-printf 'Vinea is installed for Claude Code. Start a new Claude Code session: plugins and skills are not hot-reloaded.\n'
+printf 'Vinea is refreshed for Claude Code. Start a new Claude Code session: plugins and skills are not hot-reloaded.\n'

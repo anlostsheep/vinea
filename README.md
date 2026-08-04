@@ -9,6 +9,14 @@ one bundled Node CLI and eight host-prefixed skills: `vinea:orient`,
 `vinea:propose`, `vinea:brainstorm`, `vinea:plan`, `vinea:continue`,
 `vinea:check`, `vinea:finish`, and `vinea:doctor`.
 
+## Release version policy
+
+Every content change that is distributed in `plugins/vinea` must update the
+root semantic version in the same commit. Use a patch release for compatible
+fixes, visual changes, and documentation; use a minor release for compatible
+capabilities; and use a major release for incompatible contracts. This release
+is `0.2.0`.
+
 ## Install locally
 
 From a Vinea checkout, use the helper for the host you want to test:
@@ -23,13 +31,14 @@ tree into a host-specific personal marketplace:
 
 | Host | Public plugin copy | Marketplace action |
 | --- | --- | --- |
-| Codex | `~/.codex/plugins/vinea` | Updates `~/.agents/plugins/marketplace.json` with source `./.codex/plugins/vinea`, then runs `codex plugin marketplace add` and `codex plugin add`. |
-| Claude Code | `~/.claude/plugins/marketplaces/vinea-local/plugins/vinea` | Writes the dedicated `vinea-local` marketplace, then runs `claude plugin validate`, `marketplace add`/`update`, and `plugin install --scope user`. |
+| Codex | `~/.codex/plugins/vinea` | Verifies the configured `personal` source, adds one `+codex.` build metadata suffix, then runs `codex plugin add vinea@personal`. |
+| Claude Code | `~/.claude/plugins/marketplaces/vinea-local/plugins/vinea` | Validates and refreshes `vinea-local`; updates `vinea@vinea-local` when installed, otherwise installs it. |
 
-The helpers do not write external credentials. If the relevant CLI is absent,
-they prepare and print the exact local files and manual commands, but do not
-claim that the plugin was activated. In either host, start a **new session**
-after installation or update: installed skills and plugins are not hot-reloaded.
+The helpers do not write external credentials or host runtime caches. If the
+relevant CLI is absent, they prepare and print the exact local files and manual
+commands, but do not claim that the plugin was activated. In either host, start
+a **new session** after installation or update: installed skills and plugins are
+not hot-reloaded.
 
 For a one-session Claude Code experiment without installation, the host also
 supports its own `--plugin-dir` option; that is a host feature rather than a

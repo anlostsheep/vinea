@@ -7,7 +7,6 @@ plugin_source="$project_root/plugins/vinea"
 home_dir="${HOME:?HOME must be set to install the local Codex plugin.}"
 plugin_root="$home_dir/.codex/plugins/vinea"
 marketplace_file="$home_dir/.agents/plugins/marketplace.json"
-version="$(node -p 'require(require("node:path").resolve(process.argv[1])).version' "$project_root/package.json")"
 
 cd "$project_root"
 npm run package:plugin
@@ -27,24 +26,16 @@ rm -rf -- "$plugin_root"
 mv "$staging_root" "$plugin_root"
 trap - EXIT
 
-mkdir -p "$(dirname "$marketplace_file")"
-marketplace_name="$(VINEA_INSTALL_VERSION="$version" node --input-type=module - "$marketplace_file" <<'NODE'
-import { readFile, rename, writeFile } from "node:fs/promises";
+if [[ ! -f "$marketplace_file" ]]; then
+  printf 'Configured Codex personal marketplace is unavailable at %s. Create it with Codex before refreshing Vinea.\n' "$marketplace_file" >&2
+  exit 1
+fi
+
+marketplace_name="$(node --input-type=module - "$marketplace_file" <<'NODE'
+import { readFile } from "node:fs/promises";
 
 const marketplaceFile = process.argv[2];
-let marketplace = {
-  name: "personal",
-  version: process.env.VINEA_INSTALL_VERSION,
-  interface: { displayName: "Personal plugins" },
-  plugins: [],
-};
-
-try {
-  marketplace = JSON.parse(await readFile(marketplaceFile, "utf8"));
-} catch (error) {
-  if (error?.code !== "ENOENT") throw error;
-}
-
+const marketplace = JSON.parse(await readFile(marketplaceFile, "utf8"));
 if (marketplace === null || typeof marketplace !== "object" || Array.isArray(marketplace)) {
   throw new Error(`Marketplace file must contain an object: ${marketplaceFile}`);
 }
@@ -52,44 +43,53 @@ if (!Array.isArray(marketplace.plugins)) {
   throw new Error(`Marketplace file must contain a plugins array: ${marketplaceFile}`);
 }
 if (typeof marketplace.name !== "string" || marketplace.name.trim() === "") {
-  marketplace.name = "personal";
-}
-if (typeof marketplace.version !== "string" || marketplace.version.trim() === "") {
-  marketplace.version = process.env.VINEA_INSTALL_VERSION;
-}
-if (marketplace.interface === null || typeof marketplace.interface !== "object" || Array.isArray(marketplace.interface)) {
-  marketplace.interface = { displayName: "Personal plugins" };
+  throw new Error(`Marketplace file must contain a name: ${marketplaceFile}`);
 }
 
-const entry = {
-  name: "vinea",
-  version: process.env.VINEA_INSTALL_VERSION,
-  source: { source: "local", path: "./.codex/plugins/vinea" },
-  policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
-  category: "Developer Tools",
-};
-marketplace.plugins = marketplace.plugins.filter((candidate) => candidate?.name !== "vinea");
-marketplace.plugins.push(entry);
+const entry = marketplace.plugins.find((candidate) => (
+  candidate !== null
+  && typeof candidate === "object"
+  && !Array.isArray(candidate)
+  && candidate.name === "vinea"
+));
+if (entry === undefined) {
+  throw new Error(`Marketplace file must contain a Vinea entry: ${marketplaceFile}`);
+}
+const source = entry.source;
+if (
+  source === null
+  || typeof source !== "object"
+  || Array.isArray(source)
+  || source.source !== "local"
+  || source.path !== "./.codex/plugins/vinea"
+) {
+  throw new Error(`Vinea entry must use local source ./.codex/plugins/vinea: ${marketplaceFile}`);
+}
 
-const temporaryFile = `${marketplaceFile}.tmp-${process.pid}`;
-await writeFile(temporaryFile, `${JSON.stringify(marketplace, null, 2)}\n`, "utf8");
-await rename(temporaryFile, marketplaceFile);
-process.stdout.write(marketplace.name);
+process.stdout.write(marketplace.name.trim());
 NODE
 )"
 
-printf 'Prepared Codex plugin files:\n  %s\n  %s\n' "$plugin_root" "$marketplace_file"
+cachebuster_script="$home_dir/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py"
+if [[ ! -f "$cachebuster_script" ]]; then
+  printf 'Codex plugin cachebuster helper is unavailable at %s.\n' "$cachebuster_script" >&2
+  exit 1
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  printf 'Python 3 is unavailable; it is required for the Codex plugin cachebuster.\n' >&2
+  exit 1
+fi
+
+printf 'Prepared Codex plugin source:\n  %s\nValidated configured marketplace:\n  %s (%s)\n' "$plugin_root" "$marketplace_file" "$marketplace_name"
 
 if ! command -v codex >/dev/null 2>&1; then
   printf 'Codex CLI is unavailable; plugin activation was not performed.\n' >&2
-  printf 'When Codex is available, run:\n  codex plugin marketplace add %q\n  codex plugin add vinea@%s\n' "$home_dir" "$marketplace_name"
+  printf 'When Codex is available, run:\n  python3 %q %q\n  codex plugin add vinea@%s\n' "$cachebuster_script" "$plugin_root" "$marketplace_name"
   printf 'Then start a new Codex session: plugins and skills are not hot-reloaded.\n'
   exit 0
 fi
 
-if ! codex plugin marketplace add "$home_dir"; then
-  printf 'Codex marketplace add did not succeed; it may already be configured. Continuing with plugin installation.\n' >&2
-fi
+python3 "$cachebuster_script" "$plugin_root"
 codex plugin add "vinea@$marketplace_name"
 
-printf 'Vinea is installed for Codex. Start a new Codex session: plugins and skills are not hot-reloaded.\n'
+printf 'Vinea is refreshed for Codex. Start a new Codex session: plugins and skills are not hot-reloaded.\n'
