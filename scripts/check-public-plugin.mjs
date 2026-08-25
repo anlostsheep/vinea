@@ -18,6 +18,23 @@ const expectedSkills = [
 const iconRelativePath = "./assets/vinea-loop.png";
 const repositoryUrl = "https://github.com/anlostsheep/vinea";
 const homepageUrl = `${repositoryUrl}#readme`;
+const languageSwitch = "[简体中文](README.md) | [English](README.en.md)";
+const operationalCommands = [
+  "codex plugin marketplace add anlostsheep/vinea",
+  "codex plugin add vinea@vinea",
+  "codex plugin marketplace add anlostsheep/vinea --ref v0.3.1",
+  "claude plugin marketplace add anlostsheep/vinea",
+  "claude plugin install vinea@vinea --scope user",
+  "claude plugin marketplace add anlostsheep/vinea@v0.3.1",
+  "codex plugin marketplace upgrade vinea",
+  "codex plugin remove vinea@vinea",
+  "claude plugin marketplace update vinea",
+  "claude plugin update vinea@vinea --scope user",
+  "codex plugin remove vinea@personal",
+  "claude plugin uninstall vinea@vinea-local --scope user",
+  "codex plugin list",
+  "claude plugin list",
+];
 const rootPackage = await readJson(join(projectRoot, "package.json"));
 const version = requiredString(rootPackage.version, "package.json version");
 
@@ -47,7 +64,9 @@ assertCodexMarketplace(codexMarketplace, version);
 assertClaudeMarketplace(claudeMarketplace, version);
 
 const publicReadme = await readFile(join(publicRoot, "README.md"), "utf8");
-assertPublicReadme(publicReadme);
+const publicEnglishReadme = await readFile(join(publicRoot, "README.en.md"), "utf8");
+assertPublicReadme(publicReadme, "## 为宿主安装");
+assertPublicReadme(publicEnglishReadme, "## Install for your host");
 
 const publicTextPaths = [
   ...(await walkFiles(publicRoot)).filter(isPublicTextPath),
@@ -160,7 +179,10 @@ function assertClaudeMarketplace(marketplace, expectedVersion) {
   }
 }
 
-function assertPublicReadme(readme) {
+function assertPublicReadme(readme, languageHeading) {
+  if (!readme.includes(languageSwitch) || !readme.includes(languageHeading)) {
+    throw new Error("Public README language navigation or default-language heading is invalid.");
+  }
   if (!readme.includes("node bin/vinea.mjs --help")) {
     throw new Error("Public README must invoke the bundled CLI from the plugin root.");
   }
@@ -169,6 +191,9 @@ function assertPublicReadme(readme) {
   }
   if (/\bnpm\b|\bdist\/|\bpackage\.json\b|plugins\/vinea\b/.test(readme)) {
     throw new Error("Public README must not contain development-root commands or paths.");
+  }
+  for (const command of operationalCommands) {
+    if (!readme.includes(command)) throw new Error(`Public README is missing operational command: ${command}`);
   }
 }
 

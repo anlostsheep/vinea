@@ -3,6 +3,15 @@
 Vinea follows Semantic Versioning. The root `package.json` is authoritative;
 host manifests and marketplaces are generated from it by the release checks.
 
+## [0.3.1] - 2026-08-25
+
+### Added
+
+- Simplified Chinese root and packaged-plugin READMEs as the default
+  documentation, with equivalent English versions in `README.en.md`.
+- Bilingual packaging and validation coverage for language links, lifecycle
+  commands, and public-artifact path safety.
+
 ## [0.3.0] - 2026-08-25
 
 ### Added

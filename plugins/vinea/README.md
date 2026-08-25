@@ -1,54 +1,126 @@
 # Vinea
 
-Vinea is a shared, file-first task workflow for AI coding. Codex and Claude
-Code read the same `.vinea/` state from the target Git repository, allowing a
-new session to orient, confirm, and continue the same task deliberately.
+[简体中文](README.md) | [English](README.en.md)
 
-## Install for your host
+Vinea 是一个面向 AI 编程的共享、文件优先任务工作流。Codex 与 Claude Code
+从目标 Git 仓库读取同一份 `.vinea/` 状态，因此新会话可以明确地定位、确认
+并继续同一项任务。
 
-The public plugin id is `vinea@vinea`.
+## 为宿主安装
 
-For Codex:
+公开插件 ID 为 `vinea@vinea`。
+
+Codex：
 
 ```sh
 codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-For Claude Code:
+固定到 0.3.1：
+
+```sh
+codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin add vinea@vinea
+```
+
+Claude Code：
 
 ```sh
 claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-To pin a release, use `--ref v0.3.0` on the Codex marketplace command or add
-`anlostsheep/vinea@v0.3.0` in Claude Code. Do not keep `vinea@vinea` installed
-alongside the development channels `vinea@personal` or
-`vinea@vinea-local` in the same host.
+固定到 0.3.1：
 
-After the host reports installation, fully restart it and start a new session
-in the target Git repository. First verify the installed files with
-`codex plugin list` or `claude plugin list`; then separately verify that the
-new session can discover `vinea:orient`.
+```sh
+claude plugin marketplace add anlostsheep/vinea@v0.3.1
+claude plugin install vinea@vinea --scope user
+```
 
-For upgrades, rollbacks, removal, and development-channel migration, see the
-repository README at <https://github.com/anlostsheep/vinea#readme>.
+## 升级、回滚或卸载
 
-## Start or recover work
+对于跟随 `main` 的 Codex marketplace，请刷新并重新安装：
 
-Use `vinea:orient` at the beginning of a new session. It reads state without
-changing it and asks for confirmation before continuation. Use
-`vinea:propose` for medium- or high-risk changes, `vinea:brainstorm` only for
-material design choices, `vinea:check` before finishing, and `vinea:finish`
-to apply completion and learning gates.
+```sh
+codex plugin marketplace upgrade vinea
+codex plugin remove vinea@vinea
+codex plugin add vinea@vinea
+```
 
-The skills use this bundled CLI. From this plugin root, its direct form is:
+对于固定版本的 Codex 安装，请将 marketplace 替换为目标 tag；要回滚时改用
+更早的 tag：
+
+```sh
+codex plugin remove vinea@vinea
+codex plugin marketplace remove vinea
+codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin add vinea@vinea
+```
+
+Claude Code 可以直接更新跟随 marketplace 的安装：
+
+```sh
+claude plugin marketplace update vinea
+claude plugin update vinea@vinea --scope user
+```
+
+对于固定版本的 Claude Code 安装，请删除插件和 marketplace，添加目标 tag
+后重新安装。完全卸载 Vinea：
+
+```sh
+# Codex
+codex plugin remove vinea@vinea
+codex plugin marketplace remove vinea
+
+# Claude Code
+claude plugin uninstall vinea@vinea --scope user
+claude plugin marketplace remove vinea --scope user
+```
+
+## 从开发渠道迁移
+
+每个宿主只保留一个 Vinea 渠道。使用公开渠道前，先删除对应的开发插件：
+
+```sh
+# Codex 开发渠道
+codex plugin remove vinea@personal
+
+# Claude Code 开发渠道
+claude plugin uninstall vinea@vinea-local --scope user
+```
+
+然后运行上面的公开安装命令。Vinea 绝不会自动卸载或禁用其他插件。
+
+## 验证安装与加载
+
+每次安装、升级、回滚或切换渠道后，都要完全重启宿主，并在目标 Git 仓库中
+开始一个**新会话**。先验证安装状态：
+
+```sh
+codex plugin list
+claude plugin list
+```
+
+然后再单独确认新会话能够发现 `vinea:orient`。插件文件已经安装，并不能
+证明正在运行的旧会话已经加载了技能。
+
+完整生命周期和本地开发说明见仓库 README：
+<https://github.com/anlostsheep/vinea#readme>。
+
+## 开始或恢复工作
+
+新会话开始时使用 `vinea:orient`。它以只读方式检查状态，并在继续前要求
+确认。中高风险变更使用 `vinea:propose`；只有存在重要设计选择时才使用
+`vinea:brainstorm`；完成前使用 `vinea:check`；使用 `vinea:finish` 执行
+完成和学习门禁。
+
+这些技能使用插件内置的 CLI。从插件根目录可直接运行：
 
 ```sh
 node bin/vinea.mjs --help
 node bin/vinea.mjs orient --host codex --json
 ```
 
-The CLI stores state only in the target repository. Vinea ships no MCP server,
-daemon, hooks, apps, or cloud service.
+CLI 只在目标仓库中保存状态。Vinea 不提供 MCP server、daemon、hook、app
+或云服务。

@@ -25,6 +25,7 @@ await cp(join(projectRoot, "dist", "vinea.mjs"), join(publicRoot, "bin", "vinea.
 await chmod(join(publicRoot, "bin", "vinea.mjs"), 0o755);
 await cp(join(projectRoot, "skills"), join(publicRoot, "skills"), { recursive: true });
 await cp(join(projectRoot, "hosts", "public-plugin", "README.md"), join(publicRoot, "README.md"));
+await cp(join(projectRoot, "hosts", "public-plugin", "README.en.md"), join(publicRoot, "README.en.md"));
 await cp(join(projectRoot, "LICENSE"), join(publicRoot, "LICENSE"));
 await cp(join(projectRoot, "assets", "vinea-loop.png"), join(publicRoot, "assets", "vinea-loop.png"));
 

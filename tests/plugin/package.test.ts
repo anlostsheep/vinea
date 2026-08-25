@@ -11,6 +11,23 @@ const publicRoot = join(repositoryRoot, "plugins", "vinea");
 const iconRelativePath = "./assets/vinea-loop.png";
 const sourceIconPath = join(repositoryRoot, "assets", "vinea-loop.svg");
 const packagedIconPath = join(publicRoot, "assets", "vinea-loop.png");
+const languageSwitch = "[简体中文](README.md) | [English](README.en.md)";
+const operationalCommands = [
+  "codex plugin marketplace add anlostsheep/vinea",
+  "codex plugin add vinea@vinea",
+  "codex plugin marketplace add anlostsheep/vinea --ref v0.3.1",
+  "claude plugin marketplace add anlostsheep/vinea",
+  "claude plugin install vinea@vinea --scope user",
+  "claude plugin marketplace add anlostsheep/vinea@v0.3.1",
+  "codex plugin marketplace upgrade vinea",
+  "codex plugin remove vinea@vinea",
+  "claude plugin marketplace update vinea",
+  "claude plugin update vinea@vinea --scope user",
+  "codex plugin remove vinea@personal",
+  "claude plugin uninstall vinea@vinea-local --scope user",
+  "codex plugin list",
+  "claude plugin list",
+] as const;
 const skillNames = [
   "brainstorm",
   "check",
@@ -119,6 +136,27 @@ test("packages parity manifests, all public skills, and one host-independent CLI
   const cliPath = join(publicRoot, "bin", "vinea.mjs");
   await access(cliPath);
   expect((await stat(cliPath)).mode & 0o111).not.toBe(0);
+});
+
+test("packages Chinese-first bilingual READMEs with equivalent operational commands", async () => {
+  const rootChinese = await readFile(join(repositoryRoot, "README.md"), "utf8");
+  const rootEnglish = await readFile(join(repositoryRoot, "README.en.md"), "utf8");
+  const sourceChinese = await readFile(join(repositoryRoot, "hosts", "public-plugin", "README.md"), "utf8");
+  const sourceEnglish = await readFile(join(repositoryRoot, "hosts", "public-plugin", "README.en.md"), "utf8");
+  const packagedChinese = await readFile(join(publicRoot, "README.md"), "utf8");
+  const packagedEnglish = await readFile(join(publicRoot, "README.en.md"), "utf8");
+
+  expect(rootChinese).toContain("## 通过 Git marketplace 安装");
+  expect(rootEnglish).toContain("## Install from the Git marketplace");
+  expect(sourceChinese).toContain("## 为宿主安装");
+  expect(sourceEnglish).toContain("## Install for your host");
+  for (const readme of [rootChinese, rootEnglish, sourceChinese, sourceEnglish]) {
+    expect(readme).toContain(languageSwitch);
+    for (const command of operationalCommands) expect(readme).toContain(command);
+  }
+
+  expect(packagedChinese).toBe(sourceChinese);
+  expect(packagedEnglish).toBe(sourceEnglish);
 });
 
 test("the public CLI initializes and validates a fresh repository", async () => {
