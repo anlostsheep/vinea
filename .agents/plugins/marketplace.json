@@ -1,13 +1,13 @@
 {
   "name": "vinea",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "interface": {
     "displayName": "Vinea"
   },
   "plugins": [
     {
       "name": "vinea",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "source": {
         "source": "local",
         "path": "./plugins/vinea"
