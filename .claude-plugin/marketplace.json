@@ -11,10 +11,12 @@
     {
       "name": "vinea",
       "description": "Shared AI-coding task workflows for Codex and Claude Code.",
-      "version": "0.2.0",
       "author": {
         "name": "dengzhen"
       },
+      "repository": "https://github.com/anlostsheep/vinea",
+      "homepage": "https://github.com/anlostsheep/vinea#readme",
+      "license": "MIT",
       "source": "./plugins/vinea"
     }
   ]

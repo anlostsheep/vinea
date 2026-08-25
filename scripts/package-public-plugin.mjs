@@ -71,8 +71,10 @@ await writeJson(join(projectRoot, ".claude-plugin", "marketplace.json"), {
     {
       name: "vinea",
       description: "Shared AI-coding task workflows for Codex and Claude Code.",
-      version,
       author: { name: "dengzhen" },
+      repository: "https://github.com/anlostsheep/vinea",
+      homepage: "https://github.com/anlostsheep/vinea#readme",
+      license: "MIT",
       source: "./plugins/vinea",
     },
   ],

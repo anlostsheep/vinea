@@ -4,11 +4,15 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 plugin_source="$project_root/plugins/vinea"
+conflict_checker="$project_root/scripts/check-plugin-install-conflict.mjs"
 home_dir="${HOME:?HOME must be set to install the local Codex plugin.}"
 plugin_root="$home_dir/.codex/plugins/vinea"
 marketplace_file="$home_dir/.agents/plugins/marketplace.json"
 
 cd "$project_root"
+if command -v codex >/dev/null 2>&1; then
+  codex plugin list | node "$conflict_checker" --host codex --installing personal
+fi
 npm run package:plugin
 
 if [[ ! -d "$plugin_source" ]]; then

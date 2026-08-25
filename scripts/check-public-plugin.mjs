@@ -16,6 +16,8 @@ const expectedSkills = [
   "propose",
 ];
 const iconRelativePath = "./assets/vinea-loop.png";
+const repositoryUrl = "https://github.com/anlostsheep/vinea";
+const homepageUrl = `${repositoryUrl}#readme`;
 const rootPackage = await readJson(join(projectRoot, "package.json"));
 const version = requiredString(rootPackage.version, "package.json version");
 
@@ -82,6 +84,10 @@ function assertHostManifest(host, manifest, expectedVersion) {
     throw new Error(`${host} manifest must describe shared task state for Codex and Claude Code.`);
   }
   if (manifest.author?.name !== "dengzhen") throw new Error(`${host} manifest must declare the Vinea author.`);
+  if (manifest.repository !== repositoryUrl) throw new Error(`${host} manifest repository is invalid.`);
+  if (host === "Claude" && (manifest.homepage !== homepageUrl || manifest.license !== "MIT")) {
+    throw new Error("Claude manifest homepage or license is invalid.");
+  }
   if (manifest.skills !== "./skills/") throw new Error(`${host} manifest must expose ./skills/.`);
   for (const unsupported of ["mcpServers", "hooks", "apps"]) {
     if (unsupported in manifest) throw new Error(`${host} manifest must not declare ${unsupported}.`);
@@ -141,7 +147,15 @@ function assertClaudeMarketplace(marketplace, expectedVersion) {
   if (typeof marketplace.metadata?.description !== "string" || marketplace.metadata.version !== expectedVersion) {
     throw new Error("Claude marketplace metadata is invalid.");
   }
-  if (entry?.name !== "vinea" || entry.version !== expectedVersion || entry.author?.name !== "dengzhen" || entry.source !== "./plugins/vinea") {
+  if (
+    entry?.name !== "vinea"
+    || "version" in entry
+    || entry.author?.name !== "dengzhen"
+    || entry.source !== "./plugins/vinea"
+    || entry.repository !== repositoryUrl
+    || entry.homepage !== homepageUrl
+    || entry.license !== "MIT"
+  ) {
     throw new Error("Claude marketplace plugin entry is invalid.");
   }
 }

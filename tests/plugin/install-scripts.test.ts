@@ -39,6 +39,9 @@ test("Codex helper packages Vinea and refreshes the configured personal marketpl
   expect(source).toContain("Codex CLI is unavailable; plugin activation was not performed.");
   expect(source).toContain("When Codex is available, run:");
   expect(source).toContain("codex plugin add vinea@");
+  expect(source).toContain("check-plugin-install-conflict.mjs");
+  expect(source).toContain("--host codex --installing personal");
+  expect(source.indexOf("check-plugin-install-conflict.mjs")).toBeLessThan(source.indexOf("npm run package:plugin"));
 });
 
 test("Claude Code helper packages Vinea and uses the documented marketplace lifecycle", async () => {
@@ -59,4 +62,7 @@ test("Claude Code helper packages Vinea and uses the documented marketplace life
   expect(source).toContain("Claude Code CLI is unavailable; plugin activation was not performed.");
   expect(source).toContain("When Claude Code is available, run:");
   expect(source).toContain("claude plugin install vinea@vinea-local --scope user");
+  expect(source).toContain("check-plugin-install-conflict.mjs");
+  expect(source).toContain("--host claude --installing vinea-local");
+  expect(source.indexOf("check-plugin-install-conflict.mjs")).toBeLessThan(source.indexOf("npm run package:plugin"));
 });

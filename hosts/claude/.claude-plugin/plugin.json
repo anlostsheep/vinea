@@ -5,6 +5,8 @@
   "author": {
     "name": "dengzhen"
   },
+  "repository": "https://github.com/anlostsheep/vinea",
+  "homepage": "https://github.com/anlostsheep/vinea#readme",
   "license": "MIT",
   "keywords": ["ai-coding", "workflow", "tasks", "codex", "claude-code"],
   "skills": "./skills/"

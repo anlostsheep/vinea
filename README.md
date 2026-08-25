@@ -9,25 +9,122 @@ one bundled Node CLI and eight host-prefixed skills: `vinea:orient`,
 `vinea:propose`, `vinea:brainstorm`, `vinea:plan`, `vinea:continue`,
 `vinea:check`, `vinea:finish`, and `vinea:doctor`.
 
-## Release version policy
+## Install from the Git marketplace
 
-Every content change that is distributed in `plugins/vinea` must update the
-root semantic version in the same commit. Use a patch release for compatible
-fixes, visual changes, and documentation; use a minor release for compatible
-capabilities; and use a major release for incompatible contracts. This release
-is `0.2.0`.
+The public plugin id is `vinea@vinea`. The repository contains both host
+manifests and a prebuilt CLI, so users do not clone the repository or run
+`npm install`.
 
-## Install locally
+### Codex
 
-From a Vinea checkout, use the helper for the host you want to test:
+```sh
+codex plugin marketplace add anlostsheep/vinea
+codex plugin add vinea@vinea
+```
+
+To pin an exact release instead of following `main`, register the marketplace
+at an annotated tag:
+
+```sh
+codex plugin marketplace add anlostsheep/vinea --ref v0.3.0
+codex plugin add vinea@vinea
+```
+
+### Claude Code
+
+```sh
+claude plugin marketplace add anlostsheep/vinea
+claude plugin install vinea@vinea --scope user
+```
+
+To pin an exact release:
+
+```sh
+claude plugin marketplace add anlostsheep/vinea@v0.3.0
+claude plugin install vinea@vinea --scope user
+```
+
+After either installation, fully restart the host and start a **new session**.
+An installed plugin tree does not prove that an already-running session loaded
+its skills. Verify both states separately with `codex plugin list` or
+`claude plugin list`, then confirm that the new session can discover
+`vinea:orient`.
+
+### Upgrade, roll back, or remove
+
+Codex has no separate plugin-upgrade command. For a marketplace that follows
+`main`, refresh its snapshot and reinstall the plugin:
+
+```sh
+codex plugin marketplace upgrade vinea
+codex plugin remove vinea@vinea
+codex plugin add vinea@vinea
+```
+
+For a pinned Codex installation, remove the old plugin and marketplace, then
+add the desired tag (use an older tag to roll back):
+
+```sh
+codex plugin remove vinea@vinea
+codex plugin marketplace remove vinea
+codex plugin marketplace add anlostsheep/vinea --ref v0.3.0
+codex plugin add vinea@vinea
+```
+
+Claude Code can refresh the marketplace and plugin directly:
+
+```sh
+claude plugin marketplace update vinea
+claude plugin update vinea@vinea --scope user
+```
+
+To change a pinned Claude Code version, remove the plugin and marketplace,
+then add the desired tag and install again. To remove Vinea completely:
+
+```sh
+# Codex
+codex plugin remove vinea@vinea
+codex plugin marketplace remove vinea
+
+# Claude Code
+claude plugin uninstall vinea@vinea --scope user
+claude plugin marketplace remove vinea --scope user
+```
+
+Restart the host and use a new session after every upgrade, rollback, or
+channel change.
+
+## One channel per host
+
+Do not keep a public and development Vinea plugin installed in the same host.
+Before migrating to the public channel, remove the legacy development plugin:
+
+```sh
+# Codex development channel
+codex plugin remove vinea@personal
+
+# Claude Code development channel
+claude plugin uninstall vinea@vinea-local --scope user
+```
+
+Then run the public installation commands above. Vinea's development helpers
+perform the inverse preflight: if `vinea@vinea` is present, they stop before
+copying files and print an explicit migration command. They never uninstall or
+disable a plugin automatically.
+
+## Install locally for development
+
+From a Vinea checkout, use these helpers only when developing or dogfooding
+unreleased changes:
 
 ```sh
 scripts/install-codex-plugin.sh
 scripts/install-claude-plugin.sh
 ```
 
-Each helper first runs `npm run package:plugin`, then copies the public plugin
-tree into a host-specific personal marketplace:
+After the channel-conflict preflight, each helper runs
+`npm run package:plugin` and copies the public plugin tree into a host-specific
+development marketplace:
 
 | Host | Public plugin copy | Marketplace action |
 | --- | --- | --- |
@@ -43,6 +140,29 @@ not hot-reloaded.
 For a one-session Claude Code experiment without installation, the host also
 supports its own `--plugin-dir` option; that is a host feature rather than a
 Vinea installation path.
+
+## Release version policy
+
+The root `package.json` is the release-version source. Both host plugin
+manifests and the Codex marketplace carry the generated version. The Claude
+marketplace plugin entry deliberately omits a duplicate `version`, so Claude
+Code resolves it from `.claude-plugin/plugin.json`; catalog metadata may still
+display the release version.
+
+Use a patch release for compatible fixes and documentation, a minor release
+for compatible capabilities, and a major release for incompatible contracts.
+From a clean `main` worktree (dirty, unstaged `.vinea/` task state is allowed),
+create a local release with:
+
+```sh
+npm run release -- patch|minor|major
+npm run release -- 0.3.0
+```
+
+The command runs the full checks, stages only release artifacts, creates a
+release commit and annotated `vX.Y.Z` tag, and intentionally does **not** push.
+Publication remains a separate, explicitly approved action. See
+[`CHANGELOG.md`](CHANGELOG.md) for release notes.
 
 ## Workflow
 

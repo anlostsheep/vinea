@@ -6,11 +6,34 @@ new session to orient, confirm, and continue the same task deliberately.
 
 ## Install for your host
 
-This plugin root contains both `.codex-plugin/plugin.json` and
-`.claude-plugin/plugin.json`. Install it from the Vinea marketplace through
-the plugin workflow of the host you use. After the host reports installation,
-start a new Codex or Claude Code session in the target Git repository so it
-can discover the Vinea skills.
+The public plugin id is `vinea@vinea`.
+
+For Codex:
+
+```sh
+codex plugin marketplace add anlostsheep/vinea
+codex plugin add vinea@vinea
+```
+
+For Claude Code:
+
+```sh
+claude plugin marketplace add anlostsheep/vinea
+claude plugin install vinea@vinea --scope user
+```
+
+To pin a release, use `--ref v0.3.0` on the Codex marketplace command or add
+`anlostsheep/vinea@v0.3.0` in Claude Code. Do not keep `vinea@vinea` installed
+alongside the development channels `vinea@personal` or
+`vinea@vinea-local` in the same host.
+
+After the host reports installation, fully restart it and start a new session
+in the target Git repository. First verify the installed files with
+`codex plugin list` or `claude plugin list`; then separately verify that the
+new session can discover `vinea:orient`.
+
+For upgrades, rollbacks, removal, and development-channel migration, see the
+repository README at <https://github.com/anlostsheep/vinea#readme>.
 
 ## Start or recover work
 

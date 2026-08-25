@@ -4,6 +4,7 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 plugin_source="$project_root/plugins/vinea"
+conflict_checker="$project_root/scripts/check-plugin-install-conflict.mjs"
 home_dir="${HOME:?HOME must be set to install the local Claude Code plugin.}"
 marketplace_root="$home_dir/.claude/plugins/marketplaces/vinea-local"
 plugin_root="$marketplace_root/plugins/vinea"
@@ -11,6 +12,9 @@ marketplace_file="$marketplace_root/.claude-plugin/marketplace.json"
 version="$(node -p 'require(require("node:path").resolve(process.argv[1])).version' "$project_root/package.json")"
 
 cd "$project_root"
+if command -v claude >/dev/null 2>&1; then
+  claude plugin list | node "$conflict_checker" --host claude --installing vinea-local
+fi
 npm run package:plugin
 
 if [[ ! -d "$plugin_source" ]]; then

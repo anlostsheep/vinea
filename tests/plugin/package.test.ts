@@ -8,7 +8,6 @@ import { beforeAll, expect, test } from "vitest";
 const execFileAsync = promisify(execFile);
 const repositoryRoot = process.cwd();
 const publicRoot = join(repositoryRoot, "plugins", "vinea");
-const expectedReleaseVersion = "0.2.0";
 const iconRelativePath = "./assets/vinea-loop.png";
 const sourceIconPath = join(repositoryRoot, "assets", "vinea-loop.svg");
 const packagedIconPath = join(publicRoot, "assets", "vinea-loop.png");
@@ -38,13 +37,14 @@ test("packages parity manifests, all public skills, and one host-independent CLI
   expect((await readFile(packagedIconPath)).subarray(0, 8)).toEqual(
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   );
-  expect(rootPackage.version).toBe(expectedReleaseVersion);
+  expect(rootPackage.version).toMatch(/^\d+\.\d+\.\d+$/);
   expect(codexManifest.version).toBe(rootPackage.version);
   expect(claudeManifest.version).toBe(rootPackage.version);
   expect(codexManifest).toMatchObject({
     name: "vinea",
     description: expect.stringMatching(/shared task state.*Codex.*Claude Code/i),
     author: { name: "dengzhen" },
+    repository: "https://github.com/anlostsheep/vinea",
     skills: "./skills/",
     interface: {
       displayName: "Vinea",
@@ -63,6 +63,9 @@ test("packages parity manifests, all public skills, and one host-independent CLI
     name: "vinea",
     description: expect.stringMatching(/shared task state.*Codex.*Claude Code/i),
     author: { name: "dengzhen" },
+    repository: "https://github.com/anlostsheep/vinea",
+    homepage: "https://github.com/anlostsheep/vinea#readme",
+    license: "MIT",
     skills: "./skills/",
   });
   expect(codexManifest.skills).toBe("./skills/");
@@ -92,11 +95,14 @@ test("packages parity manifests, all public skills, and one host-independent CLI
     metadata: { version: rootPackage.version },
     plugins: [{
       name: "vinea",
-      version: rootPackage.version,
       author: { name: "dengzhen" },
       source: "./plugins/vinea",
+      repository: "https://github.com/anlostsheep/vinea",
+      homepage: "https://github.com/anlostsheep/vinea#readme",
+      license: "MIT",
     }],
   });
+  expect((claudeMarketplace.plugins as Array<Record<string, unknown>>)[0]).not.toHaveProperty("version");
 
   const publicReadme = await readFile(join(publicRoot, "README.md"), "utf8");
   expect(publicReadme).toContain("node bin/vinea.mjs --help");
