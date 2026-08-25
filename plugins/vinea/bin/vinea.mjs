@@ -5658,7 +5658,7 @@ var init_workflow = __esm({
 // package.json
 var package_default = {
   name: "vinea",
-  version: "0.2.0",
+  version: "0.3.0",
   private: true,
   type: "module",
   engines: {
