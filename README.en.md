@@ -181,9 +181,11 @@ A concise medium-risk lifecycle looks like this:
 
 1. Use `vinea:propose`, review the risk and mode options, then create the task
    only after the user confirms.
-2. Use `vinea:brainstorm` only for a real design choice. It asks one question
-   at a time, presents 2–3 options, and waits for approval. Use `vinea:plan`
-   to record implementation and quality choices.
+2. Use `vinea:brainstorm` only for a real design choice. It asks every
+   currently blocking decision in one round, with 2–3 options, a
+   recommendation, and trade-offs, then writes brief/plan after approval.
+   Use `vinea:plan` to record implementation and quality choices; if TDD and
+   execution mode are both open, present them together.
 3. For a user-confirmed TDD task, record a real failing `tdd-red` result before
    implementation and a later passing `tdd-green` result. TDD is optional,
    never a default requirement.

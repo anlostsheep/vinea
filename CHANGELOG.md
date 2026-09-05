@@ -3,6 +3,15 @@
 Vinea follows Semantic Versioning. The root `package.json` is authoritative;
 host manifests and marketplaces are generated from it by the release checks.
 
+## [Unreleased]
+
+### Changed
+
+- Decision skills now batch blocking choices in one round instead of asking
+  one question at a time or approving a design section by section.
+  `vinea:brainstorm`, `vinea:propose`, `vinea:plan`, and `vinea:finish` still
+  require explicit user approval before they write task state.
+
 ## [0.3.1] - 2026-08-25
 
 ### Added

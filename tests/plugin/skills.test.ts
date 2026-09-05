@@ -84,14 +84,28 @@ test("uses the bundled CLI root contract without host automation claims", async 
   expect(combined).not.toMatch(/auto(?:matic(?:ally)?)? (?:recover|attach|promot)/i);
 });
 
-test("brainstorming is selective and preserves user approval", async () => {
+test("decision skills batch blocking choices instead of serial questions", async () => {
   const inventory = await readSkillInventory();
-  const source = inventory.skills.find(({ directory }) => directory === "brainstorm")?.source;
+  const source = new Map(inventory.skills.map(({ directory, source }) => [directory, source]));
+  const brainstorm = source.get("brainstorm");
+  const propose = source.get("propose");
+  const plan = source.get("plan");
+  const finish = source.get("finish");
 
-  expect(source).toMatch(/exactly one .*question/i);
-  expect(source).toMatch(/2[–-]3 options/i);
-  expect(source).toMatch(/approval/i);
-  expect(source).toMatch(/must not .*reusable learning/i);
+  expect(brainstorm).toMatch(/one round/i);
+  expect(brainstorm).toMatch(/2[–-]3 options/i);
+  expect(brainstorm).toMatch(/approval/i);
+  expect(brainstorm).toMatch(/must not .*reusable learning/i);
+  expect(brainstorm).not.toMatch(/exactly one .*question/i);
+  expect(brainstorm).not.toMatch(/at a time/i);
+  expect(brainstorm).not.toMatch(/small sections/i);
+
+  expect(propose).toMatch(/one round/i);
+  expect(propose).toMatch(/do not ask them in separate turns/i);
+  expect(plan).toMatch(/one round/i);
+  expect(plan).toMatch(/do not serialize them/i);
+  expect(finish).toMatch(/one list/i);
+  expect(finish).toMatch(/do not ask about them one candidate per turn/i);
 });
 
 test("Codex session binding is explicit and Claude has no invented environment fallback", async () => {

@@ -15,6 +15,6 @@ Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the ta
 
 Use this only when a task has a decision that can alter implementation. Do not force it for a clear low-risk request. Read the selected task's compact journal, context-manifest references, and relevant long-term specs.
 
-Ask exactly one materially decision-changing question at a time. For each decision, present 2–3 options, identify the recommendation and trade-offs, then wait for the user's approval before moving on. Present the proposed design in small sections; obtain design approval before implementation.
+Collect every currently blocking, decision-changing fork before asking. Ask them in one round. For each fork, present 2–3 options, the recommendation, and trade-offs. Do not serialize independent questions. Do not ask process questions. Do not drip-feed design approval section by section.
 
-After approval, write only the confirmed task-local brief and plan through `task set-brief` and `task set-plan`. This skill must not write reusable learning to specs; learning is considered later by `vinea:finish`.
+After the user gives approval, write only the confirmed task-local brief and plan through `task set-brief` and `task set-plan`. Do not start implementation in this skill. This skill must not write reusable learning to specs; learning is considered later by `vinea:finish`.

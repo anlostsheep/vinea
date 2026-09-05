@@ -15,6 +15,6 @@ Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the ta
 
 Confirm requirements and acceptance criteria, then make a checklist-level plan with implementation, validation, regression, and evidence steps. Add bounded context references through the CLI; do not hand-edit Vinea state.
 
-For a behavior change or bug, recommend TDD and explain the red/green evidence needed. Start TDD only after the user confirms it. If a failing test cannot reasonably be formed, record the reason and ask the user to choose standard mode or blocked; do not quietly weaken the task.
+For a behavior change or bug, recommend TDD and explain the red/green evidence needed. If TDD and execution mode are both still open, present both choices in one round. Do not serialize them. Start TDD only after the user confirms it. If a failing test cannot reasonably be formed, record the reason and ask the user to choose standard mode or blocked in that same round; do not quietly weaken the task.
 
-For delegated execution, first recommend the mode and obtain user confirmation. Use research and check as read-only roles, and one implementer as the sole business-code writer, only when the active host supports those roles. Otherwise ask the user to choose single-agent execution or another host; do not silently fall back.
+For delegated execution, recommend the mode in the same confirmation when it is still open. Use research and check as read-only roles, and one implementer as the sole business-code writer, only when the active host supports those roles. Otherwise ask the user to choose single-agent execution or another host; do not silently fall back.
