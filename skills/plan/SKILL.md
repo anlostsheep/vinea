@@ -1,20 +1,16 @@
 ---
 name: plan
-description: Use when a confirmed Vinea task needs executable checklist-level work and explicit quality or execution choices.
+description: Use when the user explicitly asks Vinea to turn an agreed goal into an implementation plan; planning alone does not authorize execution.
 ---
 
 # Vinea Plan
 
-Public skill: `vinea:plan`.
+Public entry: `vinea:plan`.
 
-## Bundled CLI contract
+Resolve `<plugin-root>` by removing `/skills/plan/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` from the target Git worktree and read [CLI.md](../../CLI.md) for state operations only when needed.
 
-Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the target Git repository. In Codex, derive `<plugin-root>` from the absolute path of this current `SKILL.md` by removing `/skills/<current-skill>/SKILL.md`, then run `node <plugin-root>/bin/vinea.mjs`. In Claude Code, run `node ${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs`.
+Plan to the risk and size of the goal. Identify deliverables, dependencies, existing code boundaries and verifiable acceptance. Include only constraints that affect correctness, scope, safety or real integration. A short task can remain a short checklist. Do not specify every edit or introduce fixed roles and ceremony.
 
-## Make the work executable
+Resolve any direction-changing choices in one round when independent. Preserve the approved contract and keep execution methods flexible. Mark actual dependencies; potential parallel work is not delegation permission. TDD is optional unless requested or required by the project; then plan distinct RED and GREEN evidence.
 
-Confirm requirements and acceptance criteria, then make a checklist-level plan with implementation, validation, regression, and evidence steps. Add bounded context references through the CLI; do not hand-edit Vinea state.
-
-For a behavior change or bug, recommend TDD and explain the red/green evidence needed. If TDD and execution mode are both still open, present both choices in one round. Do not serialize them. Start TDD only after the user confirms it. If a failing test cannot reasonably be formed, record the reason and ask the user to choose standard mode or blocked in that same round; do not quietly weaken the task.
-
-For delegated execution, recommend the mode in the same confirmation when it is still open. Use research and check as read-only roles, and one implementer as the sole business-code writer, only when the active host supports those roles. Otherwise ask the user to choose single-agent execution or another host; do not silently fall back.
+Deliver the plan and its verification strategy. Record user decisions with the current contract version if persistence was requested. Do not claim work, change business code, dispatch an agent, create a worktree or commit merely because the user approved the plan. An explicit execution request can move into the authorized run path without repeating planning.

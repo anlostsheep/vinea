@@ -1,20 +1,16 @@
 ---
 name: brainstorm
-description: Use when a Vinea task has materially open design choices that must be resolved before implementation.
+description: Use when the user explicitly asks Vinea to clarify a goal or challenge unresolved design decisions, without authorizing business-code changes.
 ---
 
 # Vinea Brainstorm
 
-Public skill: `vinea:brainstorm`.
+Public entry: `vinea:brainstorm`. This entry discusses and sharpens the goal; it does not grant implementation authority.
 
-## Bundled CLI contract
+Resolve `<plugin-root>` from this file by removing `/skills/brainstorm/SKILL.md`; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` from the target Git worktree. Read [CLI.md](../../CLI.md) only when task state is needed. Ephemeral discussion needs no initialization, task creation, binding, or artifact.
 
-Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the target Git repository. In Codex, derive `<plugin-root>` from the absolute path of this current `SKILL.md` by removing `/skills/<current-skill>/SKILL.md`, then run `node <plugin-root>/bin/vinea.mjs`. In Claude Code, run `node ${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs`.
+Inspect relevant project facts yourself before asking the user. Challenge assumptions with concrete failure cases: what outcome matters, what is out of scope, what could invalidate the approach, and what observable delivery proves success? Do not use these as a mandatory questionnaire.
 
-## Selective design loop
+Ask independent material decisions together, with 2-3 options, a recommendation and the consequences. Ask dependent questions only after the previous answer changes the available choices. Separate confirmed facts, assumptions and decisions; never promote a guess into an agreed requirement. Follow up on contradictions rather than mechanically exhausting questions.
 
-Use this only when a task has a decision that can alter implementation. Do not force it for a clear low-risk request. Read the selected task's compact journal, context-manifest references, and relevant long-term specs.
-
-Collect every currently blocking, decision-changing fork before asking. Ask them in one round. For each fork, present 2–3 options, the recommendation, and trade-offs. Do not serialize independent questions. Do not ask process questions. Do not drip-feed design approval section by section.
-
-After the user gives approval, write only the confirmed task-local brief and plan through `task set-brief` and `task set-plan`. Do not start implementation in this skill. This skill must not write reusable learning to specs; learning is considered later by `vinea:finish`.
+Stop when no unresolved user decision blocks a sound next action. Present a compact goal, effective constraints, acceptance criteria and remaining uncertainty. Do not demand a separate approval for every section or force a plan for a small change. The user's agreement with a design is not permission to implement. Persist only requested conclusions, not private reasoning or the whole conversation; `persist=false` means no state writes.

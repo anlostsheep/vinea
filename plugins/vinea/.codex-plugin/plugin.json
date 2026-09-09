@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Vinea",
     "shortDescription": "Shared AI-coding task workflows",
-    "longDescription": "Guide Codex and Claude Code through shared, recoverable repository task state with explicit quality and completion gates.",
+    "longDescription": "Explicit goal contracts, local worktree coordination, recoverable contributions and evidence-based delivery for Codex and Claude Code.",
     "developerName": "dengzhen",
     "category": "Developer Tools",
     "capabilities": [
@@ -28,7 +28,8 @@
     ],
     "defaultPrompt": [
       "Use Vinea to orient me to the active task.",
-      "Use Vinea to propose a safe task workflow for this change.",
+      "Use Vinea to run this goal within my constraints.",
+      "Use Vinea to debug this issue without changing the original delivery.",
       "Use Vinea to check this task before it is finished."
     ],
     "brandColor": "#2F6F5E",

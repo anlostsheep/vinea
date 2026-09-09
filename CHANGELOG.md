@@ -5,12 +5,36 @@ host manifests and marketplaces are generated from it by the release checks.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-09
+
 ### Changed
 
-- Decision skills now batch blocking choices in one round instead of asking
-  one question at a time or approving a design section by section.
-  `vinea:brainstorm`, `vinea:propose`, `vinea:plan`, and `vinea:finish` still
-  require explicit user approval before they write task state.
+- Breaking kernel rewrite: explicit goal contracts replace the staged
+  workflow. Nine logical skills include run and debug; propose is retired.
+- Shared local state moves to the Git common directory, with durable claims,
+  epoch fencing, disposable bindings and isolated unknown-writer recovery.
+- Recoverable content snapshots, bounded contributions, provenance-aware
+  evidence and owner delivery support uncommitted business changes.
+- Legacy schema 1/2 are read-only sources for explicitly approved zero-grant
+  imports. Old stage commands no longer invoke a legacy writer.
+- Brainstorming batches independent decisions and follows dependencies only
+  when feedback changes them. Planning, standalone checking and diagnosis do
+  not implicitly grant business changes. Post-delivery debugging opens a repair.
+- Local CLI/package validation is reported separately from real-host acceptance.
+- Real-host acceptance now records fresh loading, identity-join failure and
+  correction, a blocked Claude classifier, successful isolated recovery and
+  post-delivery repair. Single-task measurements do not establish token savings.
+- Clarify local actor allocation versus host session identity and fail-closed
+  continuation. Initialization permission denial now exposes a sanitized
+  diagnostic and exact store path; an optional host guide documents verified
+  least-privilege access without automatic global configuration changes.
+
+### Fixed
+
+- Finish rejects active writers or pending restores for the same task in other
+  worktrees, without blocking unrelated tasks or retained unknown-writer holds.
+- Content snapshots preserve staged deletions and rename-source paths so isolated
+  recovery and retries can restore the complete uncommitted result.
 
 ## [0.3.1] - 2026-08-25
 

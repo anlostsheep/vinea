@@ -2,9 +2,11 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Vinea 是一个面向 AI 编程的共享、文件优先任务工作流。Codex 与 Claude Code
-从目标 Git 仓库读取同一份 `.vinea/` 状态，因此新会话可以明确地定位、确认
-并继续同一项任务。
+Vinea 是面向 AI 编程的轻量协作内核。用户确定目标和约束，agent 选择执行
+路径。本机 worktree 在 Git 共同目录的 `vinea/` 共享状态，不进入 Git 跟踪。
+
+`v1.0.0` 引入本内核重写，与 `v0.3.x` 的阶段命令和任务存储不兼容。
+安装或升级不自动迁移旧 `.vinea`；显式导入旧资料不会继承执行权限。
 
 ## 为宿主安装
 
@@ -17,10 +19,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-固定到 0.3.1：
+固定到 1.0.0：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -31,10 +33,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-固定到 0.3.1：
+固定到 1.0.0：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v0.3.1
+claude plugin marketplace add anlostsheep/vinea@v1.0.0
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -110,17 +112,30 @@ claude plugin list
 
 ## 开始或恢复工作
 
-新会话开始时使用 `vinea:orient`。它以只读方式检查状态，并在继续前要求
-确认。中高风险变更使用 `vinea:propose`；只有存在重要设计选择时才使用
-`vinea:brainstorm`；完成前使用 `vinea:check`；使用 `vinea:finish` 执行
-完成和学习门禁。
+明确使用 `vinea:run` 或说“使用 Vinea 完成目标”。普通请求不会自动进入。
+九个入口为 run、brainstorm、plan、continue、check、debug、finish、orient、
+doctor，均带 `vinea:` 前缀；没有注册裸 `/vinea` 别名。
+
+可以只讨论、只规划、只检查或只定位问题；认可方案不自动授权实现。
+`continue` 支持跨 agent 只读加入和明确交接，加入不等于取得写权。一个
+物理 worktree 只有一个业务写入者，不确定旧写入者停止时必须隔离恢复，
+旧目录保留 hold。真实派发和等待由宿主提供，Vinea 不伪造这些能力。
+
+`check` 不自动修复业务代码；`debug` 按委托定位或修复，交付后建立关联
+修复任务，不改写旧交付。`finish` 允许未提交代码，证据必须匹配当前输入
+和核验条件，接受的缺口仍是缺口。提交、部署、用户接受和归档分别处理。
 
 这些技能使用插件内置的 CLI。从插件根目录可直接运行：
 
 ```sh
 node bin/vinea.mjs --help
-node bin/vinea.mjs orient --host codex --json
+node bin/vinea.mjs orient --json
 ```
 
-CLI 只在目标仓库中保存状态。Vinea 不提供 MCP server、daemon、hook、app
-或云服务。
+业务命令从目标 Git worktree 运行，使用插件 CLI 的绝对路径；完整结构化
+载荷见 [CLI 参考](CLI.md)。Actor ID 从 CLI 回显中复用，不伪造宿主 ID。
+快照保存真实文件内容，旧格式只读检查后显式导入，导入不授予执行权限。
+Vinea 不提供跨机器同步、MCP server、daemon、hook、app 或云服务。
+
+如果宿主拒绝写入共享状态，按 [宿主接入说明](HOSTS.md) 为实际状态目录取得
+明确授权；不要关闭沙箱、借用他人身份或静默离开 Vinea 继续修改业务代码。

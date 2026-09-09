@@ -9,11 +9,12 @@ const expectedSkills = [
   "brainstorm",
   "check",
   "continue",
+  "debug",
   "doctor",
   "finish",
   "orient",
   "plan",
-  "propose",
+  "run",
 ];
 const iconRelativePath = "./assets/vinea-loop.png";
 const repositoryUrl = "https://github.com/anlostsheep/vinea";
@@ -22,10 +23,10 @@ const languageSwitch = "[简体中文](README.md) | [English](README.en.md)";
 const operationalCommands = [
   "codex plugin marketplace add anlostsheep/vinea",
   "codex plugin add vinea@vinea",
-  "codex plugin marketplace add anlostsheep/vinea --ref v0.3.1",
+  "codex plugin marketplace add anlostsheep/vinea --ref v1.0.0",
   "claude plugin marketplace add anlostsheep/vinea",
   "claude plugin install vinea@vinea --scope user",
-  "claude plugin marketplace add anlostsheep/vinea@v0.3.1",
+  "claude plugin marketplace add anlostsheep/vinea@v1.0.0",
   "codex plugin marketplace upgrade vinea",
   "codex plugin remove vinea@vinea",
   "claude plugin marketplace update vinea",
@@ -81,7 +82,7 @@ for (const path of publicTextPaths) {
 }
 
 const help = await runNode(cliPath, ["--help"]);
-for (const command of ["init", "orient", "propose", "continue", "check", "finish", "archive", "doctor", "validate"]) {
+for (const command of ["init", "orient", "task create", "continue", "check record", "debug open", "finish", "archive", "doctor", "validate"]) {
   if (!help.stdout.includes(command)) throw new Error(`Public CLI help is missing ${command}.`);
 }
 

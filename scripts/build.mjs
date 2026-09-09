@@ -17,4 +17,5 @@ await build({
   format: "esm",
   outfile: "dist/vinea.mjs",
   platform: "node",
+  target: "node18",
 });

@@ -9,6913 +9,1900 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
-// src/core/errors.ts
-var VineaError, SchemaError, ValidationError, AmbiguousTaskError, TransitionError, FinishGateError;
+// src/kernel/errors.ts
+function requireThat(value, code, message) {
+  if (!value) throw new KernelError(code, message);
+}
+var KernelError;
 var init_errors = __esm({
-  "src/core/errors.ts"() {
+  "src/kernel/errors.ts"() {
     "use strict";
-    VineaError = class extends Error {
-      constructor(code, message, cause) {
+    KernelError = class extends Error {
+      constructor(code, message, details = {}) {
         super(message);
         this.code = code;
-        this.cause = cause;
-        this.name = "VineaError";
-      }
-    };
-    SchemaError = class extends VineaError {
-      constructor(message, cause) {
-        super("VINEA_SCHEMA_INVALID", message, cause);
-        this.name = "SchemaError";
-      }
-    };
-    ValidationError = class extends VineaError {
-      constructor(message, cause) {
-        super("VINEA_VALIDATION_INVALID", message, cause);
-        this.name = "ValidationError";
-      }
-    };
-    AmbiguousTaskError = class extends VineaError {
-      constructor(message) {
-        super("VINEA_TASK_AMBIGUOUS", message);
-        this.name = "AmbiguousTaskError";
-      }
-    };
-    TransitionError = class extends VineaError {
-      constructor(message) {
-        super("VINEA_TRANSITION_INVALID", message);
-        this.name = "TransitionError";
-      }
-    };
-    FinishGateError = class extends VineaError {
-      constructor(message) {
-        super("VINEA_FINISH_GATE_FAILED", message);
-        this.name = "FinishGateError";
+        this.details = details;
+        this.name = "KernelError";
       }
     };
   }
 });
 
-// src/core/paths.ts
-import { lstat, mkdir } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
-function resolveVineaPaths(repoRoot) {
-  const root = resolve(repoRoot);
-  const vineaRoot = inside(root, ".vinea");
-  const tasks = inside(vineaRoot, "tasks");
-  const runtime = inside(vineaRoot, ".runtime");
-  return {
-    repoRoot: root,
-    vineaRoot,
-    config: inside(vineaRoot, "config.json"),
-    gitignore: inside(vineaRoot, ".gitignore"),
-    specs: inside(vineaRoot, "specs"),
-    specIndex: inside(vineaRoot, "specs/index.md"),
-    tasks,
-    activeTasks: inside(tasks, "active"),
-    archivedTasks: inside(tasks, "archive"),
-    runtime,
-    sessions: inside(runtime, "sessions"),
-    migrationState: inside(runtime, "schema-migration.json")
-  };
+// src/kernel/schema.ts
+function invalid(path, reason) {
+  throw new KernelError("SCHEMA_INVALID", `${path}: ${reason}`);
 }
-function assertInside(root, candidate) {
-  const resolvedRoot = resolve(root);
-  const resolvedCandidate = resolve(candidate);
-  const difference = relative(resolvedRoot, resolvedCandidate);
-  if (isAbsolute(difference) || difference === ".." || difference.startsWith("../") || difference.startsWith("..\\")) {
-    throw new ValidationError(`Path escapes repository root: ${candidate}`);
+function record(value, path = "object") {
+  if (!value || typeof value !== "object" || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid(path, "expected plain object");
+  const out = value;
+  for (const key of Object.keys(out)) if (["__proto__", "constructor", "prototype"].includes(key)) invalid(path, "unsafe property");
+  return out;
+}
+function canonicalJson(value) {
+  function normalize(v) {
+    if (v === null || typeof v === "boolean" || typeof v === "string") return v;
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (Array.isArray(v)) return v.map(normalize);
+    if (typeof v !== "object") invalid("JSON", "unsupported value");
+    return Object.fromEntries(Object.entries(record(v)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k, item]) => [k, normalize(item)]));
   }
-  return resolvedCandidate;
-}
-async function assertNoSymlink(root, candidate) {
-  const resolvedRoot = resolve(root);
-  const safeCandidate = assertInside(resolvedRoot, candidate);
   try {
-    if ((await lstat(resolvedRoot)).isSymbolicLink()) {
-      throw new SchemaError(`Unsafe symbolic link at ${resolvedRoot}`);
+    return JSON.stringify(normalize(value));
+  } catch (error) {
+    if (error instanceof KernelError) throw error;
+    throw new KernelError("SCHEMA_INVALID", "Value is not finite acyclic JSON");
+  }
+}
+function assertRepositoryState(value) {
+  stateRule(value);
+  const state = value;
+  const active = /* @__PURE__ */ new Set();
+  for (const [workspace, claim] of Object.entries(state.claims)) {
+    const key = JSON.stringify([claim.taskId, claim.assignmentId]);
+    const task2 = state.tasks[claim.taskId];
+    if (workspace !== claim.workspaceId || !task2 || claim.epoch < 1 || claim.epoch > (state.epochs[key] ?? -1) || claim.contractVersion < 1 || claim.contractVersion > task2.contracts.length || claim.assignmentId !== null && !task2.assignments[claim.assignmentId]) invalid(workspace, "invalid claim reference");
+    if (claim.state === "writer" || claim.state === "restore-target") {
+      if (active.has(key) || claim.epoch !== state.epochs[key]) invalid(key, "multiple current writers or stale epoch");
+      active.add(key);
     }
-  } catch (error) {
-    if (!isMissing(error)) throw error;
+    if (claim.state === "restore-target" && !claim.recovery || ["writer", "released"].includes(claim.state) && claim.recovery) invalid(workspace, "invalid recovery state");
+    if (claim.recovery && !state.snapshots[claim.recovery.snapshotId]) invalid(workspace, "missing recovery snapshot");
   }
-  const segments = relative(resolvedRoot, safeCandidate).split(/[/\\]/).filter(Boolean);
-  let current = resolvedRoot;
-  for (const segment of segments) {
-    current = join(current, segment);
-    try {
-      const entry = await lstat(current);
-      if (entry.isSymbolicLink()) {
-        throw new SchemaError(`Unsafe symbolic link at ${current}`);
-      }
-    } catch (error) {
-      if (isMissing(error)) continue;
-      throw error;
-    }
-  }
-}
-async function ensureDirectory(root, directory) {
-  const safeDirectory = assertInside(root, directory);
-  await assertNoSymlink(root, safeDirectory);
-  await mkdir(safeDirectory, { recursive: true });
-  const entry = await lstat(safeDirectory);
-  if (!entry.isDirectory() || entry.isSymbolicLink()) {
-    throw new SchemaError(`Expected directory at ${safeDirectory}`);
-  }
-}
-function inside(root, child) {
-  return assertInside(root, join(root, child));
-}
-function isMissing(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-var init_paths = __esm({
-  "src/core/paths.ts"() {
-    "use strict";
-    init_errors();
-  }
-});
-
-// src/core/json.ts
-import { appendFile, lstat as lstat2, rename, writeFile } from "node:fs/promises";
-import { basename, dirname, join as join2 } from "node:path";
-import { randomUUID } from "node:crypto";
-async function readJson(filename, repoRoot) {
-  await assertNoSymlink(repoRoot, filename);
-  let content;
-  try {
-    const { readFile: readFile11 } = await import("node:fs/promises");
-    content = await readFile11(filename, "utf8");
-  } catch (error) {
-    if (error instanceof SchemaError) throw error;
-    throw new SchemaError(`Unable to read JSON file ${filename}`, error);
-  }
-  try {
-    return JSON.parse(content);
-  } catch (error) {
-    throw new SchemaError(`Invalid JSON in ${filename}`, error);
-  }
-}
-async function writeJsonAtomic(filename, value, repoRoot) {
-  const parent = dirname(filename);
-  await assertNoSymlink(repoRoot, parent);
-  await assertExistingFileIsNotSymlink(filename);
-  const temporary = join2(parent, `.${basename(filename)}.${randomUUID()}.tmp`);
-  try {
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}
-`, { encoding: "utf8", flag: "wx" });
-    await rename(temporary, filename);
-  } catch (error) {
-    throw new SchemaError(`Unable to write JSON file ${filename}`, error);
-  }
-}
-async function appendJsonl(filename, value, repoRoot) {
-  await assertNoSymlink(repoRoot, dirname(filename));
-  await assertExistingFileIsNotSymlink(filename);
-  try {
-    await appendFile(filename, `${JSON.stringify(value)}
-`, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to append JSONL file ${filename}`, error);
-  }
-}
-async function assertExistingFileIsNotSymlink(filename) {
-  try {
-    const entry = await lstat2(filename);
-    if (entry.isSymbolicLink()) throw new SchemaError(`Unsafe symbolic link at ${filename}`);
-  } catch (error) {
-    if (isMissing2(error) || error instanceof SchemaError) {
-      if (error instanceof SchemaError) throw error;
-      return;
-    }
-    throw new SchemaError(`Unable to inspect ${filename}`, error);
-  }
-}
-function isMissing2(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-var init_json = __esm({
-  "src/core/json.ts"() {
-    "use strict";
-    init_errors();
-    init_paths();
-  }
-});
-
-// src/core/types.ts
-var LEGACY_SCHEMA_VERSION, SCHEMA_VERSION;
-var init_types = __esm({
-  "src/core/types.ts"() {
-    "use strict";
-    LEGACY_SCHEMA_VERSION = 1;
-    SCHEMA_VERSION = 2;
-  }
-});
-
-// src/core/migration-state.ts
-import { lstat as lstat3 } from "node:fs/promises";
-async function readSchemaMigrationState(paths) {
-  await assertNoSymlink(paths.repoRoot, paths.runtime);
-  try {
-    const entry = await lstat3(paths.migrationState);
-    if (!entry.isFile() || entry.isSymbolicLink()) {
-      throw new SchemaError(`Migration state must be a regular file: ${paths.migrationState}`);
-    }
-  } catch (error) {
-    if (isMissing3(error)) return null;
-    throw error;
-  }
-  const value = await readJson(paths.migrationState, paths.repoRoot);
-  if (!isSchemaMigrationState(value)) {
-    throw new SchemaError(`Invalid schema migration state in ${paths.migrationState}.`);
-  }
-  return value;
-}
-async function writeSchemaMigrationState(paths, state) {
-  await ensureDirectory(paths.repoRoot, paths.runtime);
-  await writeJsonAtomic(paths.migrationState, state, paths.repoRoot);
-}
-function isSchemaMigrationState(value) {
-  if (!isRecord(value) || Object.keys(value).some((key) => ![
-    "schemaVersion",
-    "type",
-    "operationId",
-    "fromSchemaVersion",
-    "toSchemaVersion",
-    "phase",
-    "taskIds",
-    "migratedTaskIds",
-    "startedAt",
-    "completedAt"
-  ].includes(key)) || value.schemaVersion !== SCHEMA_VERSION || value.type !== "schema_migration" || typeof value.operationId !== "string" || value.operationId.trim() === "" || value.fromSchemaVersion !== LEGACY_SCHEMA_VERSION || value.toSchemaVersion !== SCHEMA_VERSION || value.phase !== "intent" && value.phase !== "completed" || !isUniqueTaskIds(value.taskIds) || !isUniqueTaskIds(value.migratedTaskIds) || !isIsoTimestamp(value.startedAt)) {
-    return false;
-  }
-  if (value.phase === "completed") return isIsoTimestamp(value.completedAt);
-  return value.completedAt === void 0;
-}
-function isUniqueTaskIds(value) {
-  return Array.isArray(value) && value.every((taskId) => typeof taskId === "string" && TASK_ID_PATTERN.test(taskId)) && new Set(value).size === value.length;
-}
-function isIsoTimestamp(value) {
-  if (typeof value !== "string") return false;
-  const timestamp = new Date(value);
-  return !Number.isNaN(timestamp.valueOf()) && timestamp.toISOString() === value;
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isMissing3(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-var TASK_ID_PATTERN;
-var init_migration_state = __esm({
-  "src/core/migration-state.ts"() {
-    "use strict";
-    init_json();
-    init_errors();
-    init_paths();
-    init_types();
-    TASK_ID_PATTERN = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-  }
-});
-
-// src/core/schema.ts
-import { lstat as lstat4 } from "node:fs/promises";
-function assertSupportedSchema(value, filename) {
-  if (!isRecord2(value)) {
-    throw new SchemaError(`Invalid Vinea config in ${filename}: expected an object.`);
-  }
-  if (value.schemaVersion !== SCHEMA_VERSION) {
-    if (typeof value.schemaVersion === "number" && value.schemaVersion > SCHEMA_VERSION) {
-      throw new SchemaError(
-        `Vinea schema version ${value.schemaVersion} in ${filename} is newer than this CLI. Upgrade Vinea before modifying the workspace; do not recreate or overwrite it.`
-      );
-    }
-    if (value.schemaVersion === 1) {
-      throw new SchemaError(
-        `Vinea schema version 1 in ${filename} requires explicit migration. Run \`vinea migrate\` before modifying the workspace.`
-      );
-    }
-    throw new SchemaError(
-      `Unsupported Vinea schema version ${String(value.schemaVersion)} in ${filename}; supported version is ${SCHEMA_VERSION}.`
-    );
-  }
-  if (!isStringList(value.riskRules, "medium") || !isStringList(value.riskRules, "high")) {
-    throw new SchemaError(`Invalid Vinea config in ${filename}: riskRules.medium and riskRules.high must be string arrays.`);
-  }
-  if (!isRecord2(value.context) || !isNonNegativeInteger(value.context.maxFiles) || !isNonNegativeInteger(value.context.maxEstimatedBytes)) {
-    throw new SchemaError(`Invalid Vinea config in ${filename}: context limits must be non-negative integers.`);
-  }
-}
-async function inspectWorkspace(paths) {
-  const initialized = await isDirectory(paths.vineaRoot, paths.repoRoot);
-  if (!initialized) {
-    return {
-      initialized: false,
-      configSchemaVersion: null,
-      missingRequiredDirectories: ["specs", "tasks/active", "tasks/archive", ".runtime/sessions"],
-      supportedSchema: false,
-      migrationGuidance: "Run `vinea init` to create a version 1 workspace.",
-      healthy: false
+  for (const [key, task2] of Object.entries(state.tasks)) {
+    if (key !== task2.id || !task2.contracts.length || task2.owner.epoch < 1) invalid(key, "invalid task identity");
+    if (task2.relatedTo && !state.tasks[task2.relatedTo.taskId]?.deliveries[task2.relatedTo.deliveryId]) invalid(key, "missing original delivery");
+    task2.contracts.forEach((c, i) => {
+      if (c.version !== i + 1 || !c.acceptance.length || new Set(c.acceptance.map((a) => a.id)).size !== c.acceptance.length) invalid(key, "invalid contract history");
+    });
+    const visit = (key2, stack) => {
+      if (stack.has(key2) || !task2.assignments[key2]) invalid(key2, "invalid assignment dependency");
+      const next = new Set(stack).add(key2);
+      for (const dependency of task2.assignments[key2].dependsOn) visit(dependency, next);
     };
+    for (const [name, assignment2] of Object.entries(task2.assignments)) {
+      if (name !== assignment2.id) invalid(name, "assignment ID mismatch");
+      visit(name, /* @__PURE__ */ new Set());
+    }
+    for (const [name, e] of Object.entries(task2.evidence)) {
+      if (name !== e.id || !state.snapshots[e.snapshotId] || e.contractVersion < 1 || e.contractVersion > task2.contracts.length) invalid(name, "invalid evidence reference");
+      if (e.source === "command-runner" !== (e.artifactId !== null) || e.sequence < 1 || e.result === "pass" && e.exitCode !== null && e.exitCode !== 0 || e.phase === "red" && (e.result !== "fail" || !e.exitCode) || e.phase === "green" && (e.result !== "pass" || e.exitCode !== 0)) invalid(name, "invalid evidence provenance or result");
+    }
+    for (const [name, c] of Object.entries(task2.contributions)) {
+      if (name !== c.id || c.contractVersion < 1 || c.contractVersion > task2.contracts.length || c.assignmentId !== null && !task2.assignments[c.assignmentId] || c.evidenceIds.some((e) => !task2.evidence[e]) || c.snapshotId !== null && !state.snapshots[c.snapshotId] || c.integrated && !state.snapshots[c.integrated.snapshotId] || c.kind === "change" && (!c.snapshotId || !c.writeToken || c.writeToken.taskId !== task2.id || c.writeToken.assignmentId !== c.assignmentId)) invalid(name, "invalid contribution reference");
+    }
+    for (const [name, c] of Object.entries(task2.checks)) if (name !== c.id || !state.snapshots[c.snapshotId] || c.contractVersion < 1 || c.contractVersion > task2.contracts.length || c.verification.some((v) => !task2.evidence[v.evidenceId]) || c.rows.some((r) => r.evidenceIds.some((e) => !task2.evidence[e]))) invalid(name, "invalid check reference");
+    for (const [name, d] of Object.entries(task2.deliveries)) if (name !== d.id || !state.snapshots[d.snapshotId] || d.contractVersion < 1 || d.contractVersion > task2.contracts.length || d.owner.epoch < 1 || d.contributionIds.some((c) => !task2.contributions[c]) || d.checkSetIds.some((c) => !task2.checks[c])) invalid(name, "invalid delivery reference");
+    if (task2.diagnostics.some((d) => d.evidenceIds.some((e) => !task2.evidence[e])) || task2.userAcceptances.some((a) => !task2.deliveries[a.deliveryId])) invalid(key, "invalid task history reference");
   }
-  const missingRequiredDirectories = (await Promise.all(
-    [
-      ["specs", paths.specs],
-      ["tasks/active", paths.activeTasks],
-      ["tasks/archive", paths.archivedTasks],
-      [".runtime/sessions", paths.sessions]
-    ].map(async ([label, path]) => await isDirectory(path, paths.repoRoot) ? null : label)
-  )).filter((item) => item !== null);
-  let configSchemaVersion = null;
-  let supportedSchema = false;
-  let migrationGuidance = null;
-  try {
-    const value = await readJson(paths.config, paths.repoRoot);
-    if (isRecord2(value) && typeof value.schemaVersion === "number") configSchemaVersion = value.schemaVersion;
-    assertSupportedSchema(value, paths.config);
-    supportedSchema = true;
-  } catch (error) {
-    migrationGuidance = error instanceof SchemaError && configSchemaVersion !== null && configSchemaVersion > SCHEMA_VERSION ? "This workspace uses a newer schema. Upgrade Vinea before modifying it." : configSchemaVersion === 1 ? "This workspace requires explicit migration. Run `vinea migrate` before using lifecycle commands." : "Repair or restore config.json with a supported Vinea schema before using lifecycle commands.";
+  for (const [key, s] of Object.entries(state.snapshots)) {
+    if (key !== s.id || !s.scope.length || new Set(s.entries.map((e) => e.path)).size !== s.entries.length) invalid(key, "snapshot identity mismatch");
+    if (s.entries.some((e) => !s.scope.some((root) => e.path === root || e.path.startsWith(`${root}/`)))) invalid(key, "snapshot entry escapes selected scope");
+    for (const e of s.entries) if (e.kind === "file" ? !e.sha256 || !e.mode : e.sha256 !== null || e.mode !== null) invalid(e.path, "snapshot entry mismatch");
   }
-  return {
-    initialized,
-    configSchemaVersion,
-    missingRequiredDirectories,
-    supportedSchema,
-    migrationGuidance,
-    healthy: supportedSchema && missingRequiredDirectories.every((directory) => directory === ".runtime/sessions")
-  };
+  for (const [key, receipt] of Object.entries(state.operations)) if (key !== receipt.operationId || receipt.revision < 1 || receipt.revision > state.revision) invalid(key, "invalid operation receipt");
 }
-async function isDirectory(path, repoRoot) {
-  try {
-    await assertNoSymlink(repoRoot, path);
-    return (await lstat4(path)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-function isRecord2(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isStringList(value, property) {
-  return isRecord2(value) && Array.isArray(value[property]) && value[property].every((item) => typeof item === "string");
-}
-function isNonNegativeInteger(value) {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
-}
+var text, id, integer, bool, one, nullable, array, object, map, pathRule, hash, actorRule, decisionRule, invocationRule, metaRule, grantRule, criterionRule, draftFields, contractDraftRule, contractRule, ownerRule, tokenFields, tokenRule, recoveryRule, claimRule, environmentRule, entryRule, snapshotRule, evidenceRule, checkRowRule, verificationRule, checkRule, contributionRule, diagnosticRule, assignmentRule, deliveryRule, taskRule, stateRule;
 var init_schema = __esm({
-  "src/core/schema.ts"() {
+  "src/kernel/schema.ts"() {
     "use strict";
     init_errors();
-    init_json();
-    init_paths();
-    init_types();
+    text = (v, p = "value") => {
+      if (typeof v !== "string" || !v.trim() || v.length > 32e3) invalid(p, "expected bounded nonempty text");
+    };
+    id = (v, p = "id") => {
+      if (typeof v !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,199}$/.test(v) || [...Object.getOwnPropertyNames(Object.prototype), "prototype"].includes(v)) invalid(p, "unsafe ID");
+    };
+    integer = (v, p = "number") => {
+      if (!Number.isSafeInteger(v) || v < 0) invalid(p, "expected nonnegative integer");
+    };
+    bool = (v, p = "boolean") => {
+      if (typeof v !== "boolean") invalid(p, "expected boolean");
+    };
+    one = (...values) => (v, p = "value") => {
+      if (!values.includes(v)) invalid(p, "unsupported value");
+    };
+    nullable = (rule) => (v, p) => {
+      if (v !== null) rule(v, p);
+    };
+    array = (rule) => (v, p = "array") => {
+      if (!Array.isArray(v) || v.length > 1e5) invalid(p, "expected bounded array");
+      v.forEach((item, i) => rule(item, `${p}[${i}]`));
+    };
+    object = (fields, optional = {}) => (v, p = "object") => {
+      const o = record(v, p);
+      for (const key of Object.keys(o)) if (!Object.hasOwn(fields, key) && !Object.hasOwn(optional, key)) invalid(`${p}.${key}`, "unknown field");
+      for (const [key, rule] of Object.entries(fields)) rule(o[key], `${p}.${key}`);
+      for (const [key, rule] of Object.entries(optional)) if (Object.hasOwn(o, key)) rule(o[key], `${p}.${key}`);
+    };
+    map = (rule, keyRule = id) => (v, p = "map") => {
+      for (const [key, item] of Object.entries(record(v, p))) {
+        keyRule(key, p);
+        rule(item, `${p}.${key}`);
+      }
+    };
+    pathRule = (v, p = "path") => {
+      text(v, p);
+      if (v.startsWith("/") || v.includes("\\") || v.split("/").some((s) => !s || s === "." || s === "..") || v.includes("\0")) invalid(p, "unsafe relative path");
+    };
+    hash = (v, p = "hash") => {
+      if (typeof v !== "string" || !/^[a-f0-9]{64}$/.test(v)) invalid(p, "invalid SHA256");
+    };
+    actorRule = object({ instanceId: id, host: text }, { hostSessionId: text });
+    decisionRule = object({ summary: text, reference: nullable(text) });
+    invocationRule = object({ entry: one("run", "brainstorm", "plan", "continue", "check", "debug", "finish", "orient", "doctor"), activation: one("named-entry", "named-request", "bound-followup", "none"), analysisOnly: bool, persist: bool });
+    metaRule = object({ operationId: id, actor: actorRule, invocation: invocationRule });
+    grantRule = object({ businessWrite: bool, delegate: bool, commit: bool, deploy: bool, allowedPaths: array(pathRule) });
+    criterionRule = object({ id, text });
+    draftFields = { goal: text, scope: array(text), constraints: array(text), acceptance: array(criterionRule), grant: grantRule, quality: one("standard", "tdd") };
+    contractDraftRule = object(draftFields);
+    contractRule = object({ ...draftFields, version: integer, decision: decisionRule });
+    ownerRule = object({ instanceId: id, epoch: integer });
+    tokenFields = { taskId: id, assignmentId: nullable(id), workspaceId: id, instanceId: id, epoch: integer, contractVersion: integer };
+    tokenRule = object(tokenFields);
+    recoveryRule = object({ snapshotId: id, operationId: id });
+    claimRule = object({ ...tokenFields, state: one("writer", "restore-target", "unknown-writer-hold", "released"), recovery: nullable(recoveryRule) });
+    environmentRule = object({ runtime: text, platform: text, labels: map(text) });
+    entryRule = object({ path: pathRule, kind: one("file", "deleted"), sha256: nullable(hash), mode: nullable(one("100644", "100755")) });
+    snapshotRule = object({ id, fingerprint: hash, baseCommit: nullable(text), scope: array(pathRule), entries: array(entryRule), workspaceId: id, createdBy: id, capturedAt: text });
+    evidenceRule = object({ id, contractVersion: integer, snapshotId: id, actor: actorRule, source: one("command-runner", "agent-report", "user-observation"), result: one("pass", "fail", "unverified"), phase: nullable(one("red", "green")), argv: nullable(array(text)), cwd: text, environment: environmentRule, exitCode: nullable(integer), summary: text, artifactId: nullable(id), sequence: integer });
+    checkRowRule = object({ acceptanceId: id, result: one("pass", "fail", "unverified", "accepted-gap"), evidenceIds: array(id), summary: text, gapDecision: nullable(decisionRule) });
+    verificationRule = object({ evidenceId: id, argv: nullable(array(text)), environment: environmentRule });
+    checkRule = object({ id, contractVersion: integer, snapshotId: id, assessor: actorRule, independent: bool, rows: array(checkRowRule), verification: array(verificationRule) });
+    contributionRule = object({ id, kind: one("analysis", "change"), assignmentId: nullable(id), contractVersion: integer, submittedBy: id, snapshotId: nullable(id), evidenceIds: array(id), summary: text, writeToken: nullable(tokenRule), integrated: nullable(object({ snapshotId: id, owner: ownerRule, rationale: text })) });
+    diagnosticRule = object({ id, kind: one("fact", "hypothesis", "ruled-out", "change", "validation-gap"), text, evidenceIds: array(id), actor: actorRule, createdAt: text });
+    assignmentRule = object({ id, outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool, status: one("open", "closed", "cancelled") });
+    deliveryRule = object({ id, contractVersion: integer, snapshotId: id, checkSetIds: array(id), contributionIds: array(id), exclusions: array(text), owner: ownerRule, acceptedGaps: array(object({ acceptanceId: id, decision: decisionRule })), createdAt: text });
+    taskRule = object({ id, title: text, status: one("active", "delivered", "archived"), contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) });
+    stateRule = object({ kernelSchemaVersion: one(1), repositoryId: id, revision: integer, tasks: map(taskRule), claims: map(claimRule), epochs: map(integer, text), snapshots: map(snapshotRule), operations: map(object({ operationId: id, requestHash: hash, revision: integer, resourceIds: array(id) })) });
   }
 });
 
-// src/core/config.ts
-import { lstat as lstat5, readFile, writeFile as writeFile2 } from "node:fs/promises";
-async function readConfig(paths) {
-  const config = await readJson(paths.config, paths.repoRoot);
-  assertSupportedSchema(config, paths.config);
-  const migration = await readSchemaMigrationState(paths);
-  if (migration?.phase === "intent") {
-    throw new SchemaError(
-      `Schema migration ${migration.operationId} is incomplete. Run \`vinea migrate\` to resume before modifying the workspace.`
-    );
-  }
-  return config;
-}
-async function initializeWorkspace(paths) {
-  await ensureDirectory(paths.repoRoot, paths.vineaRoot);
-  await Promise.all([
-    assertNoSymlink(paths.repoRoot, paths.config),
-    assertNoSymlink(paths.repoRoot, paths.gitignore),
-    assertNoSymlink(paths.repoRoot, paths.specIndex),
-    assertNoSymlink(paths.repoRoot, paths.activeTasks),
-    assertNoSymlink(paths.repoRoot, paths.archivedTasks),
-    assertNoSymlink(paths.repoRoot, paths.sessions)
-  ]);
-  if (await exists(paths.config)) {
-    await readConfig(paths);
-  }
-  if (await exists(paths.gitignore)) await ensureExactFile(paths.gitignore, RUNTIME_IGNORE, paths.repoRoot);
-  await Promise.all([
-    ensureDirectory(paths.repoRoot, paths.specs),
-    ensureDirectory(paths.repoRoot, paths.activeTasks),
-    ensureDirectory(paths.repoRoot, paths.archivedTasks),
-    ensureDirectory(paths.repoRoot, paths.sessions)
-  ]);
-  if (!await exists(paths.config)) await writeJsonAtomic(paths.config, DEFAULT_CONFIG, paths.repoRoot);
-  await ensureExactFile(paths.gitignore, RUNTIME_IGNORE, paths.repoRoot);
-  await ensureFile(paths.specIndex, SPEC_INDEX, paths.repoRoot);
-}
-async function ensureExactFile(filename, contents, repoRoot) {
-  await assertNoSymlink(repoRoot, filename);
-  if (await exists(filename)) {
-    const existing = await readFile(filename, "utf8");
-    if (existing !== contents) throw new SchemaError(`Unexpected managed file contents in ${filename}`);
-    return;
-  }
-  await writeFile2(filename, contents, { encoding: "utf8", flag: "wx" });
-}
-async function ensureFile(filename, contents, repoRoot) {
-  await assertNoSymlink(repoRoot, filename);
-  if (await exists(filename)) return;
-  await writeFile2(filename, contents, { encoding: "utf8", flag: "wx" });
-}
-async function exists(filename) {
-  try {
-    await lstat5(filename);
-    return true;
-  } catch (error) {
-    if (isMissing4(error)) return false;
-    throw error;
-  }
-}
-function isMissing4(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-var DEFAULT_CONFIG, SPEC_INDEX, RUNTIME_IGNORE;
-var init_config = __esm({
-  "src/core/config.ts"() {
-    "use strict";
-    init_errors();
-    init_json();
-    init_migration_state();
-    init_paths();
-    init_schema();
-    init_types();
-    DEFAULT_CONFIG = {
-      schemaVersion: SCHEMA_VERSION,
-      riskRules: {
-        medium: ["behavior", "bug", "cross-file", "external", "security", "data", "deploy"],
-        high: ["production", "migration", "credential", "permission", "delete"]
-      },
-      context: { maxFiles: 12, maxEstimatedBytes: 8e4 }
-    };
-    SPEC_INDEX = "# Vinea Specs\n\n## Indexed specs\n\n";
-    RUNTIME_IGNORE = ".runtime/\n";
-  }
-});
-
-// src/core/evidence.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { readFile as readFile2 } from "node:fs/promises";
-import { join as join3 } from "node:path";
-async function recordEvidence(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return withTaskLock(paths, taskId, () => recordEvidenceLocked(paths, taskId, input, now));
-}
-async function recordEvidenceLocked(paths, taskId, input, now) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
-  const summary = boundedNonempty(input.summary, "Evidence summary", MAX_EVIDENCE_SUMMARY_BYTES);
-  const actor = boundedNonempty(input.actor, "Evidence actor", MAX_EVIDENCE_ACTOR_BYTES);
-  const command = input.command === void 0 ? void 0 : boundedNonempty(input.command, "Evidence command", MAX_EVIDENCE_COMMAND_BYTES);
-  const kind = validateKind(input.kind);
-  const exitCode = validateExitCode(input.exitCode);
-  const result = input.result === void 0 ? inferResult(kind, exitCode) : validateResult(input.result);
-  assertConsistentEvidence(kind, result, exitCode);
-  const filename = join3(location.directory, "evidence.jsonl");
-  const intent = await executeTaskMutation(paths, location, {
-    mutationKind: "evidence_recorded",
-    actor,
-    timestamp: now().toISOString(),
-    fingerprint: mutationFingerprint({
-      schemaVersion: SCHEMA_VERSION,
-      verificationRevision: location.task.verificationRevision,
-      type: "evidence_recorded",
-      actor,
-      kind,
-      summary,
-      command: command ?? null,
-      exitCode: exitCode ?? null,
-      result
-    })
-  }, async (timestamp, recovering, pending) => {
-    const current = await findTask(paths, taskId);
-    assertTaskMutable(current);
-    const evidenceId2 = pending?.expected.identity.evidenceId ?? randomUUID2();
-    const record2 = {
-      schemaVersion: SCHEMA_VERSION,
-      verificationRevision: current.task.verificationRevision,
-      id: evidenceId2,
-      kind,
-      summary,
-      result,
-      recordedAt: timestamp,
-      actor,
-      ...command === void 0 ? {} : { command },
-      ...exitCode === void 0 ? {} : { exitCode }
-    };
-    validateEvidenceRecord(record2);
-    const currentFilename = join3(current.directory, "evidence.jsonl");
-    const existing = await readEvidenceFile(paths.repoRoot, currentFilename, true);
-    const records = existing.records;
-    if (records.some((candidate) => candidate.id === evidenceId2)) {
-      if (recovering) {
-        throw new SchemaError(`Pending evidence mutation already contains ${evidenceId2}, but its managed target does not match.`);
-      }
-      throw new SchemaError(`Generated evidence ID already exists in ${currentFilename}: ${evidenceId2}`);
-    }
-    const contents = appendEvidenceRecord(existing.contents, record2);
-    return {
-      expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ evidenceId: evidenceId2 }, record2)),
-      completion: {
-        schemaVersion: SCHEMA_VERSION,
-        type: "evidence_recorded",
-        mutationKind: "evidence_recorded",
-        mutationProtocolVersion: 1,
-        timestamp,
-        actor,
-        evidenceId: evidenceId2,
-        evidenceKind: kind
-      },
-      apply: () => writeManagedMutationTarget(paths, current, currentFilename, contents)
-    };
-  });
-  const evidenceId = intent.expected.identity.evidenceId;
-  const record = (await readEvidenceRecords(paths.repoRoot, filename, true)).find((candidate) => candidate.id === evidenceId);
-  if (record === void 0) throw new SchemaError(`Recovered evidence mutation did not record ${evidenceId}.`);
-  return record;
-}
-async function assertTddReadyForCheck(paths, location) {
-  if (location.task.qualityMode !== "tdd") return;
-  const evidence = await readEvidenceRecords(paths.repoRoot, join3(location.directory, "evidence.jsonl"), true);
-  let hasValidRed = false;
-  for (const record of evidence) {
-    if (record.verificationRevision !== location.task.verificationRevision) continue;
-    if (isValidRed(record)) {
-      hasValidRed = true;
-      continue;
-    }
-    if (hasValidRed && isValidGreen(record)) return;
-  }
-  throw new TransitionError(
-    `TDD task ${location.task.id} requires valid tdd-red evidence followed by valid tdd-green evidence before checking.`
-  );
-}
-function inferResult(kind, exitCode) {
-  if (kind === "tdd-red") return "fail";
-  if (kind === "tdd-green") return "pass";
-  if (exitCode !== void 0) return exitCode === 0 ? "pass" : "fail";
-  return "pass";
-}
-function assertConsistentEvidence(kind, result, exitCode) {
-  if (kind === "tdd-red" && (result !== "fail" || exitCode === void 0 || exitCode === 0)) {
-    throw new ValidationError("tdd-red evidence requires result fail and a nonzero exit code.");
-  }
-  if (kind === "tdd-green" && (result !== "pass" || exitCode !== 0)) {
-    throw new ValidationError("tdd-green evidence requires result pass and exit code 0.");
-  }
-  if (exitCode !== void 0) {
-    if (result === "pass" && exitCode !== 0) {
-      throw new ValidationError("Passing evidence cannot have a nonzero exit code.");
-    }
-    if (result === "fail" && exitCode === 0) {
-      throw new ValidationError("Failing evidence cannot have exit code 0.");
-    }
-  }
-}
-function validateExitCode(value) {
-  if (value === void 0) return void 0;
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new ValidationError("Evidence exit code must be a non-negative integer.");
-  }
-  return value;
-}
-function boundedNonempty(value, label, maxBytes) {
-  const normalized = value.trim();
-  if (normalized === "") throw new ValidationError(`${label} must not be empty.`);
-  const bytes = Buffer.byteLength(normalized, "utf8");
-  if (bytes > maxBytes) {
-    throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
-  }
-  return normalized;
-}
-async function readEvidenceRecords(repoRoot, filename, allowLegacySchema = false) {
-  return (await readEvidenceFile(repoRoot, filename, allowLegacySchema)).records;
-}
-async function readEvidenceFile(repoRoot, filename, allowLegacySchema) {
-  await assertNoSymlink(repoRoot, filename);
-  let contents;
-  try {
-    contents = await readFile2(filename, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read evidence records ${filename}`, error);
-  }
-  const records = contents.split("\n").filter((line) => line !== "").map((line, index) => {
-    let value;
-    try {
-      value = JSON.parse(line);
-    } catch (error) {
-      throw new SchemaError(`Invalid JSONL in ${filename} at line ${index + 1}`, error);
-    }
-    try {
-      return normalizeEvidenceRecord(value, allowLegacySchema);
-    } catch (error) {
-      throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`, error);
-    }
-  });
-  return { contents, records };
-}
-function appendEvidenceRecord(contents, record) {
-  const separator = contents === "" || contents.endsWith("\n") ? "" : "\n";
-  return `${contents}${separator}${JSON.stringify(record)}
-`;
-}
-function isValidRed(value) {
-  return value.schemaVersion === SCHEMA_VERSION && value.kind === "tdd-red" && value.result === "fail" && value.exitCode !== void 0 && value.exitCode > 0;
-}
-function isValidGreen(value) {
-  return value.schemaVersion === SCHEMA_VERSION && value.kind === "tdd-green" && value.result === "pass" && value.exitCode === 0;
-}
-function validateEvidenceRecord(value) {
-  return normalizeEvidenceRecord(value);
-}
-function normalizeEvidenceRecord(value, allowLegacySchema = false) {
-  if (!isRecord3(value)) throw new ValidationError("Evidence record must be an object.");
-  if (Object.keys(value).some((field) => !EVIDENCE_FIELDS.has(field))) {
-    throw new ValidationError("Evidence record contains unsupported fields.");
-  }
-  if (value.schemaVersion !== SCHEMA_VERSION && !(allowLegacySchema && value.schemaVersion === LEGACY_SCHEMA_VERSION)) {
-    throw new ValidationError(`Evidence record schemaVersion must be ${SCHEMA_VERSION}.`);
-  }
-  const verificationRevision = value.schemaVersion === LEGACY_SCHEMA_VERSION ? 0 : validateVerificationRevision(value.verificationRevision);
-  const id = boundedUnknownString(value.id, "Evidence ID", MAX_EVIDENCE_ID_BYTES);
-  const kind = validateKind(value.kind);
-  const summary = boundedUnknownString(
-    value.summary,
-    "Evidence summary",
-    MAX_EVIDENCE_SUMMARY_BYTES
-  );
-  const result = validateResult(value.result);
-  const recordedAt = validateTimestamp(value.recordedAt);
-  const actor = boundedUnknownString(value.actor, "Evidence actor", MAX_EVIDENCE_ACTOR_BYTES);
-  const command = value.command === void 0 ? void 0 : boundedUnknownString(value.command, "Evidence command", MAX_EVIDENCE_COMMAND_BYTES);
-  const exitCode = validateUnknownExitCode(value.exitCode);
-  assertConsistentEvidence(kind, result, exitCode);
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    verificationRevision,
-    id,
-    kind,
-    summary,
-    result,
-    recordedAt,
-    actor,
-    ...command === void 0 ? {} : { command },
-    ...exitCode === void 0 ? {} : { exitCode }
-  };
-}
-function validateVerificationRevision(value) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new ValidationError("Evidence verificationRevision must be a non-negative safe integer.");
-  }
-  return value;
-}
-function validateKind(value) {
-  if (typeof value !== "string" || !EVIDENCE_KINDS.has(value)) {
-    throw new ValidationError("Evidence kind is invalid.");
-  }
-  return value;
-}
-function validateResult(value) {
-  if (typeof value !== "string" || !EVIDENCE_RESULTS.has(value)) {
-    throw new ValidationError("Evidence result is invalid.");
-  }
-  return value;
-}
-function validateTimestamp(value) {
-  if (typeof value !== "string") throw new ValidationError("Evidence recordedAt must be an ISO timestamp.");
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.valueOf()) || parsed.toISOString() !== value) {
-    throw new ValidationError("Evidence recordedAt must be an ISO timestamp.");
-  }
-  return value;
-}
-function boundedUnknownString(value, label, maxBytes) {
-  if (typeof value !== "string") throw new ValidationError(`${label} must be a string.`);
-  return boundedNonempty(value, label, maxBytes);
-}
-function validateUnknownExitCode(value) {
-  if (value === void 0) return void 0;
-  if (typeof value !== "number") {
-    throw new ValidationError("Evidence exit code must be a non-negative integer.");
-  }
-  return validateExitCode(value);
-}
-function isRecord3(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var MAX_EVIDENCE_SUMMARY_BYTES, MAX_EVIDENCE_COMMAND_BYTES, MAX_EVIDENCE_ID_BYTES, MAX_EVIDENCE_ACTOR_BYTES, EVIDENCE_KINDS, EVIDENCE_RESULTS, EVIDENCE_FIELDS;
-var init_evidence = __esm({
-  "src/core/evidence.ts"() {
-    "use strict";
-    init_config();
-    init_errors();
-    init_paths();
-    init_task_store();
-    init_types();
-    MAX_EVIDENCE_SUMMARY_BYTES = 2e3;
-    MAX_EVIDENCE_COMMAND_BYTES = 4e3;
-    MAX_EVIDENCE_ID_BYTES = 200;
-    MAX_EVIDENCE_ACTOR_BYTES = 200;
-    EVIDENCE_KINDS = /* @__PURE__ */ new Set([
-      "command",
-      "manual",
-      "tdd-red",
-      "tdd-green"
-    ]);
-    EVIDENCE_RESULTS = /* @__PURE__ */ new Set(["pass", "fail"]);
-    EVIDENCE_FIELDS = /* @__PURE__ */ new Set([
-      "schemaVersion",
-      "verificationRevision",
-      "id",
-      "kind",
-      "summary",
-      "result",
-      "recordedAt",
-      "command",
-      "exitCode",
-      "actor"
-    ]);
-  }
-});
-
-// src/core/learning.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { lstat as lstat6, mkdir as mkdir2, readFile as readFile3, rmdir, unlink, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join4 } from "node:path";
-async function proposeLearning(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return withTaskLock(paths, taskId, () => proposeLearningLocked(paths, taskId, input, now));
-}
-async function proposeLearningLocked(paths, taskId, input, now) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
-  const id = boundedNonempty2(input.id, "Learning candidate ID", MAX_ID_CHARACTERS);
-  const domain = validateDomain(input.domain);
-  const text = boundedNonempty2(input.text, "Learning text", MAX_RULE_CHARACTERS);
-  const rationale = boundedNonempty2(
-    input.rationale,
-    "Learning rationale",
-    MAX_RATIONALE_CHARACTERS
-  );
-  const actor = boundedNonempty2(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
-  await executeTaskMutation(paths, location, {
-    mutationKind: "learning_proposed",
-    actor,
-    timestamp: timestampFrom(now),
-    fingerprint: mutationFingerprint({
-      schemaVersion: SCHEMA_VERSION,
-      type: "learning_proposed",
-      actor,
-      learningCandidateId: id,
-      domain,
-      text,
-      rationale
-    })
-  }, async (timestamp, recovering) => {
-    const current = await findTask(paths, taskId);
-    assertTaskMutable(current);
-    const existing = taskLearningCandidates(current);
-    if (existing.some((candidate2) => candidate2.id === id)) {
-      if (recovering) {
-        throw new SchemaError(`Pending learning proposal ${id} already exists in task.json, but does not match its recorded target.`);
-      }
-      throw new ValidationError(`Learning candidate ID already exists in task ${taskId}: ${id}`);
-    }
-    const candidate = {
-      schemaVersion: SCHEMA_VERSION,
-      id,
-      domain,
-      text,
-      rationale,
-      status: "proposed",
-      proposedAt: timestamp
-    };
-    const task = {
-      ...current.task,
-      learningCandidates: [...existing, candidate],
-      updatedAt: timestamp
-    };
-    return {
-      expected: mutationTargetSummary(paths, [{
-        filename: join4(current.directory, "task.json"),
-        contents: `${JSON.stringify(task, null, 2)}
-`
-      }], mutationValueIdentity({ learningCandidateId: id }, candidate)),
-      completion: {
-        schemaVersion: SCHEMA_VERSION,
-        type: "learning_proposed",
-        mutationKind: "learning_proposed",
-        mutationProtocolVersion: 1,
-        timestamp,
-        actor,
-        learningCandidateId: id
-      },
-      apply: () => writeJsonAtomic(join4(current.directory, "task.json"), task, paths.repoRoot)
-    };
-  });
-  return (await findTask(paths, taskId)).task;
-}
-async function acceptLearning(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  await readConfig(paths);
-  const id = boundedNonempty2(input.id, "Learning candidate ID", MAX_ID_CHARACTERS);
-  const actor = boundedNonempty2(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
-  if (input.confirmedBy !== "user") {
-    throw new ValidationError("Learning acceptance requires literal --confirmed-by user.");
-  }
-  return withTaskLock(paths, taskId, () => withPromotionLock(
-    paths,
-    () => acceptLearningWhileLocked(paths, taskId, id, actor, now)
-  ));
-}
-async function acceptLearningWhileLocked(paths, taskId, id, actor, now) {
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
-  await executeTaskMutation(paths, location, {
-    mutationKind: "learning_accepted",
-    actor,
-    timestamp: timestampFrom(now),
-    fingerprint: mutationFingerprint({
-      schemaVersion: SCHEMA_VERSION,
-      type: "learning_accepted",
-      actor,
-      learningCandidateId: id,
-      confirmedBy: "user"
-    })
-  }, async (timestamp, recovering) => {
-    const current = await findTask(paths, taskId);
-    assertTaskMutable(current);
-    const candidates = taskLearningCandidates(current);
-    const candidate = reconcileAcceptedCandidate(candidates, taskId, id, timestamp, recovering);
-    const normalizedRule = normalizeWhitespace(candidate.text);
-    const specPath = join4(paths.specs, `${candidate.domain}.md`);
-    const [previousSpec, previousIndex] = await Promise.all([
-      readTextIfPresent(paths, specPath),
-      readTextIfPresent(paths, paths.specIndex)
-    ]);
-    if (previousIndex === void 0) {
-      throw new SchemaError(`Missing managed spec index ${paths.specIndex}`);
-    }
-    const nextSpec = reconcilePromotionRule(
-      previousSpec,
-      candidate.domain,
-      timestamp.slice(0, 10),
-      normalizedRule,
-      recovering
-    );
-    const domainIndexEntries = countDomainIndexTargets(previousIndex, candidate.domain);
-    if (domainIndexEntries > 1) {
-      throw new ValidationError(
-        `Spec index contains duplicate targets for learning domain ${candidate.domain}; resolve them before promotion.`
-      );
-    }
-    const indexEntry = `- [${candidate.domain}](${candidate.domain}.md)`;
-    const nextIndex = domainIndexEntries === 1 ? previousIndex : appendLine(previousIndex, indexEntry);
-    const accepted = candidate.status === "accepted" ? candidate : {
-      ...candidate,
-      status: "accepted",
-      acceptedAt: timestamp,
-      confirmedBy: "user"
-    };
-    const task = candidate.status === "accepted" ? current.task : {
-      ...current.task,
-      learningCandidates: replaceCandidate(candidates, accepted),
-      updatedAt: timestamp
-    };
-    const taskContents = `${JSON.stringify(task, null, 2)}
-`;
-    return {
-      expected: mutationTargetSummary(paths, [
-        { filename: specPath, contents: nextSpec },
-        { filename: paths.specIndex, contents: nextIndex },
-        { filename: join4(current.directory, "task.json"), contents: taskContents }
-      ], mutationValueIdentity({ learningCandidateId: id }, accepted)),
-      completion: {
-        schemaVersion: SCHEMA_VERSION,
-        type: "learning_accepted",
-        mutationKind: "learning_accepted",
-        mutationProtocolVersion: 1,
-        timestamp,
-        actor,
-        learningCandidateId: id,
-        confirmedBy: "user"
-      },
-      apply: async () => {
-        await writeManagedMutationTarget(paths, current, specPath, nextSpec);
-        await writeManagedMutationTarget(paths, current, paths.specIndex, nextIndex);
-        await writeManagedMutationTarget(paths, current, join4(current.directory, "task.json"), taskContents);
-      }
-    };
-  });
-  return (await findTask(paths, taskId)).task;
-}
-async function archiveLearning(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return withTaskLock(paths, taskId, () => archiveLearningLocked(paths, taskId, input, now));
-}
-async function archiveLearningLocked(paths, taskId, input, now) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
-  const id = boundedNonempty2(input.id, "Learning candidate ID", MAX_ID_CHARACTERS);
-  const reason = boundedNonempty2(input.reason, "Learning archive reason", MAX_REASON_CHARACTERS);
-  const actor = boundedNonempty2(input.actor, "Learning actor", MAX_ACTOR_CHARACTERS);
-  await executeTaskMutation(paths, location, {
-    mutationKind: "learning_archived",
-    actor,
-    timestamp: timestampFrom(now),
-    fingerprint: mutationFingerprint({
-      schemaVersion: SCHEMA_VERSION,
-      type: "learning_archived",
-      actor,
-      learningCandidateId: id,
-      reason
-    })
-  }, async (timestamp) => {
-    const current = await findTask(paths, taskId);
-    assertTaskMutable(current);
-    const candidates = taskLearningCandidates(current);
-    const candidate = requireProposedCandidate(candidates, taskId, id);
-    const archived = {
-      ...candidate,
-      status: "archived",
-      archivedAt: timestamp,
-      archiveReason: reason
-    };
-    const task = {
-      ...current.task,
-      learningCandidates: replaceCandidate(candidates, archived),
-      updatedAt: timestamp
-    };
-    return {
-      expected: mutationTargetSummary(paths, [{
-        filename: join4(current.directory, "task.json"),
-        contents: `${JSON.stringify(task, null, 2)}
-`
-      }], mutationValueIdentity({ learningCandidateId: id }, archived)),
-      completion: {
-        schemaVersion: SCHEMA_VERSION,
-        type: "learning_archived",
-        mutationKind: "learning_archived",
-        mutationProtocolVersion: 1,
-        timestamp,
-        actor,
-        learningCandidateId: id
-      },
-      apply: () => writeJsonAtomic(join4(current.directory, "task.json"), task, paths.repoRoot)
-    };
-  });
-  return (await findTask(paths, taskId)).task;
-}
-function taskLearningCandidates(location) {
-  const candidates = location.task.learningCandidates;
-  if (candidates === void 0) return [];
-  if (!Array.isArray(candidates)) {
-    throw new ValidationError(`Learning candidate data is malformed for task ${location.task.id}.`);
-  }
-  const validated = candidates.map((candidate) => validateStoredCandidate(candidate, location.task.id));
-  if (new Set(validated.map(({ id }) => id)).size !== validated.length) {
-    throw new ValidationError(`Learning candidate IDs are duplicated in task ${location.task.id}.`);
-  }
-  return validated;
-}
-function requireProposedCandidate(candidates, taskId, id) {
-  const candidate = candidates.find((item) => item.id === id);
-  if (candidate === void 0) {
-    throw new ValidationError(`Learning candidate not found in task ${taskId}: ${id}`);
-  }
-  if (candidate.status !== "proposed") {
-    throw new ValidationError(
-      `Learning candidate ${id} must be proposed before classification; found ${candidate.status}.`
-    );
-  }
-  return candidate;
-}
-function replaceCandidate(candidates, replacement) {
-  return candidates.map((candidate) => candidate.id === replacement.id ? replacement : candidate);
-}
-function validateDomain(value) {
-  const domain = boundedNonempty2(value, "Learning domain", MAX_DOMAIN_CHARACTERS);
-  if (!DOMAIN_PATTERN.test(domain) || domain === "index") {
-    throw new ValidationError(
-      `Invalid learning domain slug: ${domain}. Expected lowercase letters, digits, and single hyphens.`
-    );
-  }
-  return domain;
-}
-function boundedNonempty2(value, label, maximum) {
-  const normalized = value.trim();
-  if (normalized === "") throw new ValidationError(`${label} must not be empty.`);
-  if ([...normalized].length > maximum) {
-    throw new ValidationError(`${label} exceeds the ${maximum}-character limit.`);
-  }
-  return normalized;
-}
-function timestampFrom(now) {
-  const date = now();
-  if (Number.isNaN(date.valueOf())) throw new ValidationError("Clock returned an invalid date.");
-  return date.toISOString();
-}
-function normalizeWhitespace(value) {
-  return value.trim().replace(/\s+/gu, " ");
-}
-function reconcileAcceptedCandidate(candidates, taskId, id, timestamp, recovering) {
-  const candidate = candidates.find((item) => item.id === id);
-  if (candidate === void 0) {
-    throw new ValidationError(`Learning candidate not found in task ${taskId}: ${id}`);
-  }
-  if (candidate.status === "proposed") return candidate;
-  if (recovering && candidate.status === "accepted" && candidate.confirmedBy === "user" && candidate.acceptedAt === timestamp) {
-    return candidate;
-  }
-  throw new ValidationError(
-    `Learning candidate ${id} must be proposed before classification; found ${candidate.status}.`
-  );
-}
-function reconcilePromotionRule(previous, domain, date, normalizedRule, recovering) {
-  const matchingRules = normalizedRuleLines(previous ?? "", normalizedRule);
-  if (matchingRules.length === 0) return appendRule(previous, domain, date, normalizedRule);
-  const expected = `${date}: ${normalizedRule}`;
-  if (recovering && matchingRules.length === 1 && matchingRules[0] === expected) {
-    return previous;
-  }
-  if (!recovering) {
-    throw new ValidationError(`Learning rule already exists in ${domain} spec: ${normalizedRule}`);
-  }
-  throw new SchemaError(
-    `Pending learning acceptance has an incompatible rule in ${domain} spec; inspect it before retrying.`
-  );
-}
-function normalizedRuleLines(contents, normalizedRule) {
-  return contents.split(/\r?\n/u).flatMap((line) => {
-    const match = line.match(/^\s*-\s+(.*?)\s*$/u);
-    if (match === null) return [];
-    const rule = match[1];
-    const withoutDate = rule.replace(/^\d{4}-\d{2}-\d{2}:\s*/u, "");
-    return normalizeWhitespace(withoutDate) === normalizedRule ? [rule.trim()] : [];
-  });
-}
-function countDomainIndexTargets(contents, domain) {
-  return contents.split(/\r?\n/u).filter((line) => {
-    const target = parseSpecIndexTarget(line);
-    return target !== void 0 && normalizeSpecTarget(target) === `${domain}.md`;
-  }).length;
-}
-function parseSpecIndexTarget(line) {
-  const match = line.match(
-    /^\s*-\s*\[[^\]]*\]\(\s*(<[^>\r\n]+>|[^\s)]+)(?:[ \t]+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^)\\])*\)))?\s*\)\s*$/u
-  );
-  return match?.[1];
-}
-function normalizeSpecTarget(value) {
-  let target = value.trim();
-  if (target.startsWith("<") && target.endsWith(">")) {
-    target = target.slice(1, -1).trim();
-  }
-  return target.replace(/\\/gu, "/").replace(/^(?:\.\/)+/u, "");
-}
-function appendRule(previous, domain, date, normalizedRule) {
-  const base = previous === void 0 ? `# ${domain}
-
-` : ensureTrailingNewline(previous);
-  return `${base}- ${date}: ${normalizedRule}
-`;
-}
-function appendLine(contents, line) {
-  return `${ensureTrailingNewline(contents)}${line}
-`;
-}
-function ensureTrailingNewline(contents) {
-  if (contents === "") return "";
-  return contents.endsWith("\n") ? contents : `${contents}
-`;
-}
-function validateStoredCandidate(value, taskId) {
-  if (!isRecord4(value) || value.schemaVersion !== SCHEMA_VERSION) {
-    throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
-  }
-  if (typeof value.id !== "string" || typeof value.domain !== "string" || typeof value.text !== "string" || typeof value.rationale !== "string") {
-    throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
-  }
-  boundedNonempty2(value.id, "Learning candidate ID", MAX_ID_CHARACTERS);
-  validateDomain(value.domain);
-  boundedNonempty2(value.text, "Learning text", MAX_RULE_CHARACTERS);
-  boundedNonempty2(value.rationale, "Learning rationale", MAX_RATIONALE_CHARACTERS);
-  if (!isIsoTimestamp2(value.proposedAt)) {
-    throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
-  }
-  if (value.status === "accepted") {
-    if (value.confirmedBy !== "user" || !isIsoTimestamp2(value.acceptedAt)) {
-      throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
-    }
-  } else if (value.status === "archived") {
-    if (!isIsoTimestamp2(value.archivedAt)) {
-      throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
-    }
-    if (typeof value.archiveReason !== "string") {
-      throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
-    }
-    boundedNonempty2(value.archiveReason, "Learning archive reason", MAX_REASON_CHARACTERS);
-  } else if (value.status !== "proposed") {
-    throw new ValidationError(`Learning candidate data is malformed for task ${taskId}.`);
-  }
-  return value;
-}
-async function readTextIfPresent(paths, filename) {
-  await assertNoSymlink(paths.repoRoot, filename);
-  try {
-    return await readFile3(filename, "utf8");
-  } catch (error) {
-    if (isCode(error, "ENOENT")) return void 0;
-    throw new SchemaError(`Unable to read managed learning file ${filename}`, error);
-  }
-}
-async function withPromotionLock(paths, operation) {
-  const lock = await acquirePromotionLock(paths);
-  let result;
-  let operationFailed = false;
-  let operationError;
-  try {
-    result = await operation();
-  } catch (error) {
-    operationFailed = true;
-    operationError = error;
-  }
-  try {
-    await releasePromotionLock(paths, lock);
-  } catch (releaseError) {
-    if (operationFailed) {
-      throw new SchemaError(
-        `Learning promotion failed and its repository lock could not be released safely: ${errorMessage(operationError)}`,
-        { operationError, releaseError }
-      );
-    }
-    throw releaseError;
-  }
-  if (operationFailed) throw operationError;
-  return result;
-}
-async function acquirePromotionLock(paths) {
-  const directory = join4(paths.runtime, PROMOTION_LOCK_DIRECTORY);
-  const ownerPath = join4(directory, PROMOTION_LOCK_OWNER);
-  const token = randomUUID3();
-  const deadline = Date.now() + PROMOTION_LOCK_TIMEOUT_MILLISECONDS;
-  await assertNoSymlink(paths.repoRoot, paths.runtime);
-  for (; ; ) {
-    await assertNoSymlink(paths.repoRoot, directory);
-    try {
-      await mkdir2(directory);
-    } catch (error) {
-      if (!isCode(error, "EEXIST")) {
-        throw new SchemaError(`Unable to acquire learning promotion lock ${directory}`, error);
-      }
-      if (Date.now() >= deadline) {
-        throw new ValidationError(await describePromotionLock(paths, directory, ownerPath));
-      }
-      await delay(PROMOTION_LOCK_RETRY_MILLISECONDS);
-      continue;
-    }
-    const owner = {
-      token,
-      pid: process.pid,
-      acquiredAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    try {
-      await writeFile3(ownerPath, `${JSON.stringify(owner)}
-`, { encoding: "utf8", flag: "wx" });
-    } catch (error) {
-      const cleanupFailures = await cleanupOwnedLock(directory, ownerPath);
-      if (cleanupFailures.length > 0) {
-        throw new SchemaError(
-          `Unable to initialize learning promotion lock ${directory}; cleanup failed for ${cleanupFailures.join(", ")}`,
-          error
-        );
-      }
-      throw new SchemaError(`Unable to initialize learning promotion lock ${directory}`, error);
-    }
-    return { directory, ownerPath, token };
-  }
-}
-async function releasePromotionLock(paths, lock) {
-  await assertNoSymlink(paths.repoRoot, lock.ownerPath);
-  let owner;
-  try {
-    owner = JSON.parse(await readFile3(lock.ownerPath, "utf8"));
-  } catch (error) {
-    throw new SchemaError(
-      `Unable to verify ownership before releasing learning promotion lock ${lock.directory}; inspect it manually`,
-      error
-    );
-  }
-  if (!isRecord4(owner) || owner.token !== lock.token) {
-    throw new SchemaError(
-      `Learning promotion lock ownership changed at ${lock.directory}; refusing unsafe cleanup`
-    );
-  }
-  try {
-    await unlink(lock.ownerPath);
-    await rmdir(lock.directory);
-  } catch (error) {
-    throw new SchemaError(
-      `Unable to release learning promotion lock ${lock.directory}; inspect and remove it only after confirming no promotion is active`,
-      error
-    );
-  }
-}
-async function describePromotionLock(paths, directory, ownerPath) {
-  let ageMilliseconds;
-  try {
-    ageMilliseconds = Math.max(0, Date.now() - (await lstat6(directory)).mtimeMs);
-  } catch (error) {
-    if (!isCode(error, "ENOENT")) {
-      return `Learning promotion lock is busy at ${directory}; retry after the active promotion completes.`;
-    }
-  }
-  let ownerDescription = "owner metadata is unavailable";
-  try {
-    await assertNoSymlink(paths.repoRoot, ownerPath);
-    const owner = JSON.parse(await readFile3(ownerPath, "utf8"));
-    if (isRecord4(owner)) {
-      const pid = typeof owner.pid === "number" ? `pid ${owner.pid}` : "unknown pid";
-      const acquiredAt = typeof owner.acquiredAt === "string" ? ` since ${owner.acquiredAt}` : "";
-      ownerDescription = `${pid}${acquiredAt}`;
-    }
-  } catch {
-  }
-  const stale = ageMilliseconds !== void 0 && ageMilliseconds >= PROMOTION_LOCK_STALE_MILLISECONDS;
-  const guidance = stale ? "The lock appears stale; verify no Vinea promotion process is active, then remove this lock directory and retry." : "Wait for the active promotion to finish, then retry.";
-  return `Learning promotion lock is busy at ${directory} (${ownerDescription}). ${guidance}`;
-}
-async function cleanupOwnedLock(directory, ownerPath) {
-  const failures = [];
-  try {
-    await unlink(ownerPath);
-  } catch (error) {
-    if (!isCode(error, "ENOENT")) failures.push(ownerPath);
-  }
-  try {
-    await rmdir(directory);
-  } catch (error) {
-    if (!isCode(error, "ENOENT")) failures.push(directory);
-  }
-  return failures;
-}
-function delay(milliseconds) {
-  return new Promise((resolve8) => {
-    setTimeout(resolve8, milliseconds);
-  });
-}
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-function isCode(error, code) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-function isIsoTimestamp2(value) {
-  if (typeof value !== "string") return false;
-  const parsed = new Date(value);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
-}
-function isRecord4(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var DOMAIN_PATTERN, MAX_DOMAIN_CHARACTERS, MAX_ID_CHARACTERS, MAX_RULE_CHARACTERS, MAX_RATIONALE_CHARACTERS, MAX_REASON_CHARACTERS, MAX_ACTOR_CHARACTERS, PROMOTION_LOCK_DIRECTORY, PROMOTION_LOCK_OWNER, PROMOTION_LOCK_RETRY_MILLISECONDS, PROMOTION_LOCK_TIMEOUT_MILLISECONDS, PROMOTION_LOCK_STALE_MILLISECONDS;
-var init_learning = __esm({
-  "src/core/learning.ts"() {
-    "use strict";
-    init_config();
-    init_errors();
-    init_json();
-    init_paths();
-    init_task_store();
-    init_types();
-    DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    MAX_DOMAIN_CHARACTERS = 100;
-    MAX_ID_CHARACTERS = 200;
-    MAX_RULE_CHARACTERS = 500;
-    MAX_RATIONALE_CHARACTERS = 1e3;
-    MAX_REASON_CHARACTERS = 1e3;
-    MAX_ACTOR_CHARACTERS = 200;
-    PROMOTION_LOCK_DIRECTORY = "learning-promotion.lock";
-    PROMOTION_LOCK_OWNER = "owner.json";
-    PROMOTION_LOCK_RETRY_MILLISECONDS = 25;
-    PROMOTION_LOCK_TIMEOUT_MILLISECONDS = 5e3;
-    PROMOTION_LOCK_STALE_MILLISECONDS = 5 * 60 * 1e3;
-  }
-});
-
-// src/core/task-locks.ts
-import { lstat as lstat7, readFile as readFile4, readdir } from "node:fs/promises";
-import { basename as basename2, join as join5, relative as relative2 } from "node:path";
-async function inspectTaskLocks(paths) {
-  const locksDirectory = join5(paths.runtime, "task-locks");
-  let entries;
-  try {
-    await assertNoSymlink(paths.repoRoot, locksDirectory);
-    const locks = await lstat7(locksDirectory);
-    await assertNoSymlink(paths.repoRoot, locksDirectory);
-    if (!locks.isDirectory() || locks.isSymbolicLink()) {
-      return [
-        taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
-        ...await inspectNamedRuntimeLock(paths, join5(paths.runtime, PROMOTION_LOCK_DIRECTORY2))
-      ].sort((left, right) => left.path.localeCompare(right.path));
-    }
-    entries = await readdir(locksDirectory);
-    await assertNoSymlink(paths.repoRoot, locksDirectory);
-  } catch (error) {
-    if (isMissing5(error)) {
-      return inspectNamedRuntimeLock(paths, join5(paths.runtime, PROMOTION_LOCK_DIRECTORY2));
-    }
-    return [
-      taskLockDiagnostic(paths, locksDirectory, null, null, "directory_invalid", { status: "unsafe" }),
-      ...await inspectNamedRuntimeLock(paths, join5(paths.runtime, PROMOTION_LOCK_DIRECTORY2))
-    ].sort((left, right) => left.path.localeCompare(right.path));
-  }
-  const diagnostics = await Promise.all(entries.map(async (entry) => inspectTaskLock(paths, join5(locksDirectory, entry))));
-  const promotionLock = await inspectNamedRuntimeLock(paths, join5(paths.runtime, PROMOTION_LOCK_DIRECTORY2));
-  return [...diagnostics, ...promotionLock].sort((left, right) => left.path.localeCompare(right.path));
-}
-async function inspectNamedRuntimeLock(paths, directory) {
-  try {
-    await assertNoSymlink(paths.repoRoot, directory);
-    await lstat7(directory);
-    await assertNoSymlink(paths.repoRoot, directory);
-  } catch (error) {
-    if (isMissing5(error)) return [];
-    return [taskLockDiagnostic(paths, directory, null, null, "directory_invalid", { status: "unsafe" })];
-  }
-  return [await inspectTaskLock(paths, directory)];
-}
-async function inspectTaskLock(paths, directory) {
-  const taskId = TASK_LOCK_FILENAME.exec(basename2(directory))?.[1] ?? null;
-  let ageMilliseconds = null;
-  try {
-    await assertNoSymlink(paths.repoRoot, directory);
-    const entry = await lstat7(directory);
-    await assertNoSymlink(paths.repoRoot, directory);
-    ageMilliseconds = Math.max(0, Date.now() - entry.mtimeMs);
-    if (!entry.isDirectory() || entry.isSymbolicLink()) {
-      return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, "directory_invalid", { status: "unsafe" });
-    }
-  } catch {
-    return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, "directory_invalid", { status: "unsafe" });
-  }
-  const owner = await inspectTaskLockOwner(paths, join5(directory, "owner.json"));
-  const status = owner.status === "valid" ? "retained" : `owner_${owner.status}`;
-  return taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, status, owner);
-}
-async function inspectTaskLockOwner(paths, ownerPath) {
-  try {
-    await assertNoSymlink(paths.repoRoot, ownerPath);
-  } catch (error) {
-    return isMissing5(error) ? { status: "missing" } : { status: "unsafe" };
-  }
-  let contents;
-  try {
-    contents = await readFile4(ownerPath, "utf8");
-  } catch (error) {
-    return isMissing5(error) ? { status: "missing" } : { status: "unreadable" };
-  }
-  try {
-    await assertNoSymlink(paths.repoRoot, ownerPath);
-  } catch (error) {
-    return isMissing5(error) ? { status: "missing" } : { status: "unsafe" };
-  }
-  try {
-    const owner = JSON.parse(contents);
-    if (!isRecord5(owner) || typeof owner.token !== "string" || owner.token.trim() === "") {
-      return { status: "malformed" };
-    }
-    return { status: "valid", token: owner.token };
-  } catch {
-    return { status: "malformed" };
-  }
-}
-function taskLockDiagnostic(paths, directory, taskId, ageMilliseconds, status, owner) {
-  const path = relative2(paths.repoRoot, directory).split("\\").join("/");
-  return {
-    path,
-    taskId,
-    ageMilliseconds,
-    status,
-    owner,
-    recoveryInstruction: `Confirm no active process, then remove exact lock directory ${path}.`
-  };
-}
-function isMissing5(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-function isRecord5(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var TASK_LOCK_FILENAME, PROMOTION_LOCK_DIRECTORY2;
-var init_task_locks = __esm({
-  "src/core/task-locks.ts"() {
-    "use strict";
-    init_paths();
-    TASK_LOCK_FILENAME = /^(t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*)\.lock$/;
-    PROMOTION_LOCK_DIRECTORY2 = "learning-promotion.lock";
-  }
-});
-
-// src/core/validate.ts
-var validate_exports = {};
-__export(validate_exports, {
-  validateTaskStructure: () => validateTaskStructure,
-  validateWorkspace: () => validateWorkspace
-});
-import { createHash } from "node:crypto";
-import { lstat as lstat8, readFile as readFile5, readdir as readdir2 } from "node:fs/promises";
-import { basename as basename3, dirname as dirname2, isAbsolute as isAbsolute2, join as join6, relative as relative3, resolve as resolve2 } from "node:path";
-async function validateWorkspace(paths) {
-  const issues = [];
-  const add = (code, filename, message) => {
-    issues.push({ code, path: displayPath(paths, filename), message });
-  };
-  if (!await validateManagedPathSafety(paths, paths.vineaRoot, add)) {
-    return { issues: sortIssues(issues) };
-  }
-  const root = await managedEntryKind(paths, paths.vineaRoot, add);
-  if (root === "unsafe") return { issues: sortIssues(issues) };
-  if (root === "missing") {
-    add("WORKSPACE_NOT_INITIALIZED", paths.vineaRoot, "Run `vinea init` before validating this repository.");
-    return { issues: sortIssues(issues) };
-  }
-  if (root !== "directory") {
-    add("WORKSPACE_INVALID", paths.vineaRoot, "The Vinea root must be a regular directory and not a symbolic link.");
-    return { issues: sortIssues(issues) };
-  }
-  const managed = await inspectManagedPathSafety(paths, add);
-  const limits = managed.config ? await validateConfig(paths, add) : null;
-  await validateSchemaMigrationState(paths, add);
-  await validateManagedSpecs(paths, add, managed);
-  if (managed.inlineAudit) await validateInlineAudit(paths, add);
-  const taskTreeSafe = managed.tasks && await validateManagedPathSafety(paths, paths.tasks, add);
-  let activeTasksDirectory = false;
-  let archivedTasksDirectory = false;
-  for (const [label, directory, safe] of [
-    ["specs", paths.specs, managed.specs],
-    ["tasks/active", paths.activeTasks, taskTreeSafe && managed.activeTasks],
-    ["tasks/archive", paths.archivedTasks, taskTreeSafe && managed.archivedTasks]
-  ]) {
-    if (!safe) continue;
-    const kind = await managedEntryKind(paths, directory, add);
-    if (kind === "unsafe") continue;
-    if (kind === "missing") {
-      add("DIRECTORY_MISSING", directory, `Required Vinea directory ${label} is missing.`);
-    } else if (kind !== "directory") {
-      add("DIRECTORY_INVALID", directory, `Required Vinea path ${label} must be a regular directory.`);
-    }
-    if (label === "tasks/active") activeTasksDirectory = kind === "directory";
-    if (label === "tasks/archive") archivedTasksDirectory = kind === "directory";
-  }
-  const taskScan = {
-    activeTaskIds: /* @__PURE__ */ new Set(),
-    taskIdsByScope: /* @__PURE__ */ new Map()
-  };
-  if (activeTasksDirectory) await scanTaskScope(paths, paths.activeTasks, "active", limits, taskScan, add);
-  if (archivedTasksDirectory) await scanTaskScope(paths, paths.archivedTasks, "archive", limits, taskScan, add);
-  for (const [taskId, scopes] of taskScan.taskIdsByScope) {
-    if (scopes.size > 1) {
-      add(
-        "TASK_LOCATION_DUPLICATE",
-        join6(paths.tasks, taskId),
-        `Task ${taskId} is present in both active and archive storage.`
-      );
-    }
-  }
-  if (managed.runtime && managed.sessions) {
-    await validateSessionBindings(paths, taskScan.activeTaskIds, add);
-  }
-  if (managed.runtime) await validateTaskLocks(paths, add);
-  return { issues: sortIssues(issues) };
-}
-async function validateSchemaMigrationState(paths, add) {
-  try {
-    const state = await readSchemaMigrationState(paths);
-    if (state?.phase === "intent") {
-      add(
-        "MIGRATION_PENDING",
-        paths.migrationState,
-        `Schema migration ${state.operationId} is incomplete; run \`vinea migrate\` to resume it.`
-      );
-    }
-  } catch (error) {
-    add(
-      "MIGRATION_STATE_INVALID",
-      paths.migrationState,
-      error instanceof Error ? error.message : "Schema migration state is invalid."
-    );
-  }
-}
-async function validateTaskStructure(paths, location, options = {}) {
-  const issues = [];
-  const add = (code, filename, message) => {
-    issues.push({ code, path: displayPath(paths, filename), message });
-  };
-  if (!await validateManagedPathSafety(paths, location.directory, add)) {
-    return { issues: sortIssues(issues) };
-  }
-  await validateTaskDirectory(
-    paths,
-    location.directory,
-    basename3(location.directory),
-    location.scope,
-    null,
-    /* @__PURE__ */ new Set(),
-    add,
-    options.pendingMutationRecovery
-  );
-  return { issues: sortIssues(issues) };
-}
-async function validateTaskLocks(paths, add) {
-  const locks = await inspectTaskLocks(paths);
-  for (const lock of locks) {
-    const promotionLock = lock.path === ".vinea/.runtime/learning-promotion.lock";
-    const label = promotionLock ? "learning promotion lock" : "task lock";
-    const prefix = promotionLock ? "LEARNING_PROMOTION_LOCK" : "TASK_LOCK";
-    const association = promotionLock ? label : lock.taskId === null ? "unknown task" : `task ${lock.taskId}`;
-    const age = lock.ageMilliseconds === null ? "unknown age" : `age ${lock.ageMilliseconds}ms`;
-    const message = `${association}; ${age}. ${lock.recoveryInstruction}`;
-    if (lock.status === "directory_invalid") {
-      add(`${prefix}_DIRECTORY_INVALID`, join6(paths.repoRoot, lock.path), message);
-    } else if (lock.status === "retained") {
-      add(`${prefix}_RETAINED`, join6(paths.repoRoot, lock.path), message);
-    } else if (lock.status === "owner_missing") {
-      add(`${prefix}_OWNER_MISSING`, join6(paths.repoRoot, lock.path), message);
-    } else if (lock.status === "owner_malformed") {
-      add(`${prefix}_OWNER_MALFORMED`, join6(paths.repoRoot, lock.path), message);
-    } else if (lock.status === "owner_unreadable") {
-      add(`${prefix}_OWNER_UNREADABLE`, join6(paths.repoRoot, lock.path), message);
-    } else {
-      add(`${prefix}_OWNER_UNSAFE`, join6(paths.repoRoot, lock.path), message);
-    }
-  }
-}
-async function inspectManagedPathSafety(paths, add) {
-  const config = await validateManagedPathSafety(paths, paths.config, add);
-  const gitignore = await validateManagedPathSafety(paths, paths.gitignore, add);
-  const specs = await validateManagedPathSafety(paths, paths.specs, add);
-  const specIndex = specs && await validateManagedPathSafety(paths, paths.specIndex, add);
-  const tasks = await validateManagedPathSafety(paths, paths.tasks, add);
-  const activeTasks = tasks && await validateManagedPathSafety(paths, paths.activeTasks, add);
-  const archivedTasks = tasks && await validateManagedPathSafety(paths, paths.archivedTasks, add);
-  const runtime = await validateManagedPathSafety(paths, paths.runtime, add);
-  const sessions = runtime && await validateManagedPathSafety(paths, paths.sessions, add);
-  const inlineAudit = await validateManagedPathSafety(paths, join6(paths.vineaRoot, "inline-audit.jsonl"), add);
-  return {
-    config,
-    gitignore,
-    specs,
-    specIndex,
-    tasks,
-    activeTasks,
-    archivedTasks,
-    runtime,
-    sessions,
-    inlineAudit
-  };
-}
-async function validateManagedPathSafety(paths, filename, add) {
-  try {
-    await assertNoSymlink(paths.repoRoot, filename);
-    return true;
-  } catch (error) {
-    if (isErrorCode(error, "ENOTDIR")) return true;
-    add(
-      "MANAGED_PATH_UNSAFE",
-      filename,
-      "Vinea managed paths must remain inside the repository and must not traverse symbolic links."
-    );
-    return false;
-  }
-}
-async function managedEntryKind(paths, filename, add) {
-  if (!await validateManagedPathSafety(paths, dirname2(filename), add)) return "unsafe";
-  const kind = await entryKind(filename);
-  if (kind === "symlink") return kind;
-  if (!await validateManagedPathSafety(paths, filename, add)) return "unsafe";
-  return kind;
-}
-async function readManagedDirectory(paths, directory, add, unreadableCode, unreadableLabel) {
-  if (!await validateManagedPathSafety(paths, directory, add)) return null;
-  let entries;
-  try {
-    entries = await readdir2(directory, { withFileTypes: true });
-  } catch (error) {
-    add(unreadableCode, directory, describeError(unreadableLabel, error));
-    return null;
-  }
-  if (!await validateManagedPathSafety(paths, directory, add)) return null;
-  return entries;
-}
-async function readManagedBytes(paths, filename, add) {
-  if (await managedEntryKind(paths, filename, add) !== "file") return null;
-  if (!await validateManagedPathSafety(paths, filename, add)) return null;
-  try {
-    const contents = await readFile5(filename);
-    if (!await validateManagedPathSafety(paths, filename, add)) return null;
-    return contents;
-  } catch {
-    return null;
-  }
-}
-async function validateManagedSpecs(paths, add, managed) {
-  if (managed.gitignore) {
-    const gitignore = await readRequiredRegularFile(paths, paths.gitignore, "VINEA_GITIGNORE", add);
-    if (gitignore !== null && gitignore !== RUNTIME_IGNORE2) {
-      add(
-        "VINEA_GITIGNORE_INVALID",
-        paths.gitignore,
-        "Managed .vinea/.gitignore must contain exactly .runtime/."
-      );
-    }
-  }
-  if (!managed.specs || !managed.specIndex) return;
-  if (await managedEntryKind(paths, paths.specs, add) !== "directory") return;
-  const index = await readRequiredRegularFile(paths, paths.specIndex, "SPEC_INDEX", add);
-  if (index === null) return;
-  const seenTargets = /* @__PURE__ */ new Set();
-  for (const [index_, line] of index.split(/\r?\n/u).entries()) {
-    if (!/^\s*-\s*\[/u.test(line)) continue;
-    const target = parseSpecIndexTarget(line);
-    if (target === void 0) {
-      add("SPEC_INDEX_ENTRY_INVALID", paths.specIndex, `Line ${index_ + 1} is not a valid indexed spec link.`);
-      continue;
-    }
-    const normalized = normalizeSpecTarget(target);
-    if (!MANAGED_SPEC_TARGET.test(normalized)) {
-      add(
-        "SPEC_INDEX_TARGET_INVALID",
-        paths.specIndex,
-        `Line ${index_ + 1} must target a managed relative <domain>.md spec file.`
-      );
-      continue;
-    }
-    if (seenTargets.has(normalized)) {
-      add("SPEC_INDEX_TARGET_DUPLICATE", paths.specIndex, `Line ${index_ + 1} duplicates spec target ${normalized}.`);
-      continue;
-    }
-    seenTargets.add(normalized);
-    const targetPath = join6(paths.specs, normalized);
-    const kind = await managedEntryKind(paths, targetPath, add);
-    if (kind === "unsafe") continue;
-    if (kind === "missing") {
-      add("SPEC_INDEX_TARGET_MISSING", targetPath, `Indexed spec target ${normalized} is missing.`);
-    } else if (kind !== "file") {
-      add("SPEC_INDEX_TARGET_INVALID", targetPath, `Indexed spec target ${normalized} must be a regular file.`);
-    }
-  }
-}
-async function validateConfig(paths, add) {
-  const value = await readJsonObject(paths, paths.config, "CONFIG", add);
-  if (value === null) return null;
-  if (value.schemaVersion !== SCHEMA_VERSION) {
-    add(
-      "CONFIG_SCHEMA_UNSUPPORTED",
-      paths.config,
-      `Config schema ${String(value.schemaVersion)} is unsupported; this CLI supports ${SCHEMA_VERSION}.`
-    );
-  }
-  const riskRules = value.riskRules;
-  const context = value.context;
-  const validRiskRules = isRecord6(riskRules) && isStringArray(riskRules.medium) && isStringArray(riskRules.high);
-  const validContext = isRecord6(context) && isNonNegativeSafeInteger(context.maxFiles) && isNonNegativeSafeInteger(context.maxEstimatedBytes);
-  if (!validRiskRules || !validContext) {
-    add(
-      "CONFIG_INVALID",
-      paths.config,
-      "Config must define string risk-rule arrays and non-negative integer context budgets."
-    );
-  }
-  return validContext ? {
-    maxFiles: context.maxFiles,
-    maxEstimatedBytes: context.maxEstimatedBytes
-  } : null;
-}
-async function validateInlineAudit(paths, add) {
-  const filename = join6(paths.vineaRoot, "inline-audit.jsonl");
-  const contents = await readOptionalRegularFile(paths, filename, "INLINE_AUDIT", add);
-  if (contents === null) return;
-  for (const { line, lineNumber } of jsonlLines(contents)) {
-    const value = parseJsonl(line, lineNumber, filename, "INLINE_AUDIT_JSONL_INVALID", add);
-    if (value === null) continue;
-    if (!isRecord6(value)) {
-      add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
-      continue;
-    }
-    if (value.schemaVersion !== SCHEMA_VERSION) {
-      add(
-        "INLINE_AUDIT_SCHEMA_UNSUPPORTED",
-        filename,
-        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`
-      );
-    }
-    if (!isIsoTimestamp3(value.timestamp) || typeof value.requestSummary !== "string" || value.requestSummary.trim() === "" || typeof value.reason !== "string" || value.reason.trim() === "" || !isRecord6(value.proposedRisk) || !["low", "medium", "high"].includes(String(value.proposedRisk.level)) || !isStringArray(value.proposedRisk.reasons)) {
-      add("INLINE_AUDIT_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid inline-audit record.`);
-    }
-  }
-}
-async function scanTaskScope(paths, directory, scope, limits, scan, add) {
-  const entries = await readManagedDirectory(paths, directory, add, "DIRECTORY_UNREADABLE", "Unable to list task storage");
-  if (entries === null) return;
-  for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
-    const taskDirectory = join6(directory, entry.name);
-    if (!entry.isDirectory() || entry.isSymbolicLink()) {
-      add("TASK_ENTRY_INVALID", taskDirectory, "Task storage entries must be regular directories.");
-      continue;
-    }
-    const scopes = scan.taskIdsByScope.get(entry.name) ?? /* @__PURE__ */ new Set();
-    scopes.add(scope);
-    scan.taskIdsByScope.set(entry.name, scopes);
-    await validateTaskDirectory(paths, taskDirectory, entry.name, scope, limits, scan.activeTaskIds, add);
-  }
-}
-async function validateTaskDirectory(paths, directory, directoryName, scope, limits, activeTaskIds, add, pendingMutationRecovery) {
-  if (!await validateManagedPathSafety(paths, directory, add)) return;
-  const taskFilename = join6(directory, "task.json");
-  const task = await readJsonObject(paths, taskFilename, "TASK", add);
-  if (task !== null) {
-    const taskId = typeof task.id === "string" ? task.id : null;
-    if (!TASK_ID_PATTERN2.test(directoryName)) {
-      add("TASK_ID_INVALID", taskFilename, `Task directory name is invalid: ${directoryName}.`);
-    }
-    if (taskId !== directoryName) {
-      add("TASK_ID_MISMATCH", taskFilename, `Task ID ${String(task.id)} does not match directory ${directoryName}.`);
-    }
-    if (task.schemaVersion !== SCHEMA_VERSION) {
-      add(
-        "TASK_SCHEMA_UNSUPPORTED",
-        taskFilename,
-        `Task schema ${String(task.schemaVersion)} is unsupported; this CLI supports ${SCHEMA_VERSION}.`
-      );
-    }
-    const status = typeof task.status === "string" ? task.status : "";
-    if (!ALL_STATUSES.has(status)) {
-      add("TASK_STATUS_INVALID", taskFilename, `Unknown task status: ${String(task.status)}.`);
-    } else if (scope === "active" && status === "archived" || scope === "archive" && status !== "archived") {
-      add(
-        "TASK_STATE_SCOPE_INVALID",
-        taskFilename,
-        `Status ${status} is invalid in ${scope} task storage.`
-      );
-    }
-    if (!isTaskRecordShape(task)) {
-      add("TASK_RECORD_INVALID", taskFilename, "Task record does not match the supported task structure.");
-    }
-    validateTaskRequirementIds(task, taskFilename, add);
-    if (scope === "active" && taskId === directoryName && TASK_ID_PATTERN2.test(taskId) && task.schemaVersion === SCHEMA_VERSION && ACTIVE_STATUSES.has(status) && isTaskRecordShape(task)) {
-      activeTaskIds.add(taskId);
-    }
-  }
-  for (const artifact of REQUIRED_TASK_ARTIFACTS) {
-    const filename = join6(directory, artifact);
-    const kind = await managedEntryKind(paths, filename, add);
-    if (kind === "unsafe") continue;
-    if (kind === "missing") {
-      add("TASK_ARTIFACT_MISSING", filename, `Required task artifact ${artifact} is missing.`);
-    } else if (kind !== "file") {
-      add("TASK_ARTIFACT_INVALID", filename, `Required task artifact ${artifact} must be a regular file.`);
-    }
-  }
-  const allowsLegacyHistory = task !== null && task.schemaVersion === SCHEMA_VERSION && isTaskRecordShape(task);
-  const taskVerificationRevision = task !== null && task.schemaVersion === SCHEMA_VERSION && isNonNegativeSafeInteger(task.verificationRevision) ? task.verificationRevision : void 0;
-  await validateContextManifest(paths, join6(directory, "context.jsonl"), limits, allowsLegacyHistory, add);
-  const evidence = await validateEvidenceArtifact(
-    paths,
-    join6(directory, "evidence.jsonl"),
-    allowsLegacyHistory,
-    taskVerificationRevision,
-    add
-  );
-  const checkHistory = await validateCheckHistoryArtifact(
-    paths,
-    join6(directory, "check-history.jsonl"),
-    task,
-    add
-  );
-  await validateJournalArtifact(
-    paths,
-    join6(directory, "journal.md"),
-    task,
-    directory,
-    scope,
-    allowsLegacyHistory,
-    checkHistory,
-    add,
-    pendingMutationRecovery
-  );
-  await validateCheckArtifact(paths, join6(directory, "check.md"), task, evidence, add);
-}
-async function validateContextManifest(paths, filename, limits, allowsLegacyHistory, add) {
-  const contents = await readOptionalRegularFile(paths, filename, "CONTEXT", add);
-  if (contents === null) return;
-  let files = 0;
-  let estimatedBytes = 0;
-  const pathsSeen = /* @__PURE__ */ new Set();
-  for (const { line, lineNumber } of jsonlLines(contents)) {
-    const value = parseJsonl(line, lineNumber, filename, "CONTEXT_JSONL_INVALID", add);
-    if (value === null) continue;
-    if (!isRecord6(value)) {
-      add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} must contain an object.`);
-      continue;
-    }
-    if (!isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
-      add(
-        "CONTEXT_SCHEMA_UNSUPPORTED",
-        filename,
-        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`
-      );
-    }
-    const validBytes = isNonNegativeSafeInteger(value.estimatedBytes);
-    const normalizedPath = typeof value.path === "string" ? normalizeRepositoryPath(value.path) : null;
-    if (typeof value.path !== "string" || normalizedPath === null || normalizedPath !== value.path || typeof value.purpose !== "string" || value.purpose.trim() === "" || !validBytes || !isIsoTimestamp3(value.addedAt)) {
-      add("CONTEXT_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid context reference.`);
-    }
-    files += 1;
-    if (validBytes) estimatedBytes += value.estimatedBytes;
-    if (typeof value.path !== "string") continue;
-    const duplicateKey = normalizedPath ?? value.path;
-    if (pathsSeen.has(duplicateKey)) {
-      add("CONTEXT_DUPLICATE", filename, `Line ${lineNumber} duplicates context path ${duplicateKey}.`);
-    } else {
-      pathsSeen.add(duplicateKey);
-    }
-    await validateContextPath(paths, filename, value.path, lineNumber, add);
-  }
-  if (limits !== null && files > limits.maxFiles) {
-    add(
-      "CONTEXT_FILE_BUDGET_EXCEEDED",
-      filename,
-      `Context manifest has ${files} files; configured maximum is ${limits.maxFiles}.`
-    );
-  }
-  if (limits !== null && estimatedBytes > limits.maxEstimatedBytes) {
-    add(
-      "CONTEXT_BYTE_BUDGET_EXCEEDED",
-      filename,
-      `Context manifest estimates ${estimatedBytes} bytes; configured maximum is ${limits.maxEstimatedBytes}.`
-    );
-  }
-}
-async function validateContextPath(paths, manifest, repositoryPath, lineNumber, add) {
-  const normalized = normalizeRepositoryPath(repositoryPath);
-  if (normalized === null) {
-    add("CONTEXT_PATH_INVALID", manifest, `Line ${lineNumber} has an unsafe context path: ${repositoryPath}.`);
-    return;
-  }
-  let current = paths.repoRoot;
-  for (const segment of normalized.split("/")) {
-    current = join6(current, segment);
-    const kind = await entryKind(current);
-    if (kind === "missing") {
-      add("CONTEXT_PATH_MISSING", manifest, `Line ${lineNumber} references missing path ${normalized}.`);
-      return;
-    }
-    if (kind === "symlink") {
-      add("CONTEXT_PATH_UNSAFE", manifest, `Line ${lineNumber} references symbolic link ${normalized}.`);
-      return;
-    }
-  }
-  if (await entryKind(resolve2(paths.repoRoot, normalized)) !== "file") {
-    add("CONTEXT_PATH_INVALID", manifest, `Line ${lineNumber} must reference a regular file: ${normalized}.`);
-  }
-}
-async function validateEvidenceArtifact(paths, filename, allowsLegacyHistory, taskVerificationRevision, add) {
-  const contents = await readOptionalRegularFile(paths, filename, "EVIDENCE", add);
-  if (contents === null) return [];
-  const records = [];
-  const seenIds = /* @__PURE__ */ new Set();
-  for (const { line, lineNumber } of jsonlLines(contents)) {
-    const value = parseJsonl(line, lineNumber, filename, "EVIDENCE_JSONL_INVALID", add);
-    if (value === null) continue;
-    if (isRecord6(value) && !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
-      add(
-        "EVIDENCE_SCHEMA_UNSUPPORTED",
-        filename,
-        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`
-      );
-    }
-    let record;
-    try {
-      record = normalizeEvidenceRecord(value, allowsLegacyHistory);
-    } catch {
-      add("EVIDENCE_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid evidence record.`);
-      continue;
-    }
-    if (seenIds.has(record.id)) {
-      add("EVIDENCE_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates evidence ID ${record.id}.`);
-      continue;
-    }
-    if (taskVerificationRevision !== void 0 && record.verificationRevision > taskVerificationRevision) {
-      add(
-        "EVIDENCE_REVISION_INVALID",
-        filename,
-        `Line ${lineNumber} uses future verification revision ${record.verificationRevision}; task.json is at ${taskVerificationRevision}.`
-      );
-    }
-    seenIds.add(record.id);
-    records.push(record);
-  }
-  return records;
-}
-async function validateCheckHistoryArtifact(paths, filename, task, add) {
-  const contents = await readOptionalRegularFile(paths, filename, "CHECK_HISTORY", add);
-  if (contents === null) return [];
-  const snapshots = [];
-  const operationIds = /* @__PURE__ */ new Set();
-  const revisions = /* @__PURE__ */ new Set();
-  const taskId = typeof task?.id === "string" ? task.id : void 0;
-  const taskRevision = task !== null && isNonNegativeSafeInteger(task.verificationRevision) ? task.verificationRevision : void 0;
-  const declaredIds = task === null ? [] : taskRequirementIds(task);
-  for (const { line, lineNumber } of jsonlLines(contents)) {
-    const value = parseJsonl(line, lineNumber, filename, "CHECK_HISTORY_JSONL_INVALID", add);
-    if (value === null) continue;
-    if (!isCheckHistorySnapshot(value)) {
-      add("CHECK_HISTORY_RECORD_INVALID", filename, `Line ${lineNumber} is not a valid check-history snapshot.`);
-      continue;
-    }
-    const snapshot = value;
-    if (taskId !== void 0 && snapshot.taskId !== taskId) {
-      add(
-        "CHECK_HISTORY_TASK_MISMATCH",
-        filename,
-        `Line ${lineNumber} belongs to ${snapshot.taskId}, not task ${taskId}.`
-      );
-    }
-    if (taskRevision !== void 0 && snapshot.verificationRevision > taskRevision) {
-      add(
-        "CHECK_HISTORY_REVISION_INVALID",
-        filename,
-        `Line ${lineNumber} uses future verification revision ${snapshot.verificationRevision}; task.json is at ${taskRevision}.`
-      );
-    }
-    const revisionKey = `${snapshot.taskId}:${snapshot.verificationRevision}`;
-    if (operationIds.has(snapshot.operationId)) {
-      add("CHECK_HISTORY_OPERATION_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${snapshot.operationId}.`);
-    } else {
-      operationIds.add(snapshot.operationId);
-    }
-    if (revisions.has(revisionKey)) {
-      add("CHECK_HISTORY_REVISION_DUPLICATE", filename, `Line ${lineNumber} duplicates snapshot ${revisionKey}.`);
-    } else {
-      revisions.add(revisionKey);
-    }
-    validateHistoricalRows(snapshot, declaredIds, filename, lineNumber, add);
-    snapshots.push(snapshot);
-  }
-  return snapshots;
-}
-function validateHistoricalRows(snapshot, declaredIds, filename, lineNumber, add) {
-  const seen = /* @__PURE__ */ new Set();
-  let previousDeclarationIndex = -1;
-  for (const row of snapshot.rows) {
-    const declarationIndex = declaredIds.indexOf(row.requirementId);
-    if (declarationIndex === -1) {
-      add(
-        "CHECK_HISTORY_REQUIREMENT_INVALID",
-        filename,
-        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} references undeclared ID ${row.requirementId}.`
-      );
-      continue;
-    }
-    if (seen.has(row.requirementId)) {
-      add(
-        "CHECK_HISTORY_REQUIREMENT_DUPLICATE",
-        filename,
-        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} duplicates ID ${row.requirementId}.`
-      );
-    }
-    seen.add(row.requirementId);
-    if (declarationIndex <= previousDeclarationIndex) {
-      add(
-        "CHECK_HISTORY_ORDER_INVALID",
-        filename,
-        `Line ${lineNumber} snapshot revision ${snapshot.verificationRevision} is not in declared requirement order.`
-      );
-    }
-    previousDeclarationIndex = declarationIndex;
-  }
-}
-async function validateJournalArtifact(paths, filename, task, taskDirectory, scope, allowsLegacyHistory, checkHistory, add, pendingMutationRecovery) {
-  const contents = await readOptionalRegularFile(paths, filename, "JOURNAL", add);
-  if (contents === null) return;
-  if (contents.trim() === "") {
-    add("JOURNAL_EMPTY", filename, "Task journal must contain its creation event.");
-    return;
-  }
-  const operationIds = /* @__PURE__ */ new Set();
-  let creationCount = 0;
-  let firstEvent = true;
-  let currentStatus = null;
-  let currentVerificationRevision = 0;
-  let replayIsValid = true;
-  let lastTransition = null;
-  let lastValidEventType = null;
-  const pendingMutationIntents = /* @__PURE__ */ new Map();
-  const committedMutationIntents = [];
-  const reworkIntents = /* @__PURE__ */ new Map();
-  const pendingReworkIntents = /* @__PURE__ */ new Map();
-  const matchedReworkCompletionIds = /* @__PURE__ */ new Set();
-  const supersededCheckMutationOperations = /* @__PURE__ */ new Set();
-  const latestLearningMutationOperation = /* @__PURE__ */ new Map();
-  for (const { line, lineNumber } of jsonlLines(contents)) {
-    const value = parseJsonl(line, lineNumber, filename, "JOURNAL_JSONL_INVALID", add);
-    if (value === null) continue;
-    if (isRecord6(value) && !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory)) {
-      add(
-        "JOURNAL_SCHEMA_UNSUPPORTED",
-        filename,
-        `Line ${lineNumber} uses unsupported schema ${String(value.schemaVersion)}.`
-      );
-    }
-    if (!isJournalEvent(value, allowsLegacyHistory)) {
-      add("JOURNAL_EVENT_INVALID", filename, `Line ${lineNumber} is not a valid journal event.`);
-      replayIsValid = false;
-      continue;
-    }
-    lastValidEventType = value.type;
-    if (value.type === "mutation_intent") {
-      const operationId = value.operationId;
-      if (pendingMutationIntents.has(operationId)) {
-        add("MUTATION_INTENT_DUPLICATE", filename, `Line ${lineNumber} duplicates pending mutation intent ${operationId}.`);
-      } else {
-        pendingMutationIntents.set(operationId, value);
-      }
-    } else if (isMutationCompletionEvent(value)) {
-      const operationId = value.operationId;
-      const intent = pendingMutationIntents.get(operationId);
-      if (intent === void 0) {
-        if (!isLegacyMutationCompletion(value)) {
-          add(
-            "MUTATION_COMPLETION_ORPHAN",
-            filename,
-            `Line ${lineNumber} completion ${value.type} with operation ID ${operationId} has no matching mutation intent.`
-          );
-        }
-      } else if (!matchesMutationCompletion(intent, value)) {
-        add("MUTATION_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match mutation intent ${operationId}.`);
-      } else {
-        pendingMutationIntents.delete(operationId);
-        committedMutationIntents.push(intent);
-        if (String(value.type).startsWith("learning_") && typeof value.learningCandidateId === "string") {
-          latestLearningMutationOperation.set(value.learningCandidateId, operationId);
-        }
-      }
-    }
-    if (value.type === "rework_intent") {
-      const operationId = value.operationId;
-      if (reworkIntents.has(operationId)) {
-        add("REWORK_INTENT_DUPLICATE", filename, `Line ${lineNumber} duplicates rework intent ${operationId}.`);
-      } else {
-        reworkIntents.set(operationId, value);
-        pendingReworkIntents.set(operationId, value);
-      }
-    } else if (value.type === "reworked") {
-      const operationId = value.operationId;
-      const intent = pendingReworkIntents.get(operationId);
-      if (intent === void 0) {
-        add(
-          "REWORK_COMPLETION_ORPHAN",
-          filename,
-          `Line ${lineNumber} rework completion ${operationId} has no matching rework intent.`
-        );
-      } else if (!matchesReworkCompletion(intent, value)) {
-        add("REWORK_COMPLETION_MISMATCH", filename, `Line ${lineNumber} does not match rework intent ${operationId}.`);
-      } else {
-        pendingReworkIntents.delete(operationId);
-        matchedReworkCompletionIds.add(operationId);
-        for (const mutation of committedMutationIntents) {
-          if (mutation.mutationKind === "check_upsert") {
-            supersededCheckMutationOperations.add(mutation.operationId);
-          }
-        }
-      }
-    }
-    if (value.type === "created") {
-      creationCount += 1;
-      if (!firstEvent) {
-        add("JOURNAL_CREATION_NOT_FIRST", filename, `Line ${lineNumber} creation event must be the first journal event.`);
-        replayIsValid = false;
-      }
-      if (creationCount === 1) currentStatus = "planning";
-    } else if (creationCount === 0) {
-      add("JOURNAL_EVENT_BEFORE_CREATION", filename, `Line ${lineNumber} occurs before the task creation event.`);
-      replayIsValid = false;
-    } else if (value.type === "transition_intent") {
-      const oldStatus = value.oldStatus;
-      const newStatus = value.newStatus;
-      if (currentStatus === null || oldStatus !== currentStatus) {
-        add(
-          "JOURNAL_STATUS_DISCONTINUITY",
-          filename,
-          `Line ${lineNumber} transition starts at ${oldStatus}, but the prior journal status is ${String(currentStatus)}.`
-        );
-        replayIsValid = false;
-      } else if (!isLegalJournalTransition(oldStatus, newStatus)) {
-        add(
-          "JOURNAL_TRANSITION_INVALID",
-          filename,
-          `Line ${lineNumber} transition from ${oldStatus} to ${newStatus} is not allowed.`
-        );
-        replayIsValid = false;
-      } else {
-        currentStatus = newStatus;
-        lastTransition = { oldStatus, newStatus };
-      }
-    } else if (value.type === "rework_intent") {
-      const sourceRevision = value.sourceVerificationRevision;
-      if (currentStatus !== "checking" || sourceRevision !== currentVerificationRevision) {
-        add(
-          "JOURNAL_REWORK_DISCONTINUITY",
-          filename,
-          `Line ${lineNumber} rework intent targets revision ${sourceRevision} while journal is ${String(currentStatus)} at revision ${currentVerificationRevision}.`
-        );
-        replayIsValid = false;
-      }
-    } else if (value.type === "reworked") {
-      const operationId = value.operationId;
-      const sourceRevision = value.sourceVerificationRevision;
-      if (!matchedReworkCompletionIds.has(operationId) || currentStatus !== "checking" || sourceRevision !== currentVerificationRevision) {
-        add(
-          "JOURNAL_REWORK_DISCONTINUITY",
-          filename,
-          `Line ${lineNumber} cannot complete rework ${operationId} from ${String(currentStatus)} at revision ${currentVerificationRevision}.`
-        );
-        replayIsValid = false;
-      } else {
-        currentStatus = "in_progress";
-        currentVerificationRevision += 1;
-      }
-    } else if (value.type === "continued") {
-      const status = value.status;
-      if (currentStatus === null || status !== currentStatus) {
-        add(
-          "JOURNAL_STATUS_DISCONTINUITY",
-          filename,
-          `Line ${lineNumber} continuation records ${status}, but the prior journal status is ${String(currentStatus)}.`
-        );
-        replayIsValid = false;
-      }
-    }
-    if (typeof value.operationId === "string" && value.type !== "mutation_intent" && value.type !== "rework_intent") {
-      if (operationIds.has(value.operationId)) {
-        add("JOURNAL_OPERATION_ID_DUPLICATE", filename, `Line ${lineNumber} duplicates operation ID ${value.operationId}.`);
-      } else {
-        operationIds.add(value.operationId);
-      }
-    }
-    firstEvent = false;
-  }
-  if (creationCount === 0) {
-    add("JOURNAL_CREATION_MISSING", filename, "Task journal is missing its creation event.");
-  } else if (creationCount > 1) {
-    add("JOURNAL_CREATION_DUPLICATE", filename, "Task journal contains multiple creation events.");
-    replayIsValid = false;
-  }
-  if (replayIsValid && creationCount === 1 && currentStatus !== null && task !== null && isTaskStatus(task.status) && task.status !== currentStatus && (lastValidEventType !== "transition_intent" || lastTransition === null || task.status !== lastTransition.oldStatus)) {
-    add(
-      "JOURNAL_TASK_STATUS_MISMATCH",
-      filename,
-      `Journal resolves to ${currentStatus}, but task.json records ${task.status}.`
-    );
-  }
-  if (replayIsValid && creationCount === 1 && task !== null && isNonNegativeSafeInteger(task.verificationRevision) && task.verificationRevision !== currentVerificationRevision) {
-    add(
-      "JOURNAL_TASK_REVISION_MISMATCH",
-      filename,
-      `Journal resolves to verification revision ${currentVerificationRevision}, but task.json records ${task.verificationRevision}.`
-    );
-  }
-  for (const intent of pendingReworkIntents.values()) {
-    add(
-      "REWORK_INTENT_UNCOMMITTED",
-      filename,
-      `Rework intent ${String(intent.operationId)} has no matching completion event; run \`vinea task rework\` to recover it.`
-    );
-  }
-  const historyByOperation = new Map(checkHistory.map((snapshot) => [snapshot.operationId, snapshot]));
-  for (const [operationId, intent] of reworkIntents) {
-    const snapshot = historyByOperation.get(operationId);
-    if (snapshot === void 0 || stableJson(snapshot) !== stableJson(intent.snapshot)) {
-      add(
-        "REWORK_HISTORY_MISMATCH",
-        filename,
-        `Rework ${operationId} does not have the exact check-history snapshot recorded in its intent.`
-      );
-    }
-  }
-  for (const snapshot of checkHistory) {
-    const intent = reworkIntents.get(snapshot.operationId);
-    if (intent === void 0 || stableJson(intent.snapshot) !== stableJson(snapshot)) {
-      add(
-        "CHECK_HISTORY_ORPHAN",
-        filename,
-        `Check-history snapshot ${snapshot.operationId} has no matching rework intent.`
-      );
-    }
-  }
-  const mutationOwner = mutationTargetOwnerForValidation(taskDirectory, scope, task);
-  for (const intent of pendingMutationIntents.values()) {
-    if (!isExpectedPendingMutationRecovery(intent, pendingMutationRecovery)) {
-      add(
-        "MUTATION_INTENT_UNCOMMITTED",
-        filename,
-        `Mutation intent ${String(intent.operationId)} for ${String(intent.mutationKind)} has no matching completion event.`
-      );
-    }
-    const expected = intent.expected;
-    if (!isMutationTargetSummary(expected) || !mutationTargetsAreOwned(
-      paths,
-      mutationOwner,
-      String(intent.mutationKind),
-      expected
-    )) {
-      add(
-        "MUTATION_TARGET_MISMATCH",
-        filename,
-        `Pending mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} has targets outside its exact managed ownership.`
-      );
-    }
-  }
-  const pendingTargetFiles = /* @__PURE__ */ new Set();
-  for (const intent of pendingMutationIntents.values()) {
-    const expected = intent.expected;
-    if (!isMutationTargetSummary(expected)) continue;
-    const identity = expected.identity;
-    if (String(intent.mutationKind).startsWith("learning_") && typeof identity.learningCandidateId === "string") {
-      latestLearningMutationOperation.set(identity.learningCandidateId, intent.operationId);
-    }
-    for (const target of expected.files) {
-      pendingTargetFiles.add(target.path);
-    }
-  }
-  const latestIntentByFile = /* @__PURE__ */ new Map();
-  const latestIntentBySemanticIdentity = /* @__PURE__ */ new Map();
-  for (const intent of committedMutationIntents) {
-    if (intent.mutationKind === "check_upsert" && supersededCheckMutationOperations.has(intent.operationId)) {
-      continue;
-    }
-    latestIntentBySemanticIdentity.set(mutationSemanticIdentityKey(intent), intent);
-    const expected = intent.expected;
-    if (!isMutationTargetSummary(expected)) continue;
-    for (const target of expected.files) {
-      const path = target.path;
-      if (!path.endsWith("/task.json") && intent.mutationKind !== "learning_accepted") {
-        latestIntentByFile.set(path, intent);
-      }
-    }
-  }
-  for (const intent of latestIntentBySemanticIdentity.values()) {
-    if (isSupersededLearningMutation(intent, latestLearningMutationOperation)) continue;
-    if (!semanticMutationTargetMatches(task, intent)) {
-      add(
-        "MUTATION_TARGET_MISMATCH",
-        filename,
-        `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its expected managed target identity.`
-      );
-    } else if (intent.mutationKind === "learning_accepted" && !await acceptedLearningTargetsMatch(paths, task, mutationOwner, intent, add)) {
-      add(
-        "MUTATION_TARGET_MISMATCH",
-        filename,
-        `Completed learning acceptance ${String(intent.operationId)} no longer matches its candidate-domain spec or index target.`
-      );
-    }
-  }
-  for (const [path, intent] of latestIntentByFile) {
-    if (pendingTargetFiles.has(path)) continue;
-    if (!await mutationFilesMatch(
-      paths,
-      mutationOwner,
-      String(intent.mutationKind),
-      intent.expected,
-      add
-    )) {
-      add(
-        "MUTATION_TARGET_MISMATCH",
-        filename,
-        `Completed mutation ${String(intent.operationId)} for ${String(intent.mutationKind)} does not match its latest expected managed files.`
-      );
-    }
-  }
-}
-function isSupersededLearningMutation(intent, latestLearningMutationOperation) {
-  const expected = intent.expected;
-  if (!isMutationTargetSummary(expected) || !String(intent.mutationKind).startsWith("learning_")) return false;
-  const id = expected.identity.learningCandidateId;
-  return typeof id === "string" && latestLearningMutationOperation.get(id) !== intent.operationId;
-}
-function mutationSemanticIdentityKey(intent) {
-  const expected = intent.expected;
-  if (!isMutationTargetSummary(expected)) return `operation:${String(intent.operationId)}`;
-  const identity = expected.identity;
-  const mutationKind = String(intent.mutationKind);
-  if (mutationKind.startsWith("learning_") && typeof identity.learningCandidateId === "string") {
-    return `learning:${identity.learningCandidateId}`;
-  }
-  if (typeof identity.requirementId === "string") {
-    return `${mutationKind}:${identity.requirementId}`;
-  }
-  return `operation:${String(intent.operationId)}`;
-}
-async function mutationFilesMatch(paths, owner, mutationKind, expected, add) {
-  if (!isMutationTargetSummary(expected)) return false;
-  if (!mutationTargetsAreOwned(paths, owner, mutationKind, expected)) {
-    return false;
-  }
-  for (const target of expected.files) {
-    const path = target.path;
-    const filename = resolveMutationTargetFilename(paths, owner, path);
-    if (path.endsWith("/task.json")) continue;
-    const contents = await readManagedBytes(paths, filename, add);
-    if (contents === null || createHash("sha256").update(contents).digest("hex") !== target.sha256) return false;
-  }
-  return true;
-}
-function resolveMutationTargetFilename(paths, owner, target) {
-  const taskPrefix = relative3(paths.repoRoot, owner.directory).split("\\").join("/");
-  if (target.startsWith(`${taskPrefix}/`)) return join6(owner.directory, target.slice(taskPrefix.length + 1));
-  const historicPrefix = `.vinea/tasks/active/${owner.taskId}`;
-  if (owner.scope === "archive" && target.startsWith(`${historicPrefix}/`)) {
-    return join6(owner.directory, target.slice(historicPrefix.length + 1));
-  }
-  return resolve2(paths.repoRoot, target);
-}
-function mutationTargetOwnerForValidation(directory, scope, task) {
-  const learningCandidateDomains = {};
-  if (Array.isArray(task?.learningCandidates)) {
-    for (const candidate of task.learningCandidates) {
-      if (isRecord6(candidate) && typeof candidate.id === "string" && typeof candidate.domain === "string") {
-        learningCandidateDomains[candidate.id] = candidate.domain;
-      }
-    }
-  }
-  return {
-    directory,
-    scope,
-    taskId: typeof task?.id === "string" ? task.id : "",
-    learningCandidateDomains
-  };
-}
-function semanticMutationTargetMatches(task, intent) {
-  const expected = intent.expected;
-  if (task === null || !isMutationTargetSummary(expected)) return false;
-  const identity = expected.identity;
-  const mutationKind = intent.mutationKind;
-  if (mutationKind === "requirement_added" || mutationKind === "acceptance_criterion_added") {
-    const collection = mutationKind === "requirement_added" ? task.requirements : task.acceptanceCriteria;
-    const requirement = Array.isArray(collection) ? collection.find((item) => isRecord6(item) && item.id === identity.requirementId) : void 0;
-    return requirement !== void 0 && mutationIdentityValueMatches(requirement, identity);
-  }
-  if (mutationKind === "learning_proposed") {
-    return hasLearningCandidate(task, identity, "proposed");
-  }
-  if (mutationKind === "learning_archived") {
-    return hasLearningCandidate(task, identity, "archived");
-  }
-  if (mutationKind === "learning_accepted") {
-    return hasLearningCandidate(task, identity, "accepted");
-  }
-  return true;
-}
-function hasLearningCandidate(task, identity, status) {
-  if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return false;
-  const candidate = task.learningCandidates.find((item) => isRecord6(item) && item.id === identity.learningCandidateId && item.status === status);
-  return candidate !== void 0 && mutationIdentityValueMatches(candidate, identity);
-}
-async function acceptedLearningTargetsMatch(paths, task, owner, intent, add) {
-  const expected = intent.expected;
-  if (task === null || !isMutationTargetSummary(expected) || !mutationTargetsAreOwned(
-    paths,
-    owner,
-    "learning_accepted",
-    expected
-  )) {
-    return false;
-  }
-  const identity = expected.identity;
-  const candidate = acceptedLearningCandidate(task, identity);
-  if (candidate === null) return false;
-  const normalizedRule = candidate.text.trim().replace(/\s+/gu, " ");
-  const rule = `- ${candidate.acceptedAt.slice(0, 10)}: ${normalizedRule}`;
-  const specPath = join6(paths.specs, `${candidate.domain}.md`);
-  const [specContents, indexContents] = await Promise.all([
-    readManagedBytes(paths, specPath, add),
-    readManagedBytes(paths, paths.specIndex, add)
-  ]);
-  if (specContents === null || indexContents === null) return false;
-  const spec = specContents.toString("utf8");
-  const index = indexContents.toString("utf8");
-  if (!spec.split(/\r?\n/u).some((line) => line === rule)) return false;
-  return index.split(/\r?\n/u).some((line) => {
-    const target = parseSpecIndexTarget(line);
-    return target !== void 0 && normalizeSpecTarget(target) === `${candidate.domain}.md`;
-  });
-}
-function acceptedLearningCandidate(task, identity) {
-  if (typeof identity.learningCandidateId !== "string" || !Array.isArray(task.learningCandidates)) return null;
-  const candidate = task.learningCandidates.find((item) => isRecord6(item) && item.id === identity.learningCandidateId && item.status === "accepted" && item.confirmedBy === "user" && typeof item.domain === "string" && typeof item.text === "string" && isIsoTimestamp3(item.acceptedAt));
-  if (candidate === void 0 || !mutationIdentityValueMatches(candidate, identity)) return null;
-  const domain = candidate.domain;
-  const text = candidate.text;
-  const acceptedAt = candidate.acceptedAt;
-  if (text.trim() === "" || !MANAGED_SPEC_TARGET.test(`${domain}.md`)) return null;
-  return { domain, text, acceptedAt };
-}
-function mutationIdentityValueMatches(value, identity) {
-  if (identity.valueSha256 === void 0) return true;
-  return typeof identity.valueSha256 === "string" && /^[a-f0-9]{64}$/u.test(identity.valueSha256) && createHash("sha256").update(stableJson(value)).digest("hex") === identity.valueSha256;
-}
-async function validateCheckArtifact(paths, filename, task, evidence, add) {
-  const contents = await readOptionalRegularFile(paths, filename, "CHECK", add);
-  if (contents === null || contents === "") return;
-  const declaredIds = task === null ? [] : taskRequirementIds(task);
-  const expectedRevision = task !== null && task.schemaVersion === SCHEMA_VERSION && isNonNegativeSafeInteger(task.verificationRevision) ? task.verificationRevision : void 0;
-  try {
-    parseCheckDocument(contents, paths.repoRoot, declaredIds, evidence, filename, expectedRevision);
-  } catch {
-    add(
-      "CHECK_PAYLOAD_INVALID",
-      filename,
-      "Check document must match a valid authoritative payload, declared requirements, evidence, and rendered table."
-    );
-  }
-}
-async function validateSessionBindings(paths, activeTaskIds, add) {
-  const runtimeKind = await managedEntryKind(paths, paths.runtime, add);
-  if (runtimeKind === "unsafe") return;
-  if (runtimeKind === "missing") return;
-  if (runtimeKind !== "directory") {
-    add("RUNTIME_INVALID", paths.runtime, "Runtime state must be a regular directory.");
-    return;
-  }
-  const sessionsKind = await managedEntryKind(paths, paths.sessions, add);
-  if (sessionsKind === "unsafe") return;
-  if (sessionsKind === "missing") return;
-  if (sessionsKind !== "directory") {
-    add("RUNTIME_INVALID", paths.sessions, "Session binding storage must be a regular directory.");
-    return;
-  }
-  const entries = await readManagedDirectory(
-    paths,
-    paths.sessions,
-    add,
-    "RUNTIME_UNREADABLE",
-    "Unable to list session bindings"
-  );
-  if (entries === null) return;
-  for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
-    const filename = join6(paths.sessions, entry.name);
-    const validFilename = isValidSessionBindingFilename(entry.name);
-    if (!validFilename) {
-      add(
-        "SESSION_FILENAME_INVALID",
-        filename,
-        "Session bindings must use <codex|claude>-sid-<lowercase UTF-8 hex>.json filenames."
-      );
-    }
-    if (!entry.isFile() || entry.isSymbolicLink()) {
-      add("SESSION_BINDING_INVALID", filename, "Session bindings must be regular files.");
-      continue;
-    }
-    if (!validFilename) continue;
-    const value = await readJsonObject(paths, filename, "SESSION_BINDING", add);
-    if (value === null) continue;
-    if (value.schemaVersion !== SCHEMA_VERSION) {
-      add(
-        "SESSION_SCHEMA_UNSUPPORTED",
-        filename,
-        `Session binding schema ${String(value.schemaVersion)} is unsupported.`
-      );
-    }
-    if (!isSessionBindingShape(value)) {
-      add("SESSION_BINDING_INVALID", filename, "Session binding record is malformed.");
-      continue;
-    }
-    if (!activeTaskIds.has(value.taskId)) {
-      add(
-        "SESSION_BINDING_STALE",
-        filename,
-        `Session binding points to non-active task ${String(value.taskId)}.`
-      );
-    }
-  }
-}
-async function readJsonObject(paths, filename, prefix, add) {
-  const contents = await readRequiredRegularFile(paths, filename, prefix, add);
-  if (contents === null) return null;
-  let value;
-  try {
-    value = JSON.parse(contents);
-  } catch {
-    add(`${prefix}_JSON_INVALID`, filename, "File does not contain valid JSON.");
-    return null;
-  }
-  if (!isRecord6(value)) {
-    add(`${prefix}_INVALID`, filename, "File must contain a JSON object.");
-    return null;
-  }
-  return value;
-}
-async function readRequiredRegularFile(paths, filename, prefix, add) {
-  const kind = await managedEntryKind(paths, filename, add);
-  if (kind === "unsafe") return null;
-  if (kind === "missing") {
-    add(`${prefix}_MISSING`, filename, "Required file is missing.");
-    return null;
-  }
-  if (kind !== "file") {
-    add(`${prefix}_INVALID`, filename, "Expected a regular file and not a symbolic link.");
-    return null;
-  }
-  if (!await validateManagedPathSafety(paths, filename, add)) return null;
-  try {
-    const contents = await readFile5(filename, "utf8");
-    if (!await validateManagedPathSafety(paths, filename, add)) return null;
-    return contents;
-  } catch (error) {
-    add(`${prefix}_UNREADABLE`, filename, describeError("Unable to read file", error));
-    return null;
-  }
-}
-async function readOptionalRegularFile(paths, filename, prefix, add) {
-  const kind = await managedEntryKind(paths, filename, add);
-  if (kind === "unsafe" || kind === "missing") return null;
-  if (kind !== "file") {
-    add(`${prefix}_INVALID`, filename, "Expected a regular file and not a symbolic link.");
-    return null;
-  }
-  if (!await validateManagedPathSafety(paths, filename, add)) return null;
-  try {
-    const contents = await readFile5(filename, "utf8");
-    if (!await validateManagedPathSafety(paths, filename, add)) return null;
-    return contents;
-  } catch (error) {
-    add(`${prefix}_UNREADABLE`, filename, describeError("Unable to read file", error));
-    return null;
-  }
-}
-function parseJsonl(line, lineNumber, filename, code, add) {
-  try {
-    return JSON.parse(line);
-  } catch {
-    add(code, filename, `Line ${lineNumber} is not valid JSON.`);
-    return null;
-  }
-}
-function jsonlLines(contents) {
-  return contents.split("\n").map((line, index) => ({ line, lineNumber: index + 1 })).filter(({ line }) => line.trim() !== "");
-}
-function isTaskRecordShape(value) {
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN2.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ALL_STATUSES.has(String(value.status)) && isRecord6(value.risk) && ["low", "medium", "high"].includes(String(value.risk.level)) && isStringArray(value.risk.reasons) && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && isNonNegativeSafeInteger(value.verificationRevision) && Array.isArray(value.requirements) && value.requirements.every(isRequirement) && Array.isArray(value.acceptanceCriteria) && value.acceptanceCriteria.every(isRequirement) && isLearningCandidates(value.learningCandidates) && isCommitMetadata(value.commit) && isIsoTimestamp3(value.createdAt) && isIsoTimestamp3(value.updatedAt);
-}
-function validateTaskRequirementIds(task, filename, add) {
-  const seen = /* @__PURE__ */ new Set();
-  for (const id of taskRequirementIds(task)) {
-    if (seen.has(id)) {
-      add("TASK_REQUIREMENT_ID_DUPLICATE", filename, `Task declares duplicate requirement or acceptance ID ${id}.`);
-    } else {
-      seen.add(id);
-    }
-  }
-}
-function taskRequirementIds(task) {
-  return [task.requirements, task.acceptanceCriteria].flatMap((collection) => Array.isArray(collection) ? collection : []).flatMap((requirement) => isRecord6(requirement) && typeof requirement.id === "string" ? [requirement.id] : []);
-}
-function isLegalJournalTransition(oldStatus, newStatus) {
-  if (oldStatus === newStatus) return false;
-  if (oldStatus === "blocked") return UNBLOCK_TARGETS.has(newStatus);
-  return BLOCKABLE_STATUSES.has(oldStatus) && newStatus === "blocked" || FORWARD_TRANSITIONS[oldStatus] === newStatus;
-}
-function isTaskStatus(value) {
-  return typeof value === "string" && ALL_STATUSES.has(value);
-}
-function isJournalEvent(value, allowsLegacyHistory = false) {
-  if (!isRecord6(value) || !isSupportedHistorySchema(value.schemaVersion, allowsLegacyHistory) || !isIsoTimestamp3(value.timestamp) || !isNonemptyString(value.actor) || typeof value.type !== "string") {
-    return false;
-  }
-  if (value.type === "created") {
-    return hasOnlyKeys(value, ["schemaVersion", "type", "timestamp", "actor", "confirmation", "status"]) && value.confirmation === "user" && value.status === "planning";
-  }
-  if (value.type === "transition_intent") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "operationId",
-      "timestamp",
-      "actor",
-      "reason",
-      "oldStatus",
-      "newStatus"
-    ]) && isNonemptyString(value.operationId) && isNonemptyString(value.reason) && ALL_STATUSES.has(String(value.oldStatus)) && ALL_STATUSES.has(String(value.newStatus));
-  }
-  if (value.type === "mutation_intent") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "operationId",
-      "timestamp",
-      "actor",
-      "mutationKind",
-      "fingerprint",
-      "expected",
-      "completion"
-    ]) && isNonemptyString(value.operationId) && isMutationKind(value.mutationKind) && /^[a-f0-9]{64}$/u.test(String(value.fingerprint)) && isMutationTargetSummary(value.expected) && isMutationCompletion(value.completion, value.operationId, value.mutationKind);
-  }
-  if (value.type === "rework_intent") {
-    return value.schemaVersion === SCHEMA_VERSION && hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "operationId",
-      "timestamp",
-      "actor",
-      "reason",
-      "sourceVerificationRevision",
-      "snapshot"
-    ]) && isNonemptyString(value.operationId) && isNonemptyString(value.reason) && isNonNegativeSafeInteger(value.sourceVerificationRevision) && isCheckHistorySnapshot(value.snapshot) && value.snapshot.verificationRevision === value.sourceVerificationRevision && value.snapshot.operationId === value.operationId && value.snapshot.reworkReason === value.reason;
-  }
-  if (value.type === "reworked") {
-    return value.schemaVersion === SCHEMA_VERSION && hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "operationId",
-      "timestamp",
-      "actor",
-      "reason",
-      "sourceVerificationRevision",
-      "verificationRevision",
-      "status"
-    ]) && isNonemptyString(value.operationId) && isNonemptyString(value.reason) && isNonNegativeSafeInteger(value.sourceVerificationRevision) && isNonNegativeSafeInteger(value.verificationRevision) && value.verificationRevision === value.sourceVerificationRevision + 1 && value.status === "in_progress";
-  }
-  if (value.type === "continued") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "timestamp",
-      "actor",
-      "confirmation",
-      "host",
-      "sessionBound",
-      "started",
-      "status"
-    ]) && value.confirmation === "user" && (value.host === "codex" || value.host === "claude") && typeof value.sessionBound === "boolean" && typeof value.started === "boolean" && ALL_STATUSES.has(String(value.status));
-  }
-  if (value.type === "check_recorded" || value.type === "check_updated") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "mutationKind",
-      "mutationProtocolVersion",
-      "operationId",
-      "timestamp",
-      "actor",
-      "requirementId",
-      "result"
-    ]) && isNonemptyString(value.operationId) && (value.mutationKind === void 0 || value.mutationKind === value.type) && (value.mutationProtocolVersion === void 0 || value.mutationProtocolVersion === 1) && isNonemptyString(value.requirementId) && ["pass", "fail", "uncovered"].includes(String(value.result));
-  }
-  if (!TASK_MUTATION_KINDS.has(value.type)) return false;
-  if (value.mutationKind !== void 0 && value.mutationKind !== value.type || value.mutationProtocolVersion !== void 0 && value.mutationProtocolVersion !== 1 || !isNonemptyString(value.operationId)) {
-    return false;
-  }
-  if (value.type === "requirement_added" || value.type === "acceptance_criterion_added") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "mutationKind",
-      "mutationProtocolVersion",
-      "operationId",
-      "timestamp",
-      "actor",
-      "requirementId"
-    ]) && isNonemptyString(value.requirementId);
-  }
-  if (value.type === "brief_set") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "mutationKind",
-      "mutationProtocolVersion",
-      "operationId",
-      "timestamp",
-      "actor",
-      "artifact"
-    ]) && value.artifact === "brief.md";
-  }
-  if (value.type === "plan_set") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "mutationKind",
-      "mutationProtocolVersion",
-      "operationId",
-      "timestamp",
-      "actor",
-      "artifact"
-    ]) && value.artifact === "plan.md";
-  }
-  if (value.type === "context_added") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "mutationKind",
-      "mutationProtocolVersion",
-      "operationId",
-      "timestamp",
-      "actor",
-      "path"
-    ]) && isNonemptyString(value.path);
-  }
-  if (value.type === "evidence_recorded") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "mutationKind",
-      "mutationProtocolVersion",
-      "operationId",
-      "timestamp",
-      "actor",
-      "evidenceId",
-      "evidenceKind"
-    ]) && isNonemptyString(value.evidenceId) && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.evidenceKind));
-  }
-  if (value.type === "learning_accepted") {
-    return hasOnlyKeys(value, [
-      "schemaVersion",
-      "type",
-      "mutationKind",
-      "mutationProtocolVersion",
-      "operationId",
-      "timestamp",
-      "actor",
-      "learningCandidateId",
-      "confirmedBy"
-    ]) && isNonemptyString(value.learningCandidateId) && value.confirmedBy === "user";
-  }
-  return hasOnlyKeys(value, [
-    "schemaVersion",
-    "type",
-    "mutationKind",
-    "mutationProtocolVersion",
-    "operationId",
-    "timestamp",
-    "actor",
-    "learningCandidateId"
-  ]) && isNonemptyString(value.learningCandidateId);
-}
-function isMutationCompletionEvent(value) {
-  return typeof value.type === "string" && (value.type === "check_recorded" || value.type === "check_updated" || TASK_MUTATION_KINDS.has(value.type));
-}
-function matchesReworkCompletion(intent, completion) {
-  return intent.type === "rework_intent" && completion.type === "reworked" && completion.operationId === intent.operationId && completion.timestamp === intent.timestamp && completion.actor === intent.actor && completion.reason === intent.reason && completion.sourceVerificationRevision === intent.sourceVerificationRevision && typeof intent.sourceVerificationRevision === "number" && completion.verificationRevision === intent.sourceVerificationRevision + 1 && completion.status === "in_progress";
-}
-function isCheckHistorySnapshot(value) {
-  if (!isRecord6(value) || !hasOnlyKeys(value, [
-    "schemaVersion",
-    "taskId",
-    "verificationRevision",
-    "archivedAt",
-    "reworkReason",
-    "operationId",
-    "rows"
-  ]) || value.schemaVersion !== SCHEMA_VERSION || !isNonemptyString(value.taskId) || !isNonNegativeSafeInteger(value.verificationRevision) || !isIsoTimestamp3(value.archivedAt) || !isNonemptyString(value.reworkReason) || !isNonemptyString(value.operationId) || !Array.isArray(value.rows)) {
-    return false;
-  }
-  const verificationRevision = value.verificationRevision;
-  return value.rows.every((row) => isHistoricalCheckRow(row, verificationRevision));
-}
-function isHistoricalCheckRow(value, verificationRevision) {
-  return isRecord6(value) && hasOnlyKeys(value, [
-    "schemaVersion",
-    "verificationRevision",
-    "requirementId",
-    "planItem",
-    "paths",
-    "evidenceIds",
-    "result",
-    "summary",
-    "checkedAt"
-  ]) && value.schemaVersion === SCHEMA_VERSION && value.verificationRevision === verificationRevision && isNonemptyString(value.requirementId) && isNonemptyString(value.planItem) && Array.isArray(value.paths) && value.paths.length > 0 && value.paths.every((path) => typeof path === "string" && normalizeRepositoryPath(path) === path) && new Set(value.paths).size === value.paths.length && Array.isArray(value.evidenceIds) && value.evidenceIds.every(isNonemptyString) && new Set(value.evidenceIds).size === value.evidenceIds.length && (value.result === "pass" || value.result === "fail" || value.result === "uncovered") && isNonemptyString(value.summary) && isIsoTimestamp3(value.checkedAt);
-}
-function isExpectedPendingMutationRecovery(intent, recovery) {
-  return recovery !== void 0 && intent.operationId === recovery.operationId && intent.mutationKind === recovery.mutationKind;
-}
-function isLegacyMutationCompletion(value) {
-  return isMutationCompletionEvent(value) && value.mutationProtocolVersion === void 0;
-}
-function isMutationKind(value) {
-  return typeof value === "string" && (TASK_MUTATION_KINDS.has(value) || value === "check_upsert");
-}
-function isMutationTargetSummary(value) {
-  if (!isRecord6(value) || !hasOnlyKeys(value, ["identity", "files"]) || !isRecord6(value.identity) || !Array.isArray(value.files)) {
-    return false;
-  }
-  if (Object.values(value.identity).some((item) => typeof item !== "string" || item.trim() === "")) return false;
-  const paths = /* @__PURE__ */ new Set();
-  return value.files.length > 0 && value.files.every((target) => {
-    if (!isRecord6(target) || !hasOnlyKeys(target, ["path", "sha256"]) || !isNonemptyString(target.path) || !/^[a-f0-9]{64}$/u.test(String(target.sha256)) || paths.has(target.path)) {
-      return false;
-    }
-    paths.add(target.path);
-    return true;
-  });
-}
-function isMutationCompletion(value, operationId, _mutationKind) {
-  if (!isRecord6(value)) return false;
-  return isJournalEvent({ ...value, operationId }) && value.operationId === void 0;
-}
-function matchesMutationCompletion(intent, completion) {
-  const expected = intent.completion;
-  if (!isRecord6(expected)) return false;
-  const actual = { ...completion };
-  delete actual.operationId;
-  return stableJson(expected) === stableJson(actual);
-}
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (isRecord6(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-function hasOnlyKeys(value, allowed) {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-function isNonemptyString(value) {
-  return typeof value === "string" && value.trim() !== "";
-}
-function isSupportedHistorySchema(value, allowsLegacyHistory) {
-  return value === SCHEMA_VERSION || allowsLegacyHistory && value === LEGACY_SCHEMA_VERSION;
-}
-function isSessionBindingShape(value) {
-  return Object.keys(value).every((key) => ["schemaVersion", "taskId", "boundAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.taskId === "string" && TASK_ID_PATTERN2.test(value.taskId) && isIsoTimestamp3(value.boundAt);
-}
-function isRequirement(value) {
-  return isRecord6(value) && Object.keys(value).every((key) => ["schemaVersion", "id", "text", "createdAt"].includes(key)) && value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp3(value.createdAt);
-}
-function isLearningCandidates(value) {
-  if (value === void 0) return true;
-  if (!Array.isArray(value)) return false;
-  const ids = /* @__PURE__ */ new Set();
-  for (const candidate of value) {
-    if (!isRecord6(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp3(candidate.proposedAt)) {
-      return false;
-    }
-    ids.add(candidate.id);
-    if (candidate.status === "proposed") continue;
-    if (candidate.status === "accepted" && candidate.confirmedBy === "user" && isIsoTimestamp3(candidate.acceptedAt)) {
-      continue;
-    }
-    if (candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp3(candidate.archivedAt)) {
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-function isCommitMetadata(value) {
-  if (value === null) return true;
-  return isRecord6(value) && Object.keys(value).every((key) => ["sha", "message"].includes(key)) && typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
-}
-function isValidSessionBindingFilename(filename) {
-  const match = /^(?:codex|claude)-sid-([0-9a-f]+)\.json$/.exec(filename);
-  if (match === null) return false;
-  const hex = match[1];
-  if (hex.length === 0 || hex.length % 2 !== 0 || hex.length > 238) return false;
-  const bytes = Buffer.from(hex, "hex");
-  let sessionId;
-  try {
-    sessionId = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return false;
-  }
-  return sessionId !== "" && sessionId !== "." && sessionId !== ".." && !sessionId.includes("/") && !sessionId.includes("\\") && !sessionId.includes("\0") && Buffer.from(sessionId, "utf8").toString("hex") === hex;
-}
-function normalizeRepositoryPath(input) {
-  const value = input.trim();
-  if (value === "" || isAbsolute2(value) || /^[a-zA-Z]:[/\\]/.test(value) || value.startsWith("\\")) {
-    return null;
-  }
-  const segments = value.split(/[/\\]/);
-  if (segments.includes("..")) return null;
-  const normalized = segments.filter((segment) => segment !== "" && segment !== ".").join("/");
-  if (normalized === "" || normalized === ".vinea/.runtime" || normalized.startsWith(".vinea/.runtime/")) {
-    return null;
-  }
-  return normalized;
-}
-async function entryKind(path) {
-  try {
-    const entry = await lstat8(path);
-    if (entry.isSymbolicLink()) return "symlink";
-    if (entry.isFile()) return "file";
-    if (entry.isDirectory()) return "directory";
-    return "other";
-  } catch (error) {
-    if (isErrorCode(error, "ENOENT")) return "missing";
-    return "other";
-  }
-}
-function displayPath(paths, filename) {
-  const value = relative3(paths.repoRoot, filename).split("\\").join("/");
-  return value === "" ? "." : value;
-}
-function sortIssues(issues) {
-  return issues.sort(
-    (left, right) => compareText(left.path, right.path) || compareText(left.code, right.code) || compareText(left.message, right.message)
-  );
-}
-function compareText(left, right) {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-function isRecord6(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isStringArray(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-function isNonNegativeSafeInteger(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-function isIsoTimestamp3(value) {
-  if (typeof value !== "string") return false;
-  const parsed = new Date(value);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
-}
-function isErrorCode(error, code) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-function describeError(prefix, error) {
-  return `${prefix}: ${error instanceof Error ? error.message : "unknown error"}.`;
-}
-var REQUIRED_TASK_ARTIFACTS, TASK_ID_PATTERN2, ACTIVE_STATUSES, ALL_STATUSES, FORWARD_TRANSITIONS, BLOCKABLE_STATUSES, UNBLOCK_TARGETS, TASK_MUTATION_KINDS, RUNTIME_IGNORE2, MANAGED_SPEC_TARGET;
-var init_validate = __esm({
-  "src/core/validate.ts"() {
-    "use strict";
-    init_check();
-    init_evidence();
-    init_learning();
-    init_migration_state();
-    init_paths();
-    init_task_store();
-    init_task_locks();
-    init_types();
-    REQUIRED_TASK_ARTIFACTS = [
-      "brief.md",
-      "plan.md",
-      "context.jsonl",
-      "evidence.jsonl",
-      "check.md",
-      "check-history.jsonl",
-      "journal.md"
-    ];
-    TASK_ID_PATTERN2 = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    ACTIVE_STATUSES = /* @__PURE__ */ new Set(["planning", "ready", "in_progress", "checking", "finished", "blocked"]);
-    ALL_STATUSES = /* @__PURE__ */ new Set([...ACTIVE_STATUSES, "archived"]);
-    FORWARD_TRANSITIONS = {
-      planning: "ready",
-      ready: "in_progress",
-      in_progress: "checking",
-      checking: "finished",
-      finished: "archived"
-    };
-    BLOCKABLE_STATUSES = /* @__PURE__ */ new Set(["planning", "ready", "in_progress", "checking"]);
-    UNBLOCK_TARGETS = /* @__PURE__ */ new Set(["ready", "in_progress", "checking"]);
-    TASK_MUTATION_KINDS = /* @__PURE__ */ new Set([
-      "requirement_added",
-      "acceptance_criterion_added",
-      "brief_set",
-      "plan_set",
-      "context_added",
-      "evidence_recorded",
-      "learning_proposed",
-      "learning_accepted",
-      "learning_archived"
-    ]);
-    RUNTIME_IGNORE2 = ".runtime/\n";
-    MANAGED_SPEC_TARGET = /^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
-  }
-});
-
-// src/core/task-store.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
-import { lstat as lstat9, mkdir as mkdir3, readFile as readFile6, readdir as readdir3, rename as rename2, rmdir as rmdir2, rm, unlink as unlink2, writeFile as writeFile4 } from "node:fs/promises";
-import { basename as basename4, dirname as dirname3, join as join7, relative as relative4, resolve as resolve3 } from "node:path";
-function assertTaskMutable(location) {
-  if (location.scope === "archive" || location.task.status === "finished" || location.task.status === "archived") {
-    throw new ValidationError(`Task is terminal and cannot be mutated: ${location.task.id}`);
-  }
-}
-async function createTaskArtifacts(paths, task, creationEvent) {
-  const directory = join7(paths.activeTasks, task.id);
-  const archivedDirectory = join7(paths.archivedTasks, task.id);
-  await Promise.all([
-    assertNoSymlink(paths.repoRoot, directory),
-    assertNoSymlink(paths.repoRoot, archivedDirectory)
-  ]);
-  if (await pathExists(archivedDirectory)) {
-    throw new ValidationError(`Task path already exists for generated ID ${task.id}.`);
-  }
-  try {
-    await mkdir3(directory);
-  } catch (error) {
-    if (isCode2(error, "EEXIST")) {
-      throw new ValidationError(`Task path already exists for generated ID ${task.id}.`);
-    }
-    throw new SchemaError(`Unable to create task directory ${directory}`, error);
-  }
-  let archivedCollisionAfterCreate;
-  try {
-    archivedCollisionAfterCreate = await pathExists(archivedDirectory);
-  } catch (error) {
-    await rm(directory, { recursive: true, force: true });
-    throw new SchemaError(`Unable to verify archived task collision for ${task.id}`, error);
-  }
-  if (archivedCollisionAfterCreate) {
-    await rm(directory, { recursive: true, force: true });
-    throw new ValidationError(`Task path already exists for generated ID ${task.id}.`);
-  }
-  const writes = await Promise.allSettled([
-    writeFile4(join7(directory, "task.json"), `${JSON.stringify(task, null, 2)}
-`, { encoding: "utf8", flag: "wx" }),
-    ...ARTIFACTS.filter((artifact) => artifact !== "journal.md").map(
-      (artifact) => writeFile4(join7(directory, artifact), "", { encoding: "utf8", flag: "wx" })
-    ),
-    writeFile4(join7(directory, "journal.md"), `${JSON.stringify(creationEvent)}
-`, { encoding: "utf8", flag: "wx" })
-  ]);
-  const failed = writes.find((result) => result.status === "rejected");
-  if (failed) {
-    await rm(directory, { recursive: true, force: true });
-    throw new SchemaError(`Unable to create task artifacts for ${task.id}`, failed.reason);
-  }
-  return { task, directory, scope: "active" };
-}
-async function findTask(paths, taskId, options = {}) {
-  if (!TASK_ID_PATTERN3.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
-  const matches = (await Promise.all([
-    findInScope(paths, paths.activeTasks, "active", taskId),
-    findInScope(paths, paths.archivedTasks, "archive", taskId)
-  ])).flat();
-  if (matches.length === 0) throw new ValidationError(`Task not found: ${taskId}`);
-  if (matches.length > 1) throw new AmbiguousTaskError(`Task ID is present in multiple locations: ${taskId}`);
-  const location = matches[0];
-  if (options.recoverPendingRework === false) return location;
-  const { recoverPendingRework: recoverPendingRework2 } = await Promise.resolve().then(() => (init_workflow(), workflow_exports));
-  const recovered = await recoverPendingRework2(paths, taskId);
-  if (recovered === null) return location;
-  return findTask(paths, taskId, { recoverPendingRework: false });
-}
-async function listStoredTasks(paths, status) {
-  const scopes = [[paths.activeTasks, "active"]];
-  if (status === "all") scopes.push([paths.archivedTasks, "archive"]);
-  const tasks = (await Promise.all(scopes.map(([directory, scope]) => listScope(paths, directory, scope)))).flat();
-  return tasks.sort((left, right) => left.task.id.localeCompare(right.task.id));
-}
-async function persistTaskTransition(paths, location, task, transition, operationOverrides = {}) {
-  return withTaskLock(paths, task.id, () => persistTaskTransitionLocked(paths, location, task, transition, operationOverrides));
-}
-async function persistTaskTransitionLocked(paths, location, task, transition, operationOverrides) {
-  const operations = { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides };
-  const journalPath = join7(location.directory, "journal.md");
-  const shouldMoveToArchive = task.status === "archived" && location.scope === "active";
-  const destination = shouldMoveToArchive ? join7(paths.archivedTasks, task.id) : void 0;
-  await assertNoSymlink(paths.repoRoot, journalPath);
-  if (destination !== void 0) await assertNoSymlink(paths.repoRoot, destination);
-  await assertNoPendingTaskMutation(paths, location);
-  const pending = await readPendingTransitionIntent(paths, journalPath, location.task.status);
-  let intent;
-  if (pending !== null) {
-    if (pending.oldStatus !== transition.oldStatus || pending.newStatus !== transition.newStatus) {
-      throw new SchemaError(
-        `Task ${task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before starting another.`
-      );
-    }
-    intent = pending;
-  } else {
-    intent = {
-      ...transition,
-      type: "transition_intent",
-      operationId: operations.createOperationId()
-    };
-    await operations.appendJournal(journalPath, intent, paths.repoRoot);
-  }
-  let targetDirectory = location.directory;
-  let targetScope = location.scope;
-  if (destination !== void 0) {
-    try {
-      await operations.moveDirectory(location.directory, destination);
-    } catch (error) {
-      throw new SchemaError(`Unable to archive task ${task.id}; transition intent remains pending for retry`, error);
-    }
-    targetDirectory = destination;
-    targetScope = "archive";
-  }
-  const committedTask = pending === null ? task : { ...task, updatedAt: intent.timestamp };
-  try {
-    await operations.writeTask(join7(targetDirectory, "task.json"), committedTask, paths.repoRoot);
-  } catch (error) {
-    throw new SchemaError(`Unable to commit task transition for ${task.id}; transition intent remains pending for retry`, error);
-  }
-  return { task: committedTask, directory: targetDirectory, scope: targetScope };
-}
-async function executeTaskMutation(paths, location, request, prepare, operationOverrides = {}) {
-  return withTaskLock(paths, location.task.id, () => executeTaskMutationLocked(
-    paths,
-    location,
-    request,
-    prepare,
-    { ...DEFAULT_TRANSITION_OPERATIONS, ...operationOverrides }
-  ));
-}
-async function executeTaskMutationLocked(paths, location, request, prepare, operations) {
-  await assertNoPendingTaskTransition(paths, location);
-  const journalPath = join7(location.directory, "journal.md");
-  const pending = await readPendingTaskMutationIntent(paths, journalPath);
-  if (pending !== null) {
-    if (pending.mutationKind !== request.mutationKind || pending.fingerprint !== request.fingerprint) {
-      throw new TransitionError(
-        `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`
-      );
-    }
-    if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), pending.mutationKind, pending.expected)) {
-      throw new SchemaError(`Pending mutation ${pending.operationId} has targets outside its exact managed ownership.`);
-    }
-    await assertTaskMutationStructure(paths, location, {
-      operationId: pending.operationId,
-      mutationKind: pending.mutationKind
-    });
-    if (await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
-      await appendMutationCompletion(paths, journalPath, pending, operations);
-      return pending;
-    }
-    const prepared2 = await prepare(pending.timestamp, true, pending);
-    if (stableJson2(prepared2.expected) !== stableJson2(pending.expected) || !matchesCompletionForRetry(prepared2.completion, pending.completion)) {
-      throw new SchemaError(`Pending mutation ${pending.operationId} no longer matches the requested target; inspect it before retrying.`);
-    }
-    await prepared2.apply();
-    if (!await mutationTargetsMatch(paths, location, pending.mutationKind, pending.expected)) {
-      throw new SchemaError(`Mutation ${pending.operationId} did not produce its expected managed targets; journal intent remains pending.`);
-    }
-    await appendMutationCompletion(paths, journalPath, pending, operations);
-    return pending;
-  }
-  await assertTaskMutationStructure(paths, location);
-  const prepared = await prepare(request.timestamp, false, null);
-  if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), request.mutationKind, prepared.expected)) {
-    throw new SchemaError(`Prepared ${request.mutationKind} mutation has targets outside its exact managed ownership.`);
-  }
-  const intent = {
-    schemaVersion: SCHEMA_VERSION,
-    type: "mutation_intent",
-    operationId: operations.createOperationId(),
-    timestamp: request.timestamp,
-    actor: request.actor,
-    mutationKind: request.mutationKind,
-    fingerprint: request.fingerprint,
-    expected: prepared.expected,
-    completion: prepared.completion
-  };
-  await operations.appendJournal(journalPath, intent, paths.repoRoot);
-  await prepared.apply();
-  if (!await mutationTargetsMatch(paths, location, intent.mutationKind, intent.expected)) {
-    throw new SchemaError(`Mutation ${intent.operationId} did not produce its expected managed targets; journal intent remains pending.`);
-  }
-  await appendMutationCompletion(paths, journalPath, intent, operations);
-  return intent;
-}
-function mutationFingerprint(value) {
-  return createHash2("sha256").update(stableJson2(value)).digest("hex");
-}
-function mutationTargetSummary(paths, targets, identity) {
-  return {
-    identity,
-    files: targets.map(({ filename, contents }) => ({
-      path: relative4(paths.repoRoot, filename).split("\\").join("/"),
-      sha256: createHash2("sha256").update(contents).digest("hex")
-    })).sort((left, right) => left.path.localeCompare(right.path))
-  };
-}
-async function readPendingTaskMutationIntent(paths, journalPath) {
-  const records = await readJsonlRecords(paths.repoRoot, journalPath);
-  let pending = null;
-  for (const record of records) {
-    if (!isRecord7(record) || typeof record.type !== "string") continue;
-    if (record.type === "mutation_intent") {
-      if (!isMutationIntent(record)) throw new SchemaError(`Invalid mutation intent in ${journalPath}`);
-      if (pending !== null) {
-        throw new SchemaError(`Task journal ${journalPath} has more than one uncommitted mutation intent.`);
-      }
-      pending = record;
-      continue;
-    }
-    if (pending !== null && record.operationId === pending.operationId) {
-      if (!matchesCompletion(recordWithoutOperationId(record), pending.completion)) {
-        throw new SchemaError(`Mutation completion ${pending.operationId} does not match its journal intent.`);
-      }
-      pending = null;
-    }
-  }
-  return pending;
-}
-async function mutationTargetsMatch(paths, location, mutationKind, expected) {
-  if (!mutationTargetsAreOwned(paths, mutationTargetOwner(location), mutationKind, expected)) return false;
-  for (const target of expected.files) {
-    const filename = assertInside(paths.repoRoot, resolve3(paths.repoRoot, target.path));
-    try {
-      await assertNoSymlink(paths.repoRoot, filename);
-      const contents = await readFile6(filename);
-      if (createHash2("sha256").update(contents).digest("hex") !== target.sha256) return false;
-    } catch {
-      return false;
-    }
-  }
-  return true;
-}
-function mutationTargetsAreOwned(paths, owner, mutationKind, expected) {
-  const taskDirectory = relative4(paths.repoRoot, owner.directory).split("\\").join("/");
-  const expectedDirectory = `.vinea/tasks/${owner.scope}/${owner.taskId}`;
-  if (taskDirectory !== expectedDirectory || !TASK_ID_PATTERN3.test(owner.taskId)) return false;
-  const currentTargets = mutationTargetPaths(taskDirectory, owner, mutationKind, expected.identity);
-  if (currentTargets === null) return false;
-  if (sameMutationTargetSet(expected.files.map(({ path }) => path), currentTargets)) return true;
-  if (owner.scope !== "archive") return false;
-  const historicDirectory = `.vinea/tasks/active/${owner.taskId}`;
-  return sameMutationTargetSet(
-    expected.files.map(({ path }) => path),
-    mutationTargetPaths(historicDirectory, owner, mutationKind, expected.identity)
-  );
-}
-function mutationTargetOwner(location) {
-  const domains = {};
-  for (const candidate of location.task.learningCandidates ?? []) {
-    if (typeof candidate.id === "string" && typeof candidate.domain === "string") {
-      domains[candidate.id] = candidate.domain;
-    }
-  }
-  return {
-    directory: location.directory,
-    scope: location.scope,
-    taskId: location.task.id,
-    learningCandidateDomains: domains
-  };
-}
-function mutationTargetPaths(taskDirectory, owner, mutationKind, identity) {
-  const taskArtifact = (artifact) => [`${taskDirectory}/${artifact}`];
-  if (mutationKind === "brief_set") return taskArtifact("brief.md");
-  if (mutationKind === "plan_set") return taskArtifact("plan.md");
-  if (mutationKind === "context_added") return taskArtifact("context.jsonl");
-  if (mutationKind === "evidence_recorded") return taskArtifact("evidence.jsonl");
-  if (mutationKind === "check_upsert") return taskArtifact("check.md");
-  if (mutationKind === "requirement_added" || mutationKind === "acceptance_criterion_added" || mutationKind === "learning_proposed" || mutationKind === "learning_archived") {
-    return taskArtifact("task.json");
-  }
-  if (mutationKind !== "learning_accepted") return null;
-  const candidateId = identity.learningCandidateId;
-  if (candidateId === void 0) return null;
-  const domain = owner.learningCandidateDomains[candidateId];
-  if (domain === void 0 || !LEARNING_DOMAIN_PATTERN.test(domain) || domain === "index") return null;
-  return [
-    `${taskDirectory}/task.json`,
-    ".vinea/specs/index.md",
-    `.vinea/specs/${domain}.md`
-  ];
-}
-function sameMutationTargetSet(actual, expected) {
-  return actual.length === expected.length && new Set(actual).size === actual.length && new Set(expected).size === expected.length && actual.every((path) => expected.includes(path));
-}
-function isPotentialMutationTarget(paths, location, target) {
-  const taskDirectory = relative4(paths.repoRoot, location.directory).split("\\").join("/");
-  const artifact = target.startsWith(`${taskDirectory}/`) ? target.slice(taskDirectory.length + 1) : "";
-  return [
-    "task.json",
-    "brief.md",
-    "plan.md",
-    "context.jsonl",
-    "evidence.jsonl",
-    "check.md",
-    "check-history.jsonl"
-  ].includes(artifact) || target === ".vinea/specs/index.md" || /^\.vinea\/specs\/[a-z0-9]+(?:-[a-z0-9]+)*\.md$/u.test(target);
-}
-async function writeManagedMutationTarget(paths, location, filename, contents) {
-  const target = relative4(paths.repoRoot, filename).split("\\").join("/");
-  if (!isPotentialMutationTarget(paths, location, target)) {
-    throw new ValidationError(`Mutation target is not managed for task ${location.task.id}: ${target}`);
-  }
-  await assertNoSymlink(paths.repoRoot, filename);
-  const temporary = join7(dirname3(filename), `.${basename4(filename)}.${randomUUID4()}.tmp`);
-  try {
-    await writeFile4(temporary, contents, { encoding: "utf8", flag: "wx" });
-    await rename2(temporary, filename);
-  } catch (error) {
-    try {
-      await unlink2(temporary);
-    } catch (cleanupError) {
-      if (!isCode2(cleanupError, "ENOENT")) {
-        throw new SchemaError(`Unable to clean temporary mutation target ${temporary}`, cleanupError);
-      }
-    }
-    throw new SchemaError(`Unable to write managed mutation target ${filename}`, error);
-  }
-}
-async function appendMutationCompletion(paths, journalPath, intent, operations) {
-  await operations.appendJournal(journalPath, { ...intent.completion, operationId: intent.operationId }, paths.repoRoot);
-}
-function mutationValueIdentity(identity, value) {
-  if (value === void 0) return identity;
-  return {
-    ...identity,
-    valueSha256: createHash2("sha256").update(stableJson2(value)).digest("hex")
-  };
-}
-function isMutationIntent(value) {
-  return value.schemaVersion === SCHEMA_VERSION && value.type === "mutation_intent" && typeof value.operationId === "string" && value.operationId !== "" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.mutationKind === "string" && typeof value.fingerprint === "string" && /^[a-f0-9]{64}$/u.test(value.fingerprint) && isMutationTargetSummary2(value.expected) && isRecord7(value.completion);
-}
-function isMutationTargetSummary2(value) {
-  return isRecord7(value) && isRecord7(value.identity) && Object.values(value.identity).every((entry) => typeof entry === "string" && entry !== "") && Array.isArray(value.files) && value.files.length > 0 && value.files.every((entry) => isRecord7(entry) && typeof entry.path === "string" && typeof entry.sha256 === "string" && /^[a-f0-9]{64}$/u.test(entry.sha256));
-}
-function matchesCompletion(left, right) {
-  return stableJson2(left) === stableJson2(right);
-}
-function matchesCompletionForRetry(prepared, pending) {
-  if (matchesCompletion(prepared, pending)) return true;
-  if ("mutationProtocolVersion" in pending && pending.mutationProtocolVersion !== void 0) return false;
-  const current = { ...prepared };
-  delete current.mutationProtocolVersion;
-  return matchesCompletion(current, pending);
-}
-async function assertTaskMutationStructure(paths, location, pendingMutationRecovery) {
-  const { validateTaskStructure: validateTaskStructure2 } = await Promise.resolve().then(() => (init_validate(), validate_exports));
-  const report = await validateTaskStructure2(paths, location, { pendingMutationRecovery });
-  if (report.issues.length === 0) return;
-  const issue = report.issues[0];
-  throw new SchemaError(
-    `Task ${location.task.id} mutation is blocked by ${issue.code} at ${issue.path}: ${issue.message}. Run \`vinea validate\` to inspect all task-structure issues.`
-  );
-}
-function recordWithoutOperationId(value) {
-  const result = { ...value };
-  delete result.operationId;
-  return result;
-}
-function stableJson2(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson2).join(",")}]`;
-  if (isRecord7(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson2(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-async function assertNoPendingTaskTransition(paths, location) {
-  const pending = await readPendingTransitionIntent(
-    paths,
-    join7(location.directory, "journal.md"),
-    location.task.status
-  );
-  if (pending !== null) {
-    throw new TransitionError(
-      `Task ${location.task.id} has a pending ${pending.oldStatus} -> ${pending.newStatus} transition; retry that transition before recording task changes.`
-    );
-  }
-}
-async function hasMatchingPendingTaskTransition(paths, location, oldStatus, newStatus) {
-  const pending = await readPendingTransitionIntent(
-    paths,
-    join7(location.directory, "journal.md"),
-    location.task.status
-  );
-  return pending?.oldStatus === oldStatus && pending.newStatus === newStatus;
-}
-async function assertNoPendingTaskMutation(paths, location) {
-  const pending = await readPendingTaskMutationIntent(paths, join7(location.directory, "journal.md"));
-  if (pending !== null) {
-    throw new TransitionError(
-      `Task ${location.task.id} has a pending ${pending.mutationKind} mutation; retry that exact mutation before recording another task change.`
-    );
-  }
-}
-async function appendTaskContinuation(paths, location, event) {
-  return withTaskLock(paths, location.task.id, () => appendTaskContinuationLocked(paths, location, event));
-}
-async function appendTaskContinuationLocked(paths, location, event) {
-  await assertNoPendingTaskTransition(paths, location);
-  await assertNoPendingTaskMutation(paths, location);
-  const journalPath = join7(location.directory, "journal.md");
-  await assertNoSymlink(paths.repoRoot, journalPath);
-  await appendJsonl(journalPath, event, paths.repoRoot);
-}
-function sessionBindingPath(paths, host, sessionId) {
-  const safeSessionId = safeSessionFilenamePart(sessionId);
-  return join7(paths.sessions, `${host}-${safeSessionId}.json`);
-}
-async function readSessionBinding(paths, host, sessionId) {
-  const filename = sessionBindingPath(paths, host, sessionId);
-  try {
-    await assertNoSymlink(paths.repoRoot, filename);
-    const contents = await readFile6(filename, "utf8");
-    let value;
-    try {
-      value = JSON.parse(contents);
-    } catch {
-      return { status: "malformed", message: `Invalid JSON in session binding ${filename}` };
-    }
-    if (!isSessionBinding(value)) {
-      return { status: "malformed", message: `Invalid session binding in ${filename}` };
-    }
-    return { status: "valid", binding: value };
-  } catch (error) {
-    if (isCode2(error, "ENOENT")) return { status: "missing" };
-    if (error instanceof ValidationError) throw error;
-    if (error instanceof SchemaError) {
-      return { status: "malformed", message: error.message };
-    }
-    return {
-      status: "malformed",
-      message: `Unable to read session binding ${filename}`
-    };
-  }
-}
-async function writeSessionBinding(paths, host, sessionId, binding) {
-  const filename = sessionBindingPath(paths, host, sessionId);
-  await ensureDirectory(paths.repoRoot, paths.sessions);
-  await writeJsonAtomic(filename, binding, paths.repoRoot);
-}
-async function readLatestEvidence(paths, location) {
-  const filename = join7(location.directory, "evidence.jsonl");
-  const records = await readJsonlRecords(paths.repoRoot, filename);
-  if (records.length === 0) return null;
-  const evidence = records.map((record, index) => {
-    if (!isEvidenceRecord(record)) {
-      throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`);
-    }
-    return {
-      ...record,
-      schemaVersion: SCHEMA_VERSION,
-      verificationRevision: record.schemaVersion === LEGACY_SCHEMA_VERSION ? 0 : record.verificationRevision
-    };
-  });
-  return evidence.at(-1);
-}
-async function readLatestCheckEvent(paths, location) {
-  const filename = join7(location.directory, "journal.md");
-  const events = await readJsonlRecords(paths.repoRoot, filename);
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (!isRecord7(event) || typeof event.type !== "string") continue;
-    if (event.type === "check_recorded" || event.type === "check_updated") return event;
-  }
-  return null;
-}
-async function removeTaskSessionBindings(paths, taskId) {
-  await assertNoSymlink(paths.repoRoot, paths.sessions);
-  let entries;
-  try {
-    entries = await readdir3(paths.sessions, { withFileTypes: true });
-  } catch (error) {
-    if (isCode2(error, "ENOENT")) return [];
-    throw new SchemaError(`Unable to list session bindings in ${paths.sessions}`, error);
-  }
-  const removed = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || entry.isSymbolicLink()) continue;
-    const filename = join7(paths.sessions, entry.name);
-    await assertNoSymlink(paths.repoRoot, filename);
-    let value;
-    try {
-      value = JSON.parse(await readFile6(filename, "utf8"));
-    } catch (error) {
-      if (error instanceof SyntaxError) continue;
-      throw new SchemaError(`Unable to inspect session binding ${filename}`, error);
-    }
-    if (!isSessionBinding(value) || value.taskId !== taskId) continue;
-    try {
-      await unlink2(filename);
-      removed.push(filename);
-    } catch (error) {
-      if (!isCode2(error, "ENOENT")) {
-        throw new SchemaError(`Unable to remove session binding ${filename}`, error);
-      }
-    }
-  }
-  return removed;
-}
-async function findInScope(paths, root, scope, taskId) {
-  const direct = join7(root, taskId);
-  if (!await isDirectory2(direct)) return [];
-  return [await loadLocation(paths, direct, scope, false)];
-}
-async function listScope(paths, root, scope) {
-  await assertNoSymlink(paths.repoRoot, root);
-  let entries;
-  try {
-    entries = await readdir3(root, { withFileTypes: true });
-  } catch (error) {
-    throw new SchemaError(`Unable to list task directory ${root}`, error);
-  }
-  return Promise.all(
-    entries.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink()).map((entry) => loadLocation(paths, join7(root, entry.name), scope, true))
-  );
-}
-async function loadLocation(paths, directory, scope, strict) {
-  const task = await readJson(join7(directory, "task.json"), paths.repoRoot);
-  if (!isTaskRecordBaseShape(task) || strict && !isTaskRecordShape2(task) || task.id !== basename4(directory)) {
-    throw new SchemaError(`Invalid task record in ${directory}`);
-  }
-  return { task, directory, scope };
-}
-async function isDirectory2(path) {
-  try {
-    const entry = await lstat9(path);
-    return entry.isDirectory() && !entry.isSymbolicLink();
-  } catch (error) {
-    if (isCode2(error, "ENOENT")) return false;
-    throw error;
-  }
-}
-async function pathExists(path) {
-  try {
-    await lstat9(path);
-    return true;
-  } catch (error) {
-    if (isCode2(error, "ENOENT")) return false;
-    throw error;
-  }
-}
-async function withTaskLock(paths, taskId, operation) {
-  if (!TASK_ID_PATTERN3.test(taskId)) throw new ValidationError(`Invalid task ID: ${taskId}`);
-  const key = `${paths.repoRoot}\0${taskId}`;
-  const inherited = taskLockContext.getStore();
-  if (inherited?.has(key)) return operation();
-  const lock = await acquireTaskLock(paths, taskId);
-  const context = new Set(inherited ?? []);
-  context.add(key);
-  try {
-    return await taskLockContext.run(context, operation);
-  } finally {
-    await releaseTaskLock(paths, lock);
-  }
-}
-async function acquireTaskLock(paths, taskId) {
-  const locks = join7(paths.runtime, "task-locks");
-  const directory = join7(locks, `${taskId}.lock`);
-  const ownerPath = join7(directory, "owner.json");
-  const token = randomUUID4();
-  const deadline = Date.now() + TASK_LOCK_TIMEOUT_MILLISECONDS;
-  await ensureDirectory(paths.repoRoot, locks);
-  for (; ; ) {
-    await assertNoSymlink(paths.repoRoot, directory);
-    try {
-      await mkdir3(directory);
-    } catch (error) {
-      if (!isCode2(error, "EEXIST")) {
-        throw new SchemaError(`Unable to acquire task lock for ${taskId}`, error);
-      }
-      if (Date.now() >= deadline) {
-        throw new ValidationError(
-          `Task ${taskId} is busy in another Vinea process; wait for it to finish and retry. Vinea will not remove a lock it does not own.`
-        );
-      }
-      await delay2(TASK_LOCK_RETRY_MILLISECONDS);
-      continue;
-    }
-    try {
-      await writeFile4(ownerPath, `${JSON.stringify({ token, pid: process.pid, acquiredAt: (/* @__PURE__ */ new Date()).toISOString() })}
-`, {
-        encoding: "utf8",
-        flag: "wx"
-      });
-    } catch (error) {
-      try {
-        await rmdir2(directory);
-      } catch (cleanupError) {
-        if (!isCode2(cleanupError, "ENOENT")) {
-          throw new SchemaError(`Unable to initialize task lock for ${taskId}; empty lock cleanup failed`, {
-            error,
-            cleanupError
-          });
-        }
-      }
-      throw new SchemaError(`Unable to initialize task lock for ${taskId}`, error);
-    }
-    return { directory, ownerPath, token };
-  }
-}
-async function releaseTaskLock(paths, lock) {
-  await assertNoSymlink(paths.repoRoot, lock.ownerPath);
-  let owner;
-  try {
-    owner = JSON.parse(await readFile6(lock.ownerPath, "utf8"));
-  } catch (error) {
-    throw new SchemaError(`Unable to verify task lock ownership at ${lock.directory}`, error);
-  }
-  if (!isRecord7(owner) || owner.token !== lock.token) {
-    throw new SchemaError(`Task lock ownership changed at ${lock.directory}; refusing unsafe cleanup.`);
-  }
-  await removeOwnedTaskLock(lock.directory, lock.ownerPath, lock.token);
-}
-async function removeOwnedTaskLock(directory, ownerPath, token) {
-  try {
-    const owner = JSON.parse(await readFile6(ownerPath, "utf8"));
-    if (!isRecord7(owner) || owner.token !== token) return;
-    await unlink2(ownerPath);
-    await rmdir2(directory);
-  } catch (error) {
-    if (isCode2(error, "ENOENT")) return;
-    throw new SchemaError(`Unable to release owned task lock ${directory}`, error);
-  }
-}
-async function delay2(milliseconds) {
-  await new Promise((resolve8) => setTimeout(resolve8, milliseconds));
-}
-function isCode2(error, code) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-function safeSessionFilenamePart(sessionId) {
-  if (sessionId.trim() === "") {
-    throw new ValidationError("Session ID must not be empty.");
-  }
-  if (sessionId.includes("/") || sessionId.includes("\\") || sessionId.includes("\0")) {
-    throw new ValidationError("Session ID must not contain path separators or NUL bytes.");
-  }
-  if (sessionId === "." || sessionId === "..") {
-    throw new ValidationError("Session ID must not contain path traversal.");
-  }
-  if (!isWellFormedUnicode(sessionId)) {
-    throw new ValidationError("Session ID must contain well-formed Unicode.");
-  }
-  if (Buffer.byteLength(sessionId, "utf8") > 119) {
-    throw new ValidationError("Session ID exceeds the 119-byte local binding limit.");
-  }
-  return `sid-${Buffer.from(sessionId, "utf8").toString("hex")}`;
-}
-function isWellFormedUnicode(value) {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 55296 && codeUnit <= 56319) {
-      const next = value.charCodeAt(index + 1);
-      if (!(next >= 56320 && next <= 57343)) return false;
-      index += 1;
-    } else if (codeUnit >= 56320 && codeUnit <= 57343) {
-      return false;
-    }
-  }
-  return true;
-}
-function isSessionBinding(value) {
-  if (!isRecord7(value)) return false;
-  if (Object.keys(value).some((key) => !["schemaVersion", "taskId", "boundAt"].includes(key))) return false;
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.taskId === "string" && TASK_ID_PATTERN3.test(value.taskId) && isIsoTimestamp4(value.boundAt);
-}
-function isEvidenceRecord(value) {
-  if (!isRecord7(value)) return false;
-  return (value.schemaVersion === LEGACY_SCHEMA_VERSION || value.schemaVersion === SCHEMA_VERSION) && (value.schemaVersion === LEGACY_SCHEMA_VERSION || isNonNegativeSafeInteger2(value.verificationRevision)) && typeof value.id === "string" && value.id.trim() !== "" && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind)) && typeof value.summary === "string" && value.summary.trim() !== "" && ["pass", "fail"].includes(String(value.result)) && isIsoTimestamp4(value.recordedAt) && typeof value.actor === "string" && value.actor.trim() !== "";
-}
-function isTaskRecordShape2(value) {
-  if (!isTaskRecordBaseShape(value)) return false;
-  return value.requirements.every(isRequirement2) && value.acceptanceCriteria.every(isRequirement2) && isLearningCandidateCollection(value.learningCandidates) && isCommitMetadata2(value.commit);
-}
-function isTaskRecordBaseShape(value) {
-  if (!isRecord7(value)) return false;
-  const risk = value.risk;
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && TASK_ID_PATTERN3.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && ["planning", "ready", "in_progress", "checking", "finished", "archived", "blocked"].includes(
-    String(value.status)
-  ) && isRecord7(risk) && ["low", "medium", "high"].includes(String(risk.level)) && Array.isArray(risk.reasons) && risk.reasons.every((reason) => typeof reason === "string") && ["standard", "tdd"].includes(String(value.qualityMode)) && ["single-agent", "delegated"].includes(String(value.executionMode)) && isNonNegativeSafeInteger2(value.verificationRevision) && Array.isArray(value.requirements) && Array.isArray(value.acceptanceCriteria) && isIsoTimestamp4(value.createdAt) && isIsoTimestamp4(value.updatedAt);
-}
-function isRequirement2(value) {
-  if (!isRecord7(value)) return false;
-  if (Object.keys(value).some((key) => !["schemaVersion", "id", "text", "createdAt"].includes(key))) {
-    return false;
-  }
-  return value.schemaVersion === SCHEMA_VERSION && typeof value.id === "string" && value.id.trim() !== "" && typeof value.text === "string" && value.text.trim() !== "" && isIsoTimestamp4(value.createdAt);
-}
-function isLearningCandidateCollection(value) {
-  if (value === void 0) return true;
-  if (!Array.isArray(value)) return false;
-  const ids = /* @__PURE__ */ new Set();
-  for (const candidate of value) {
-    if (!isRecord7(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp4(candidate.proposedAt)) {
-      return false;
-    }
-    ids.add(candidate.id);
-    if (candidate.status === "proposed") continue;
-    if (candidate.status === "accepted" && candidate.confirmedBy === "user" && isIsoTimestamp4(candidate.acceptedAt)) {
-      continue;
-    }
-    if (candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp4(candidate.archivedAt)) {
-      continue;
-    }
-    return false;
-  }
-  return true;
-}
-function isCommitMetadata2(value) {
-  if (value === null) return true;
-  if (!isRecord7(value)) return false;
-  if (Object.keys(value).some((key) => !["sha", "message"].includes(key))) return false;
-  return typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
-}
-async function readPendingTransitionIntent(paths, filename, taskStatus) {
-  const records = await readJsonlRecords(paths.repoRoot, filename);
-  const candidate = records.at(-1);
-  if (!isTransitionIntent(candidate) || candidate.oldStatus !== taskStatus) return null;
-  return candidate;
-}
-function isTransitionIntent(value) {
-  return isRecord7(value) && value.schemaVersion === SCHEMA_VERSION && value.type === "transition_intent" && typeof value.operationId === "string" && typeof value.timestamp === "string" && typeof value.actor === "string" && typeof value.reason === "string" && isTaskStatus2(value.oldStatus) && isTaskStatus2(value.newStatus);
-}
-function isTaskStatus2(value) {
-  return value === "planning" || value === "ready" || value === "in_progress" || value === "checking" || value === "finished" || value === "archived" || value === "blocked";
-}
-async function readJsonlRecords(repoRoot, filename) {
-  await assertNoSymlink(repoRoot, filename);
-  let contents;
-  try {
-    contents = await readFile6(filename, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read JSONL file ${filename}`, error);
-  }
-  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
-    try {
-      return JSON.parse(line);
-    } catch (error) {
-      throw new SchemaError(`Invalid JSONL in ${filename} at line ${index + 1}`, error);
-    }
-  });
-}
-function isIsoTimestamp4(value) {
-  if (typeof value !== "string") return false;
-  const parsed = new Date(value);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
-}
-function isNonNegativeSafeInteger2(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-function isRecord7(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var ARTIFACTS, TASK_ID_PATTERN3, LEARNING_DOMAIN_PATTERN, TASK_LOCK_RETRY_MILLISECONDS, TASK_LOCK_TIMEOUT_MILLISECONDS, taskLockContext, DEFAULT_TRANSITION_OPERATIONS;
-var init_task_store = __esm({
-  "src/core/task-store.ts"() {
-    "use strict";
-    init_errors();
-    init_json();
-    init_paths();
-    init_types();
-    ARTIFACTS = [
-      "brief.md",
-      "plan.md",
-      "context.jsonl",
-      "evidence.jsonl",
-      "check.md",
-      "check-history.jsonl",
-      "journal.md"
-    ];
-    TASK_ID_PATTERN3 = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    LEARNING_DOMAIN_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-    TASK_LOCK_RETRY_MILLISECONDS = 25;
-    TASK_LOCK_TIMEOUT_MILLISECONDS = 5e3;
-    taskLockContext = new AsyncLocalStorage();
-    DEFAULT_TRANSITION_OPERATIONS = {
-      createOperationId: randomUUID4,
-      appendJournal: appendJsonl,
-      moveDirectory: rename2,
-      writeTask: writeJsonAtomic
-    };
-  }
-});
-
-// src/core/check.ts
-import { readFile as readFile7 } from "node:fs/promises";
-import { isAbsolute as isAbsolute3, join as join8, relative as relative5, resolve as resolve4 } from "node:path";
-async function upsertCheck(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return withTaskLock(paths, taskId, () => upsertCheckLocked(paths, taskId, input, now));
-}
-async function upsertCheckLocked(paths, taskId, input, now) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  if (location.scope === "archive" || location.task.status === "archived") {
-    throw new ValidationError(`Archived task check rows cannot be edited: ${taskId}`);
-  }
-  if (location.task.status === "finished") {
-    throw new ValidationError(`Finished task check rows cannot be edited: ${taskId}`);
-  }
-  await assertNoPendingTaskTransition(paths, location);
-  const evidence = await readEvidence(paths, location);
-  const requirementId = boundedNonempty3(input.requirementId, "Requirement ID", MAX_ID_BYTES);
-  const declaredIds = declaredRequirementIds(location);
-  if (!declaredIds.includes(requirementId)) {
-    throw new ValidationError(`Requirement or acceptance ID is not declared for ${taskId}: ${requirementId}`);
-  }
-  const evidenceIds = uniqueStrings(
-    input.evidenceIds.map((id) => boundedNonempty3(id, "Evidence ID", MAX_ID_BYTES))
-  );
-  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
-  const missingEvidence = evidenceIds.find((id) => !evidenceById.has(id));
-  if (missingEvidence !== void 0) {
-    throw new ValidationError(`Evidence ID is not present for ${taskId}: ${missingEvidence}`);
-  }
-  assertEvidenceFromCurrentRevision(evidenceById, evidenceIds, location.task.verificationRevision, taskId);
-  const result = validateResult2(input.result);
-  if (result === "pass" && evidenceIds.length === 0) {
-    throw new ValidationError("A passing check row requires at least one evidence ID.");
-  }
-  const planItem = boundedNonempty3(input.planItem, "Check plan item", MAX_TEXT_BYTES);
-  const checkedPaths = uniqueStrings(
-    input.paths.map((path) => normalizeRepositoryPath2(paths.repoRoot, path))
-  );
-  if (checkedPaths.length === 0) {
-    throw new ValidationError("Check paths must contain at least one repository-relative path.");
-  }
-  const summary = boundedNonempty3(input.summary, "Check summary", MAX_TEXT_BYTES);
-  const actor = boundedNonempty3(input.actor, "Check actor", MAX_ID_BYTES);
-  const request = {
-    schemaVersion: SCHEMA_VERSION,
-    verificationRevision: location.task.verificationRevision,
-    actor,
-    requirementId,
-    planItem,
-    paths: checkedPaths,
-    evidenceIds,
-    result,
-    summary
-  };
-  await executeTaskMutation(paths, location, {
-    mutationKind: "check_upsert",
-    actor,
-    timestamp: now().toISOString(),
-    fingerprint: mutationFingerprint(request)
-  }, async (timestamp, recovering, pending) => {
-    const current = await findTask(paths, taskId);
-    if (current.scope === "archive" || current.task.status === "archived" || current.task.status === "finished") {
-      throw new ValidationError(`Task check rows cannot be edited: ${taskId}`);
-    }
-    const currentEvidence = await readEvidence(paths, current);
-    const currentDeclaredIds = declaredRequirementIds(current);
-    if (!currentDeclaredIds.includes(requirementId)) {
-      throw new ValidationError(`Requirement or acceptance ID is not declared for ${taskId}: ${requirementId}`);
-    }
-    const currentEvidenceById = new Map(currentEvidence.map((record) => [record.id, record]));
-    const missingEvidence2 = evidenceIds.find((id) => !currentEvidenceById.has(id));
-    if (missingEvidence2 !== void 0) {
-      throw new ValidationError(`Evidence ID is not present for ${taskId}: ${missingEvidence2}`);
-    }
-    assertEvidenceFromCurrentRevision(
-      currentEvidenceById,
-      evidenceIds,
-      current.task.verificationRevision,
-      taskId
-    );
-    const row = {
-      schemaVersion: SCHEMA_VERSION,
-      verificationRevision: current.task.verificationRevision,
-      requirementId,
-      planItem,
-      paths: checkedPaths,
-      evidenceIds,
-      result,
-      summary,
-      checkedAt: timestamp
-    };
-    const existing = await readRows(paths, current, currentEvidence);
-    const eventType = existing.some((candidate) => candidate.requirementId === requirementId) ? "check_updated" : "check_recorded";
-    if (recovering && pending?.completion.type !== eventType) {
-      throw new SchemaError(`Pending check mutation for ${requirementId} no longer has the expected operation type.`);
-    }
-    const byId = new Map(existing.map((candidate) => [candidate.requirementId, candidate]));
-    byId.set(requirementId, row);
-    const rows = currentDeclaredIds.flatMap((id) => {
-      const candidate = byId.get(id);
-      return candidate === void 0 ? [] : [candidate];
-    });
-    const contents = renderCheckDocument(rows);
-    return {
-      expected: mutationTargetSummary(paths, [{
-        filename: join8(current.directory, "check.md"),
-        contents
-      }], mutationValueIdentity({ requirementId }, row)),
-      completion: {
-        schemaVersion: SCHEMA_VERSION,
-        type: eventType,
-        mutationKind: eventType,
-        mutationProtocolVersion: 1,
-        timestamp,
-        actor,
-        requirementId,
-        result
-      },
-      apply: () => writeManagedMutationTarget(paths, current, join8(current.directory, "check.md"), contents)
-    };
-  });
-  return showCheck(paths, taskId);
-}
-async function showCheck(paths, taskId) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  const evidence = await readEvidence(paths, location);
-  return summarize(taskId, await readRows(paths, location, evidence));
-}
-async function readCheckForLocation(paths, location) {
-  const evidence = await readEvidence(paths, location);
-  const rows = await readRows(paths, location, evidence);
-  return { summary: summarize(location.task.id, rows), evidence };
-}
-function summarize(taskId, rows) {
-  return {
-    taskId,
-    rows,
-    totals: {
-      total: rows.length,
-      pass: rows.filter(({ result }) => result === "pass").length,
-      fail: rows.filter(({ result }) => result === "fail").length,
-      uncovered: rows.filter(({ result }) => result === "uncovered").length
-    }
-  };
-}
-async function readRows(paths, location, evidence) {
-  const filename = join8(location.directory, "check.md");
-  await assertNoSymlink(paths.repoRoot, filename);
-  let contents;
-  try {
-    contents = await readFile7(filename, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read check matrix ${filename}`, error);
-  }
-  return parseCheckDocument(
-    contents,
-    paths.repoRoot,
-    declaredRequirementIds(location),
-    evidence,
-    filename,
-    location.task.verificationRevision
-  );
-}
-function parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename, expectedVerificationRevision) {
-  if (contents === "") return [];
-  const firstLineEnd = contents.indexOf("\n");
-  const firstLine = firstLineEnd === -1 ? contents : contents.slice(0, firstLineEnd);
-  if (!firstLine.startsWith(CHECK_PREFIX) || !firstLine.endsWith(CHECK_SUFFIX)) {
-    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
-  }
-  const encoded = firstLine.slice(CHECK_PREFIX.length, -CHECK_SUFFIX.length);
-  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
-    throw new SchemaError(`Invalid authoritative check payload encoding in ${filename}`);
-  }
-  let value;
-  try {
-    value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
-  } catch (error) {
-    throw new SchemaError(`Invalid authoritative check payload in ${filename}`, error);
-  }
-  if (!isRecord8(value) || Object.keys(value).some((key) => key !== "schemaVersion" && key !== "rows") || value.schemaVersion !== SCHEMA_VERSION || !Array.isArray(value.rows)) {
-    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
-  }
-  const evidenceById = new Map(evidence.map((record) => [record.id, record]));
-  const seen = /* @__PURE__ */ new Set();
-  let previousDeclarationIndex = -1;
-  const rows = value.rows.map((candidate, index) => {
-    const row = validateStoredRow(candidate, repoRoot, filename, index + 1);
-    if (expectedVerificationRevision !== void 0 && row.verificationRevision !== expectedVerificationRevision) {
-      throw new SchemaError(
-        `Check row ${row.requirementId} uses verification revision ${row.verificationRevision}, but current revision is ${expectedVerificationRevision} in ${filename}`
-      );
-    }
-    const declarationIndex = declaredIds.indexOf(row.requirementId);
-    if (declarationIndex === -1) {
-      throw new SchemaError(`Check row references undeclared requirement ${row.requirementId} in ${filename}`);
-    }
-    if (declarationIndex <= previousDeclarationIndex) {
-      throw new SchemaError(`Check rows are not in declaration order in ${filename}`);
-    }
-    previousDeclarationIndex = declarationIndex;
-    if (seen.has(row.requirementId)) {
-      throw new SchemaError(`Duplicate check row for ${row.requirementId} in ${filename}`);
-    }
-    seen.add(row.requirementId);
-    const missingEvidence = row.evidenceIds.find((id) => !evidenceById.has(id));
-    if (missingEvidence !== void 0) {
-      throw new SchemaError(`Check row references absent evidence ${missingEvidence} in ${filename}`);
-    }
-    if (expectedVerificationRevision !== void 0) {
-      const staleEvidence = row.evidenceIds.find(
-        (id) => evidenceById.get(id)?.verificationRevision !== expectedVerificationRevision
-      );
-      if (staleEvidence !== void 0) {
-        throw new SchemaError(
-          `Check row references evidence ${staleEvidence} outside current verification revision ${expectedVerificationRevision} in ${filename}`
-        );
-      }
-    }
-    if (row.result === "pass" && row.evidenceIds.length === 0) {
-      throw new SchemaError(`Passing check row ${row.requirementId} has no evidence in ${filename}`);
-    }
-    return row;
-  });
-  if (contents !== renderCheckDocument(rows)) {
-    throw new SchemaError(`Check table does not match its authoritative payload in ${filename}`);
-  }
-  return rows;
-}
-function assertEvidenceFromCurrentRevision(evidenceById, evidenceIds, verificationRevision, taskId) {
-  const staleEvidence = evidenceIds.find(
-    (id) => evidenceById.get(id)?.verificationRevision !== verificationRevision
-  );
-  if (staleEvidence !== void 0) {
-    throw new ValidationError(
-      `Evidence ID is not from the current verification revision ${verificationRevision} for ${taskId}: ${staleEvidence}`
-    );
-  }
-}
-function migrateLegacyCheckDocument(contents, repoRoot, declaredIds, evidence, filename) {
-  if (contents === "") return "";
-  const firstLineEnd = contents.indexOf("\n");
-  const firstLine = firstLineEnd === -1 ? contents : contents.slice(0, firstLineEnd);
-  if (firstLine.startsWith(CHECK_PREFIX)) {
-    return renderCheckDocument(parseCheckDocument(contents, repoRoot, declaredIds, evidence, filename));
-  }
-  if (!firstLine.startsWith(LEGACY_CHECK_PREFIX) || !firstLine.endsWith(CHECK_SUFFIX)) {
-    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
-  }
-  const encoded = firstLine.slice(LEGACY_CHECK_PREFIX.length, -CHECK_SUFFIX.length);
-  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
-    throw new SchemaError(`Invalid authoritative check payload encoding in ${filename}`);
-  }
-  let payload;
-  try {
-    payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
-  } catch (error) {
-    throw new SchemaError(`Invalid authoritative check payload in ${filename}`, error);
-  }
-  if (!isRecord8(payload) || Object.keys(payload).some((key) => key !== "schemaVersion" && key !== "rows") || payload.schemaVersion !== LEGACY_SCHEMA_VERSION || !Array.isArray(payload.rows)) {
-    throw new SchemaError(`Invalid authoritative check payload in ${filename}`);
-  }
-  const evidenceIds = new Set(evidence.map(({ id }) => id));
-  const seen = /* @__PURE__ */ new Set();
-  let previousDeclarationIndex = -1;
-  const rows = payload.rows.map((candidate, index) => {
-    if (!isRecord8(candidate) || Object.keys(candidate).some((key) => ![
-      "schemaVersion",
-      "requirementId",
-      "planItem",
-      "paths",
-      "evidenceIds",
-      "result",
-      "summary",
-      "checkedAt"
-    ].includes(key)) || candidate.schemaVersion !== LEGACY_SCHEMA_VERSION) {
-      throw new SchemaError(`Invalid check row ${index + 1} in ${filename}`);
-    }
-    const row = validateStoredRow(
-      { ...candidate, schemaVersion: SCHEMA_VERSION, verificationRevision: 0 },
-      repoRoot,
-      filename,
-      index + 1
-    );
-    const declarationIndex = declaredIds.indexOf(row.requirementId);
-    if (declarationIndex === -1) {
-      throw new SchemaError(`Check row references undeclared requirement ${row.requirementId} in ${filename}`);
-    }
-    if (declarationIndex <= previousDeclarationIndex) {
-      throw new SchemaError(`Check rows are not in declaration order in ${filename}`);
-    }
-    previousDeclarationIndex = declarationIndex;
-    if (seen.has(row.requirementId)) {
-      throw new SchemaError(`Duplicate check row for ${row.requirementId} in ${filename}`);
-    }
-    seen.add(row.requirementId);
-    const missingEvidence = row.evidenceIds.find((id) => !evidenceIds.has(id));
-    if (missingEvidence !== void 0) {
-      throw new SchemaError(`Check row references absent evidence ${missingEvidence} in ${filename}`);
-    }
-    if (row.result === "pass" && row.evidenceIds.length === 0) {
-      throw new SchemaError(`Passing check row ${row.requirementId} has no evidence in ${filename}`);
-    }
-    return row;
-  });
-  if (contents !== renderLegacyCheckDocument(rows)) {
-    throw new SchemaError(`Check table does not match its authoritative payload in ${filename}`);
-  }
-  return renderCheckDocument(rows);
-}
-function validateStoredRow(value, repoRoot, filename, rowNumber) {
-  if (!isRecord8(value)) throw new SchemaError(`Invalid check row ${rowNumber} in ${filename}`);
-  const fields = [
-    "schemaVersion",
-    "verificationRevision",
-    "requirementId",
-    "planItem",
-    "paths",
-    "evidenceIds",
-    "result",
-    "summary",
-    "checkedAt"
-  ];
-  if (Object.keys(value).some((key) => !fields.includes(key)) || value.schemaVersion !== SCHEMA_VERSION || typeof value.verificationRevision !== "number" || !Number.isSafeInteger(value.verificationRevision) || value.verificationRevision < 0 || typeof value.requirementId !== "string" || typeof value.planItem !== "string" || !Array.isArray(value.paths) || !value.paths.every((path) => typeof path === "string") || !Array.isArray(value.evidenceIds) || !value.evidenceIds.every((id) => typeof id === "string") || typeof value.summary !== "string" || typeof value.checkedAt !== "string") {
-    throw new SchemaError(`Invalid check row ${rowNumber} in ${filename}`);
-  }
-  if (value.requirementId.trim() === "" || Buffer.byteLength(value.requirementId.trim(), "utf8") > MAX_ID_BYTES || value.planItem.trim() === "" || Buffer.byteLength(value.planItem.trim(), "utf8") > MAX_TEXT_BYTES || value.summary.trim() === "" || Buffer.byteLength(value.summary.trim(), "utf8") > MAX_TEXT_BYTES || value.paths.length === 0) {
-    throw new SchemaError(`Invalid check row fields at row ${rowNumber} in ${filename}`);
-  }
-  const checkedAt = new Date(value.checkedAt);
-  if (Number.isNaN(checkedAt.valueOf()) || checkedAt.toISOString() !== value.checkedAt) {
-    throw new SchemaError(`Invalid check row timestamp at row ${rowNumber} in ${filename}`);
-  }
-  let result;
-  try {
-    result = validateResult2(value.result);
-  } catch (error) {
-    throw new SchemaError(`Invalid check row result at row ${rowNumber} in ${filename}`, error);
-  }
-  const storedPaths = value.paths;
-  const storedEvidenceIds = value.evidenceIds;
-  if (new Set(storedPaths).size !== storedPaths.length || new Set(storedEvidenceIds).size !== storedEvidenceIds.length || storedEvidenceIds.some(
-    (id) => id.trim() === "" || Buffer.byteLength(id.trim(), "utf8") > MAX_ID_BYTES
-  )) {
-    throw new SchemaError(`Invalid duplicate or empty check values at row ${rowNumber} in ${filename}`);
-  }
-  let normalizedPaths;
-  try {
-    normalizedPaths = storedPaths.map((path) => normalizeRepositoryPath2(repoRoot, path));
-  } catch (error) {
-    throw new SchemaError(`Invalid check row path at row ${rowNumber} in ${filename}`, error);
-  }
-  if (normalizedPaths.some((path, index) => path !== storedPaths[index])) {
-    throw new SchemaError(`Non-canonical check row path at row ${rowNumber} in ${filename}`);
-  }
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    verificationRevision: value.verificationRevision,
-    requirementId: value.requirementId,
-    planItem: value.planItem,
-    paths: uniqueStrings(normalizedPaths),
-    evidenceIds: uniqueStrings(storedEvidenceIds),
-    result,
-    summary: value.summary,
-    checkedAt: value.checkedAt
-  };
-}
-async function readEvidence(paths, location) {
-  const filename = join8(location.directory, "evidence.jsonl");
-  await assertNoSymlink(paths.repoRoot, filename);
-  let contents;
-  try {
-    contents = await readFile7(filename, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read evidence records ${filename}`, error);
-  }
-  const seen = /* @__PURE__ */ new Set();
-  return contents.split("\n").filter(Boolean).map((line, index) => {
-    let value;
-    try {
-      value = JSON.parse(line);
-    } catch (error) {
-      throw new SchemaError(`Invalid evidence JSONL in ${filename} at line ${index + 1}`, error);
-    }
-    if (!isEvidenceRecord2(value) || seen.has(value.id)) {
-      throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`);
-    }
-    seen.add(value.id);
-    return {
-      ...value,
-      schemaVersion: SCHEMA_VERSION,
-      verificationRevision: value.schemaVersion === LEGACY_SCHEMA_VERSION ? 0 : value.verificationRevision
-    };
-  });
-}
-function isEvidenceRecord2(value) {
-  if (!isRecord8(value)) return false;
-  const fields = [
-    "schemaVersion",
-    "verificationRevision",
-    "id",
-    "kind",
-    "summary",
-    "result",
-    "recordedAt",
-    "command",
-    "exitCode",
-    "actor"
-  ];
-  if (Object.keys(value).some((key) => !fields.includes(key))) return false;
-  const timestamp = typeof value.recordedAt === "string" ? new Date(value.recordedAt) : null;
-  const exitCodeValid = value.exitCode === void 0 || typeof value.exitCode === "number" && Number.isSafeInteger(value.exitCode) && value.exitCode >= 0;
-  if (!exitCodeValid) return false;
-  const validRevision = value.schemaVersion === LEGACY_SCHEMA_VERSION || typeof value.verificationRevision === "number" && Number.isSafeInteger(value.verificationRevision) && value.verificationRevision >= 0;
-  if (!validRevision) return false;
-  if (value.result === "pass" && value.exitCode !== void 0 && value.exitCode !== 0) return false;
-  if (value.result === "fail" && value.exitCode === 0) return false;
-  if (value.kind === "tdd-red" && (value.result !== "fail" || typeof value.exitCode !== "number" || value.exitCode === 0)) {
-    return false;
-  }
-  if (value.kind === "tdd-green" && (value.result !== "pass" || value.exitCode !== 0)) return false;
-  return (value.schemaVersion === LEGACY_SCHEMA_VERSION || value.schemaVersion === SCHEMA_VERSION) && typeof value.id === "string" && value.id.trim() !== "" && ["command", "manual", "tdd-red", "tdd-green"].includes(String(value.kind)) && typeof value.summary === "string" && value.summary.trim() !== "" && ["pass", "fail"].includes(String(value.result)) && timestamp !== null && !Number.isNaN(timestamp.valueOf()) && timestamp.toISOString() === value.recordedAt && typeof value.actor === "string" && value.actor.trim() !== "" && (value.command === void 0 || typeof value.command === "string" && value.command.trim() !== "");
-}
-function renderCheckDocument(rows) {
-  const payload = { schemaVersion: SCHEMA_VERSION, rows };
-  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const lines = [
-    `${CHECK_PREFIX}${encoded}${CHECK_SUFFIX}`,
-    "",
-    "# Check matrix",
-    "",
-    "| Requirement/acceptance ID | Task item | Implementation/change paths | Test/verification evidence | Result | Summary |",
-    "| --- | --- | --- | --- | --- | --- |",
-    ...rows.map((row) => [
-      row.requirementId,
-      row.planItem,
-      row.paths.map((path) => `\`${path.replace(/`/g, "\\`")}\``).join("<br>"),
-      row.evidenceIds.map((id) => `\`${id.replace(/`/g, "\\`")}\``).join("<br>") || "none",
-      row.result,
-      row.summary
-    ].map(escapeTableCell).join(" | ")).map((line) => `| ${line} |`),
-    ""
-  ];
-  return lines.join("\n");
-}
-function renderLegacyCheckDocument(rows) {
-  const payload = {
-    schemaVersion: LEGACY_SCHEMA_VERSION,
-    rows: rows.map(({ schemaVersion: _schemaVersion, verificationRevision: _verificationRevision, ...row }) => ({
-      schemaVersion: LEGACY_SCHEMA_VERSION,
-      ...row
-    }))
-  };
-  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  const lines = [
-    `${LEGACY_CHECK_PREFIX}${encoded}${CHECK_SUFFIX}`,
-    "",
-    "# Check matrix",
-    "",
-    "| Requirement/acceptance ID | Task item | Implementation/change paths | Test/verification evidence | Result | Summary |",
-    "| --- | --- | --- | --- | --- | --- |",
-    ...rows.map((row) => [
-      row.requirementId,
-      row.planItem,
-      row.paths.map((path) => `\`${path.replace(/`/g, "\\`")}\``).join("<br>"),
-      row.evidenceIds.map((id) => `\`${id.replace(/`/g, "\\`")}\``).join("<br>") || "none",
-      row.result,
-      row.summary
-    ].map(escapeTableCell).join(" | ")).map((line) => `| ${line} |`),
-    ""
-  ];
-  return lines.join("\n");
-}
-function escapeTableCell(value) {
-  return value.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
-}
-function declaredRequirementIds(location) {
-  return [...location.task.requirements, ...location.task.acceptanceCriteria].map(({ id }) => id);
-}
-function normalizeRepositoryPath2(repoRoot, path) {
-  const trimmed = boundedNonempty3(path, "Check path", MAX_TEXT_BYTES);
-  if (trimmed.includes("\0") || trimmed.includes("\\") || isAbsolute3(trimmed) || /^[a-zA-Z]:/.test(trimmed) || trimmed.startsWith("//")) {
-    throw new ValidationError(`Check path must be repository-relative: ${path}`);
-  }
-  const resolved = assertInside(repoRoot, resolve4(repoRoot, trimmed));
-  const normalized = relative5(repoRoot, resolved).split("\\").join("/");
-  if (normalized === "" || normalized === "." || normalized !== trimmed) {
-    throw new ValidationError(`Check path must identify a repository file or directory: ${path}`);
-  }
-  return normalized;
-}
-function boundedNonempty3(value, label, maxBytes) {
-  const normalized = value.trim();
-  if (normalized === "") throw new ValidationError(`${label} must not be empty.`);
-  if (Buffer.byteLength(normalized, "utf8") > maxBytes) {
-    throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
-  }
-  return normalized;
-}
-function uniqueStrings(values) {
-  return [...new Set(values)];
-}
-function validateResult2(value) {
-  if (value !== "pass" && value !== "fail" && value !== "uncovered") {
-    throw new ValidationError("Check result must be pass, fail, or uncovered.");
-  }
-  return value;
-}
-function isRecord8(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-var CHECK_PREFIX, LEGACY_CHECK_PREFIX, CHECK_SUFFIX, MAX_TEXT_BYTES, MAX_ID_BYTES;
-var init_check = __esm({
-  "src/core/check.ts"() {
-    "use strict";
-    init_config();
-    init_errors();
-    init_paths();
-    init_task_store();
-    init_types();
-    CHECK_PREFIX = "<!-- vinea-checks:v2:";
-    LEGACY_CHECK_PREFIX = "<!-- vinea-checks:v1:";
-    CHECK_SUFFIX = " -->";
-    MAX_TEXT_BYTES = 4e3;
-    MAX_ID_BYTES = 200;
-  }
-});
-
-// src/core/context.ts
-import { lstat as lstat10, readFile as readFile8, realpath } from "node:fs/promises";
-import {
-  isAbsolute as isAbsolute4,
-  relative as relative6,
-  resolve as resolve5
-} from "node:path";
-async function addContextReference(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return withTaskLock(paths, taskId, () => addContextReferenceLocked(paths, taskId, input, now));
-}
-async function addContextReferenceLocked(paths, taskId, input, now) {
-  const config = await readConfig(paths);
-  assertNonempty(input.purpose, "Context purpose");
-  assertBoundedNonempty(input.actor, "Context actor", 200);
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
-  const normalizedPath = normalizeRepositoryPath3(input.path);
-  if (Buffer.byteLength(normalizedPath, "utf8") > 4096) {
-    throw new ValidationError("Context path exceeds the 4096-byte audit metadata limit.");
-  }
-  const estimatedBytes = await inspectContextFile(paths.repoRoot, normalizedPath);
-  const purpose = input.purpose.trim();
-  const actor = input.actor.trim();
-  const filename = resolve5(location.directory, "context.jsonl");
-  const intent = await executeTaskMutation(paths, location, {
-    mutationKind: "context_added",
-    actor,
-    timestamp: now().toISOString(),
-    fingerprint: mutationFingerprint({
-      schemaVersion: SCHEMA_VERSION,
-      type: "context_added",
-      actor,
-      path: normalizedPath,
-      purpose,
-      estimatedBytes
-    })
-  }, async (timestamp, recovering) => {
-    const current = await findTask(paths, taskId);
-    assertTaskMutable(current);
-    const currentFilename = resolve5(current.directory, "context.jsonl");
-    const existing = await readContextFile(paths.repoRoot, currentFilename);
-    const references = existing.references;
-    if (references.some((reference3) => reference3.path === normalizedPath)) {
-      if (recovering) {
-        throw new SchemaError(`Pending context mutation already contains ${normalizedPath}, but its managed target does not match.`);
-      }
-      throw new ValidationError(`Context path is already registered for task ${taskId}: ${normalizedPath}`);
-    }
-    const nextFiles = references.length + 1;
-    const nextEstimatedBytes = references.reduce(
-      (total, reference3) => total + reference3.estimatedBytes,
-      estimatedBytes
-    );
-    if (!recovering && nextFiles > config.context.maxFiles) {
-      throw new ValidationError(
-        `Context file budget exceeded for task ${taskId}: ${nextFiles} > ${config.context.maxFiles}`
-      );
-    }
-    if (!recovering && nextEstimatedBytes > config.context.maxEstimatedBytes) {
-      throw new ValidationError(
-        `Context byte budget exceeded for task ${taskId}: ${nextEstimatedBytes} > ${config.context.maxEstimatedBytes}`
-      );
-    }
-    const reference2 = {
-      schemaVersion: SCHEMA_VERSION,
-      path: normalizedPath,
-      purpose,
-      estimatedBytes,
-      addedAt: timestamp
-    };
-    const contents = appendContextReference(existing.contents, reference2);
-    return {
-      expected: mutationTargetSummary(paths, [{ filename: currentFilename, contents }], mutationValueIdentity({ path: normalizedPath }, reference2)),
-      completion: {
-        schemaVersion: SCHEMA_VERSION,
-        type: "context_added",
-        mutationKind: "context_added",
-        mutationProtocolVersion: 1,
-        timestamp,
-        actor,
-        path: normalizedPath
-      },
-      apply: () => writeManagedMutationTarget(paths, current, currentFilename, contents)
-    };
-  });
-  const reference = (await readContextReferences(paths.repoRoot, filename)).find(
-    (candidate) => candidate.path === intent.expected.identity.path
-  );
-  if (reference === void 0) throw new SchemaError(`Recovered context mutation did not record ${normalizedPath}.`);
-  return reference;
-}
-async function listContextReferences(paths, taskId) {
-  const config = await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  const references = await readContextReferences(paths.repoRoot, resolve5(location.directory, "context.jsonl"));
-  return {
-    references,
-    totals: {
-      files: references.length,
-      estimatedBytes: references.reduce((total, reference) => total + reference.estimatedBytes, 0)
-    },
-    limits: { ...config.context }
-  };
-}
-function normalizeRepositoryPath3(input) {
-  const value = input.trim();
-  if (value === "") throw new ValidationError("Context path must not be empty.");
-  if (isAbsolute4(value) || /^[a-zA-Z]:[/\\]/.test(value) || value.startsWith("\\")) {
-    throw new ValidationError(`Context path must be repository-relative: ${input}`);
-  }
-  const segments = value.split(/[/\\]/);
-  if (segments.includes("..")) {
-    throw new ValidationError(`Context path must not contain parent traversal: ${input}`);
-  }
-  const normalized = segments.filter((segment) => segment !== "" && segment !== ".").join("/");
-  if (normalized === "") throw new ValidationError(`Context path must name a file: ${input}`);
-  if (normalized === ".vinea/.runtime" || normalized.startsWith(".vinea/.runtime/")) {
-    throw new ValidationError(`Context path must not reference ignored runtime data: ${input}`);
-  }
-  return normalized;
-}
-async function inspectContextFile(repoRoot, repositoryPath) {
-  const candidate = assertInside(repoRoot, resolve5(repoRoot, repositoryPath));
-  const segments = repositoryPath.split("/");
-  let current = repoRoot;
-  try {
-    for (const segment of segments) {
-      current = resolve5(current, segment);
-      const entry2 = await lstat10(current);
-      if (entry2.isSymbolicLink()) {
-        throw new ValidationError(`Context path must not contain symbolic links: ${repositoryPath}`);
-      }
-    }
-    const entry = await lstat10(candidate);
-    if (!entry.isFile()) {
-      throw new ValidationError(`Context path must reference a regular file: ${repositoryPath}`);
-    }
-    const [realRoot, realCandidate] = await Promise.all([realpath(repoRoot), realpath(candidate)]);
-    const difference = relative6(realRoot, realCandidate);
-    if (isAbsolute4(difference) || difference === ".." || difference.startsWith("../")) {
-      throw new ValidationError(`Context path resolves outside the repository: ${repositoryPath}`);
-    }
-    return entry.size;
-  } catch (error) {
-    if (error instanceof ValidationError) throw error;
-    if (isMissing6(error)) {
-      throw new ValidationError(`Context path does not exist: ${repositoryPath}`, error);
-    }
-    throw new ValidationError(`Unable to inspect context path: ${repositoryPath}`, error);
-  }
-}
-async function readContextReferences(repoRoot, filename) {
-  return (await readContextFile(repoRoot, filename)).references;
-}
-async function readContextFile(repoRoot, filename) {
-  await assertNoSymlink(repoRoot, filename);
-  let contents;
-  try {
-    contents = await readFile8(filename, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read context manifest ${filename}`, error);
-  }
-  const references = contents.split("\n").filter((line) => line !== "").map((line, index) => {
-    let value;
-    try {
-      value = JSON.parse(line);
-    } catch (error) {
-      throw new SchemaError(`Invalid JSONL in ${filename} at line ${index + 1}`, error);
-    }
-    if (!isContextReference(value)) {
-      throw new SchemaError(`Invalid context record in ${filename} at line ${index + 1}`);
-    }
-    return { ...value, schemaVersion: SCHEMA_VERSION };
-  });
-  return { contents, references };
-}
-function isContextReference(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value;
-  return (record.schemaVersion === LEGACY_SCHEMA_VERSION || record.schemaVersion === SCHEMA_VERSION) && typeof record.path === "string" && typeof record.purpose === "string" && typeof record.estimatedBytes === "number" && Number.isSafeInteger(record.estimatedBytes) && record.estimatedBytes >= 0 && typeof record.addedAt === "string";
-}
-function appendContextReference(contents, reference) {
-  const separator = contents === "" || contents.endsWith("\n") ? "" : "\n";
-  return `${contents}${separator}${JSON.stringify(reference)}
-`;
-}
-function assertNonempty(value, label) {
-  if (value.trim() === "") throw new ValidationError(`${label} must not be empty.`);
-}
-function assertBoundedNonempty(value, label, maxBytes) {
-  assertNonempty(value, label);
-  if (Buffer.byteLength(value.trim(), "utf8") > maxBytes) {
-    throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
-  }
-}
-function isMissing6(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-var init_context = __esm({
-  "src/core/context.ts"() {
-    "use strict";
-    init_config();
-    init_errors();
-    init_paths();
-    init_task_store();
-    init_types();
-  }
-});
-
-// src/core/git.ts
+// src/kernel/repository.ts
 import { execFile } from "node:child_process";
-import { resolve as resolve6 } from "node:path";
+import { realpath } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-async function inspectBusinessGitStatus(repoRoot) {
-  let porcelain;
+async function gitOutput(cwd, args) {
+  const env = { ...process.env };
+  for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"]) delete env[key];
+  return (await execute("git", args, { cwd, env, maxBuffer: 16 * 1024 * 1024 })).stdout;
+}
+async function discoverRepository(cwd) {
+  const root = await realpath(resolve(cwd));
   try {
-    const topLevel = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
-      cwd: repoRoot,
-      encoding: "utf8"
-    });
-    if (resolve6(topLevel.stdout.trim()) !== resolve6(repoRoot)) {
-      return {
-        gitUnavailable: true,
-        businessDirtyPaths: [],
-        error: "Vinea repository root is nested below a different Git worktree root."
-      };
-    }
-    const result = await execFileAsync("git", ["status", "--porcelain=v1", "-z"], {
-      cwd: repoRoot,
-      encoding: "utf8"
-    });
-    porcelain = result.stdout;
-  } catch (error) {
+    const path = async (flag) => {
+      const out = await gitOutput(root, ["rev-parse", "--path-format=absolute", flag]);
+      return realpath(out.endsWith("\n") ? out.slice(0, -1) : out);
+    };
+    const worktreeRoot = await path("--show-toplevel");
+    const commonGitDir = await path("--git-common-dir");
     return {
-      gitUnavailable: true,
-      businessDirtyPaths: [],
-      error: error instanceof Error ? error.message : "Unable to run git status --porcelain=v1 -z."
+      worktreeRoot,
+      commonGitDir,
+      storeRoot: join(commonGitDir, "vinea"),
+      workspaceId: createHash("sha256").update(worktreeRoot).digest("hex")
     };
-  }
-  return {
-    gitUnavailable: false,
-    businessDirtyPaths: parsePorcelainPaths(porcelain).filter((path) => !isVineaPath(path)),
-    error: null
-  };
-}
-function parsePorcelainPaths(porcelain) {
-  const records = porcelain.split("\0");
-  const paths = [];
-  for (let index = 0; index < records.length; index += 1) {
-    const record = records[index];
-    if (record === "") continue;
-    if (record.length < 4 || record[2] !== " ") {
-      throw new Error("Malformed git status --porcelain=v1 -z output.");
-    }
-    const status = record.slice(0, 2);
-    paths.push(record.slice(3));
-    if (status.includes("R") || status.includes("C")) {
-      const originalPath = records[index + 1];
-      if (originalPath === void 0 || originalPath === "") {
-        throw new Error("Malformed renamed path in git status --porcelain=v1 -z output.");
-      }
-      paths.push(originalPath);
-      index += 1;
-    }
-  }
-  return [...new Set(paths)];
-}
-function isVineaPath(path) {
-  return path === ".vinea" || path.startsWith(".vinea/");
-}
-var execFileAsync;
-var init_git = __esm({
-  "src/core/git.ts"() {
-    "use strict";
-    execFileAsync = promisify(execFile);
-  }
-});
-
-// src/core/workflow.ts
-var workflow_exports = {};
-__export(workflow_exports, {
-  addAcceptanceCriterion: () => addAcceptanceCriterion,
-  addRequirement: () => addRequirement,
-  appendInlineAudit: () => appendInlineAudit,
-  archiveTask: () => archiveTask,
-  continueTask: () => continueTask,
-  createTask: () => createTask,
-  failedOrUncoveredCheckIds: () => failedOrUncoveredCheckIds,
-  finishTask: () => finishTask,
-  incompleteRequirements: () => incompleteRequirements,
-  isReworkEligible: () => isReworkEligible,
-  listCheckHistory: () => listCheckHistory,
-  listTasks: () => listTasks,
-  nextGate: () => nextGate,
-  orientWorkspace: () => orientWorkspace,
-  readCheckHistoryRevision: () => readCheckHistoryRevision,
-  readTask: () => readTask,
-  recoverPendingRework: () => recoverPendingRework,
-  reworkTask: () => reworkTask,
-  setTaskBrief: () => setTaskBrief,
-  setTaskPlan: () => setTaskPlan,
-  suggestRisk: () => suggestRisk,
-  taskView: () => taskView,
-  transitionTask: () => transitionTask
-});
-import { execFile as execFile2 } from "node:child_process";
-import { lstat as lstat11, readFile as readFile9 } from "node:fs/promises";
-import { isAbsolute as isAbsolute5, join as join9, resolve as resolve7 } from "node:path";
-import { promisify as promisify2 } from "node:util";
-function suggestRisk(title, description, changedPaths = [], rules = DEFAULT_CONFIG.riskRules) {
-  const searchable = normalize([title, description, ...changedPaths].join(" "));
-  const matchedHigh = matchedRules(searchable, rules.high);
-  const matchedMedium = matchedRules(searchable, rules.medium);
-  const reasons = [...matchedHigh, ...matchedMedium.filter((reason) => !matchedHigh.includes(reason))];
-  return {
-    level: matchedHigh.length > 0 ? "high" : matchedMedium.length > 0 ? "medium" : "low",
-    reasons
-  };
-}
-async function createTask(paths, input, now = () => /* @__PURE__ */ new Date()) {
-  await readConfig(paths);
-  assertNonempty2(input.title, "Task title");
-  const timestamp = now().toISOString();
-  const slug = slugify(input.title);
-  const id = `t-${formatTaskTimestamp(new Date(timestamp))}-${slug}`;
-  const task = {
-    schemaVersion: SCHEMA_VERSION,
-    id,
-    title: input.title.trim(),
-    status: "planning",
-    risk: { level: input.risk.level, reasons: [...input.risk.reasons] },
-    qualityMode: input.qualityMode,
-    executionMode: input.executionMode,
-    verificationRevision: 0,
-    requirements: [],
-    acceptanceCriteria: [],
-    commit: null,
-    createdAt: timestamp,
-    updatedAt: timestamp
-  };
-  const event = {
-    schemaVersion: SCHEMA_VERSION,
-    type: "created",
-    timestamp,
-    actor: "cli",
-    confirmation: input.confirmation,
-    status: "planning"
-  };
-  const created = await createTaskArtifacts(paths, task, event);
-  return { task: created.task, directory: created.directory };
-}
-async function appendInlineAudit(paths, input, now = () => /* @__PURE__ */ new Date()) {
-  await readConfig(paths);
-  assertNonempty2(input.title, "Request title");
-  assertNonempty2(input.description, "Request description");
-  assertNonempty2(input.reason, "Inline skip reason");
-  const record = {
-    schemaVersion: SCHEMA_VERSION,
-    timestamp: now().toISOString(),
-    requestSummary: `${input.title.trim()}: ${input.description.trim()}`,
-    proposedRisk: input.proposedRisk,
-    reason: input.reason.trim()
-  };
-  await appendJsonl(join9(paths.vineaRoot, "inline-audit.jsonl"), record, paths.repoRoot);
-  return record;
-}
-async function readTask(paths, taskId) {
-  await readConfig(paths);
-  return (await findTask(paths, taskId)).task;
-}
-async function listTasks(paths, status) {
-  await readConfig(paths);
-  const locations = await listStoredTasks(paths, status);
-  await Promise.all(locations.map(({ task }) => recoverPendingRework(paths, task.id)));
-  return (await listStoredTasks(paths, status)).map(({ task }) => task);
-}
-async function orientWorkspace(paths, input) {
-  assertHost(input.host);
-  if (input.sessionId !== void 0) {
-    sessionBindingPath(paths, input.host, input.sessionId);
-  }
-  const [health, gitStatus] = await Promise.all([
-    inspectWorkspace(paths),
-    inspectGitStatus(paths.repoRoot)
-  ]);
-  if (health.initialized && health.supportedSchema && health.missingRequiredDirectories.includes("tasks/active")) {
-    throw new SchemaError(
-      "Active task storage tasks/active is missing, malformed, or unsafe; run `vinea doctor` for workspace diagnostics."
-    );
-  }
-  const canInspectTasks = health.initialized && health.supportedSchema;
-  let locations = canInspectTasks ? await listStoredTasks(paths, "active") : [];
-  if (canInspectTasks) {
-    await Promise.all(locations.map(({ task }) => recoverPendingRework(paths, task.id)));
-    locations = await listStoredTasks(paths, "active");
-  }
-  const candidates = await Promise.all(locations.map(async (location) => {
-    const [context, latestEvidence, latestCheckEvent, check] = await Promise.all([
-      listContextReferences(paths, location.task.id),
-      readLatestEvidence(paths, location),
-      readLatestCheckEvent(paths, location),
-      readCheckForLocation(paths, location)
-    ]);
-    return {
-      id: location.task.id,
-      title: location.task.title,
-      status: location.task.status,
-      verificationRevision: location.task.verificationRevision,
-      qualityMode: location.task.qualityMode,
-      executionMode: location.task.executionMode,
-      requirementsNotCovered: incompleteRequirements(location.task, check.summary.rows),
-      failedOrUncoveredIds: failedOrUncoveredCheckIds(check.summary.rows),
-      reworkEligible: isReworkEligible(location.task, check.summary.rows),
-      nextAction: nextGate(location.task, check.summary.rows),
-      contextReferences: context.references,
-      latestEvidence,
-      latestCheckEvent
-    };
-  }));
-  let binding = null;
-  let hasValidBinding = false;
-  if (input.sessionId !== void 0) {
-    const stored = await readSessionBinding(paths, input.host, input.sessionId);
-    if (stored.status === "valid") {
-      hasValidBinding = candidates.some(({ id }) => id === stored.binding.taskId);
-      binding = {
-        status: hasValidBinding ? "bound" : "stale",
-        taskId: stored.binding.taskId,
-        boundAt: stored.binding.boundAt
-      };
-    } else if (stored.status === "malformed") {
-      binding = { status: "malformed", message: stored.message };
-    }
-  }
-  const recommendation = hasValidBinding ? "resume-bound" : candidates.length === 0 ? "no-active-task" : candidates.length === 1 ? "confirm-single" : "choose-task";
-  return { health, gitStatus, binding, candidates, recommendation };
-}
-async function continueTask(paths, taskId, input) {
-  return withTaskLock(paths, taskId, () => continueTaskLocked(paths, taskId, input));
-}
-async function continueTaskLocked(paths, taskId, input) {
-  assertHost(input.host);
-  if (input.sessionId !== void 0) {
-    sessionBindingPath(paths, input.host, input.sessionId);
-  }
-  if (!input.confirmed) {
-    throw new ValidationError("Continuation requires explicit --confirmed.");
-  }
-  if (input.start === true) {
-    assertNonempty2(input.reason ?? "", "Continuation start reason");
-  } else if (input.reason !== void 0) {
-    throw new ValidationError("--reason requires --start.");
-  }
-  await readConfig(paths);
-  let location = await findTask(paths, taskId);
-  if (location.scope === "archive" || location.task.status === "archived") {
-    throw new ValidationError(`Task is archived and cannot be continued: ${taskId}`);
-  }
-  if (location.task.status === "finished") {
-    throw new ValidationError(`Task is finished and cannot be continued: ${taskId}`);
-  }
-  if (input.start === true && location.task.status !== "ready") {
-    throw new ValidationError(
-      `Only a ready task can be started during continuation; ${taskId} is ${location.task.status}.`
-    );
-  }
-  await assertTaskLifecycleStructure(paths, location);
-  const timestamp = (input.now ?? (() => /* @__PURE__ */ new Date()))().toISOString();
-  let task = location.task;
-  if (input.start === true) {
-    task = await transitionTask(paths, taskId, "in_progress", {
-      actor: input.host,
-      reason: input.reason,
-      now: () => new Date(timestamp)
-    });
-    location = await findTask(paths, taskId);
-  }
-  const event = {
-    schemaVersion: SCHEMA_VERSION,
-    type: "continued",
-    timestamp,
-    actor: input.host,
-    confirmation: "user",
-    host: input.host,
-    sessionBound: input.sessionId !== void 0,
-    started: input.start === true,
-    status: task.status
-  };
-  await appendTaskContinuation(paths, location, event);
-  let binding = null;
-  if (input.sessionId !== void 0) {
-    binding = {
-      schemaVersion: SCHEMA_VERSION,
-      taskId,
-      boundAt: timestamp
-    };
-    await writeSessionBinding(paths, input.host, input.sessionId, binding);
-  }
-  return { task, binding };
-}
-async function transitionTask(paths, taskId, newStatus, options) {
-  return withTaskLock(paths, taskId, () => transitionTaskLocked(paths, taskId, newStatus, options));
-}
-async function transitionTaskLocked(paths, taskId, newStatus, options) {
-  await readConfig(paths);
-  assertNonempty2(options.actor, "Transition actor");
-  assertNonempty2(options.reason, "Transition reason");
-  const location = await findTask(paths, taskId);
-  const oldStatus = location.task.status;
-  const matchingPendingRetry = await hasMatchingPendingTaskTransition(paths, location, oldStatus, newStatus);
-  assertTransitionAllowed(oldStatus, newStatus, options.unblock === true);
-  if (newStatus === "ready") await assertReadyPrerequisites(paths, location);
-  if (newStatus === "checking") await assertTddReadyForCheck(paths, location);
-  await assertTaskLifecycleStructure(paths, location, matchingPendingRetry);
-  const timestamp = (options.now ?? (() => /* @__PURE__ */ new Date()))().toISOString();
-  const task = { ...location.task, status: newStatus, updatedAt: timestamp };
-  const transition = {
-    schemaVersion: SCHEMA_VERSION,
-    timestamp,
-    actor: options.actor.trim(),
-    reason: options.reason.trim(),
-    oldStatus,
-    newStatus
-  };
-  return (await persistTaskTransition(paths, location, task, transition)).task;
-}
-async function finishTask(paths, taskId, input) {
-  return withTaskLock(paths, taskId, () => finishTaskLocked(paths, taskId, input));
-}
-async function reworkTask(paths, taskId, input, now = input.now ?? (() => /* @__PURE__ */ new Date()), operationOverrides = {}) {
-  return withTaskLock(paths, taskId, () => reworkTaskLocked(
-    paths,
-    taskId,
-    input,
-    now,
-    operationOverrides
-  ));
-}
-async function recoverPendingRework(paths, taskId) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId, { recoverPendingRework: false });
-  const pending = await readPendingReworkIntent(paths, join9(location.directory, "journal.md"));
-  if (pending === null) return null;
-  return withTaskLock(paths, taskId, () => recoverPendingReworkLocked(paths, taskId));
-}
-async function recoverPendingReworkLocked(paths, taskId) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId, { recoverPendingRework: false });
-  const pending = await readPendingReworkIntent(paths, join9(location.directory, "journal.md"));
-  if (pending === null) return null;
-  await assertNoPendingTaskTransition(paths, location);
-  await assertNoPendingTaskMutation(paths, location);
-  return recoverReworkIntent(paths, location, pending, DEFAULT_REWORK_OPERATIONS);
-}
-async function listCheckHistory(paths, taskId) {
-  await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  const snapshots = await readCheckHistory(paths, join9(location.directory, "check-history.jsonl"));
-  if (snapshots.some((snapshot) => snapshot.taskId !== taskId)) {
-    throw new SchemaError(`Check history for ${taskId} contains a snapshot for another task.`);
-  }
-  return {
-    taskId,
-    revisions: snapshots.sort((left, right) => left.verificationRevision - right.verificationRevision).map(summarizeCheckHistorySnapshot)
-  };
-}
-async function readCheckHistoryRevision(paths, taskId, verificationRevision) {
-  if (!isNonNegativeRevision(verificationRevision)) {
-    throw new ValidationError("Check-history revision must be a non-negative safe integer.");
-  }
-  await readConfig(paths);
-  const location = await findTask(paths, taskId);
-  const snapshots = await readCheckHistory(paths, join9(location.directory, "check-history.jsonl"));
-  const snapshot = snapshots.find((candidate) => candidate.taskId === taskId && candidate.verificationRevision === verificationRevision);
-  if (snapshot === void 0) {
-    throw new ValidationError(`No check-history snapshot exists for ${taskId} revision ${verificationRevision}.`);
-  }
-  return snapshot;
-}
-function summarizeCheckHistorySnapshot(snapshot) {
-  return {
-    verificationRevision: snapshot.verificationRevision,
-    archivedAt: snapshot.archivedAt,
-    reworkReason: snapshot.reworkReason,
-    operationId: snapshot.operationId,
-    totals: {
-      total: snapshot.rows.length,
-      pass: snapshot.rows.filter(({ result }) => result === "pass").length,
-      fail: snapshot.rows.filter(({ result }) => result === "fail").length,
-      uncovered: snapshot.rows.filter(({ result }) => result === "uncovered").length
-    }
-  };
-}
-async function reworkTaskLocked(paths, taskId, input, now, operationOverrides) {
-  await readConfig(paths);
-  const actor = boundedTrimmed(input.actor, "Rework actor", 200);
-  const reason = boundedTrimmed(input.reason, "Rework reason", 4e3);
-  const operations = { ...DEFAULT_REWORK_OPERATIONS, ...operationOverrides };
-  const location = await findTask(paths, taskId, { recoverPendingRework: false });
-  if (location.scope !== "active") {
-    throw new TransitionError(`Rework requires task ${taskId} to remain active; found archived task storage.`);
-  }
-  await assertNoPendingTaskTransition(paths, location);
-  await assertNoPendingTaskMutation(paths, location);
-  const journalPath = join9(location.directory, "journal.md");
-  const pending = await readPendingReworkIntent(paths, journalPath);
-  if (pending !== null) {
-    return recoverReworkIntent(paths, location, pending, operations);
-  }
-  if (location.task.status !== "checking") {
-    throw new TransitionError(
-      `Rework requires task ${taskId} to have status checking; found ${location.task.status}.`
-    );
-  }
-  await assertTaskLifecycleStructure(paths, location);
-  const { summary } = await readCheckForLocation(paths, location);
-  if (!summary.rows.some(({ result }) => result === "fail" || result === "uncovered")) {
-    throw new ValidationError(
-      `Rework requires a failed or uncovered current verification check for ${taskId}.`
-    );
-  }
-  const timestamp = now().toISOString();
-  const sourceVerificationRevision = location.task.verificationRevision;
-  const operationId = reworkOperationId(taskId, sourceVerificationRevision);
-  const snapshot = {
-    schemaVersion: SCHEMA_VERSION,
-    taskId,
-    verificationRevision: sourceVerificationRevision,
-    archivedAt: timestamp,
-    reworkReason: reason,
-    operationId,
-    rows: summary.rows.map(cloneCheckRow)
-  };
-  const intent = {
-    schemaVersion: SCHEMA_VERSION,
-    type: "rework_intent",
-    operationId,
-    timestamp,
-    actor,
-    reason,
-    sourceVerificationRevision,
-    snapshot
-  };
-  await operations.appendJournal(journalPath, intent, paths.repoRoot);
-  return recoverReworkIntent(paths, location, intent, operations);
-}
-async function recoverReworkIntent(paths, initialLocation, intent, operations) {
-  const location = await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false });
-  if (location.scope !== "active") {
-    throw new SchemaError(`Pending rework ${intent.operationId} is not in active task storage.`);
-  }
-  assertReworkIntentMatchesTask(intent, location.task);
-  const historyPath = join9(location.directory, "check-history.jsonl");
-  await ensureReworkHistory(paths, historyPath, intent.snapshot, operations);
-  const checkPath = join9(location.directory, "check.md");
-  const sourceCheck = renderCheckDocument(intent.snapshot.rows);
-  const currentCheck = await readTaskArtifact(paths, checkPath, "current check matrix");
-  if (currentCheck === sourceCheck) {
-    try {
-      await operations.writeCheck(paths, initialLocation, "");
-    } catch (error) {
-      throw new SchemaError(
-        `Unable to clear current checks for rework ${intent.operationId}; rework intent remains pending for retry`,
-        error
-      );
-    }
-  } else if (currentCheck !== "") {
-    throw new SchemaError(
-      `Pending rework ${intent.operationId} has a current check matrix that does not match its recorded source snapshot.`
-    );
-  }
-  const current = await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false });
-  let task = current.task;
-  if (task.status === "checking" && task.verificationRevision === intent.sourceVerificationRevision) {
-    task = {
-      ...task,
-      status: "in_progress",
-      verificationRevision: intent.sourceVerificationRevision + 1,
-      updatedAt: intent.timestamp
-    };
-    try {
-      await operations.writeTask(join9(current.directory, "task.json"), task, paths.repoRoot);
-    } catch (error) {
-      throw new SchemaError(
-        `Unable to commit rework ${intent.operationId}; rework intent remains pending for retry`,
-        error
-      );
-    }
-  } else if (task.status !== "in_progress" || task.verificationRevision !== intent.sourceVerificationRevision + 1 || task.updatedAt !== intent.timestamp) {
-    throw new SchemaError(
-      `Pending rework ${intent.operationId} does not match task.json status or verification revision.`
-    );
-  }
-  const journalPath = join9(current.directory, "journal.md");
-  const completed = await hasReworkCompletion(paths, journalPath, intent);
-  if (!completed) {
-    const completion = {
-      schemaVersion: SCHEMA_VERSION,
-      type: "reworked",
-      operationId: intent.operationId,
-      timestamp: intent.timestamp,
-      actor: intent.actor,
-      reason: intent.reason,
-      sourceVerificationRevision: intent.sourceVerificationRevision,
-      verificationRevision: intent.sourceVerificationRevision + 1,
-      status: "in_progress"
-    };
-    try {
-      await operations.appendJournal(journalPath, completion, paths.repoRoot);
-    } catch (error) {
-      throw new SchemaError(
-        `Unable to complete rework ${intent.operationId}; rework intent remains pending for retry`,
-        error
-      );
-    }
-  }
-  return (await findTask(paths, intent.snapshot.taskId, { recoverPendingRework: false })).task;
-}
-function reworkOperationId(taskId, verificationRevision) {
-  return `rework-${taskId}-r${verificationRevision}`;
-}
-function cloneCheckRow(row) {
-  return { ...row, paths: [...row.paths], evidenceIds: [...row.evidenceIds] };
-}
-function assertReworkIntentMatchesTask(intent, task) {
-  const snapshot = intent.snapshot;
-  if (snapshot.schemaVersion !== SCHEMA_VERSION || snapshot.taskId !== task.id || snapshot.verificationRevision !== intent.sourceVerificationRevision || snapshot.operationId !== intent.operationId || snapshot.reworkReason !== intent.reason || !Number.isSafeInteger(intent.sourceVerificationRevision) || intent.sourceVerificationRevision < 0) {
-    throw new SchemaError(`Pending rework ${intent.operationId} has an invalid source snapshot.`);
-  }
-}
-async function ensureReworkHistory(paths, filename, snapshot, operations) {
-  const snapshots = await readCheckHistory(paths, filename);
-  const matching = snapshots.filter((candidate) => candidate.operationId === snapshot.operationId || candidate.taskId === snapshot.taskId && candidate.verificationRevision === snapshot.verificationRevision);
-  if (matching.length > 1 || matching.length === 1 && stableJson3(matching[0]) !== stableJson3(snapshot)) {
-    throw new SchemaError(`Rework history for ${snapshot.operationId} is duplicate or does not match its journal intent.`);
-  }
-  if (matching.length === 0) {
-    try {
-      await operations.appendHistory(filename, snapshot, paths.repoRoot);
-    } catch (error) {
-      throw new SchemaError(
-        `Unable to archive checks for rework ${snapshot.operationId}; rework intent remains pending for retry`,
-        error
-      );
-    }
-  }
-}
-async function hasReworkCompletion(paths, filename, intent) {
-  const journal = await readJsonlObjects(paths, filename, "task journal");
-  const completions = journal.filter((event) => isJournalReworked(event) && event.operationId === intent.operationId);
-  if (completions.length > 1) {
-    throw new SchemaError(`Rework ${intent.operationId} has duplicate completion events.`);
-  }
-  if (completions.length === 0) return false;
-  const completion = completions[0];
-  if (!isJournalReworked(completion)) {
-    throw new SchemaError(`Rework ${intent.operationId} has an invalid completion event.`);
-  }
-  if (!reworkCompletionMatchesIntent(completion, intent)) {
-    throw new SchemaError(`Rework completion ${intent.operationId} does not match its rework intent.`);
-  }
-  return true;
-}
-async function readPendingReworkIntent(paths, filename) {
-  const journal = await readJsonlObjects(paths, filename, "task journal");
-  const intents = /* @__PURE__ */ new Map();
-  const completions = /* @__PURE__ */ new Map();
-  for (const event of journal) {
-    if (event.type === "rework_intent") {
-      if (!isJournalReworkIntent(event) || intents.has(event.operationId)) {
-        throw new SchemaError(`Task journal ${filename} has an invalid or duplicate rework intent.`);
-      }
-      intents.set(event.operationId, event);
-    } else if (event.type === "reworked") {
-      if (!isJournalReworked(event) || completions.has(event.operationId)) {
-        throw new SchemaError(`Task journal ${filename} has an invalid or duplicate rework completion.`);
-      }
-      completions.set(event.operationId, event);
-    }
-  }
-  const pending = [...intents.values()].filter((intent) => !completions.has(intent.operationId));
-  for (const [operationId, completion] of completions) {
-    const intent = intents.get(operationId);
-    if (intent === void 0) {
-      throw new SchemaError(`Rework completion ${operationId} has no matching rework intent.`);
-    }
-    if (!reworkCompletionMatchesIntent(completion, intent)) {
-      throw new SchemaError(`Rework completion ${operationId} does not match its rework intent.`);
-    }
-  }
-  if (pending.length > 1) {
-    throw new SchemaError(`Task journal ${filename} has more than one pending rework intent.`);
-  }
-  return pending[0] ?? null;
-}
-function reworkCompletionMatchesIntent(completion, intent) {
-  return completion.operationId === intent.operationId && completion.sourceVerificationRevision === intent.sourceVerificationRevision && completion.verificationRevision === intent.sourceVerificationRevision + 1 && completion.timestamp === intent.timestamp && completion.actor === intent.actor && completion.reason === intent.reason && completion.status === "in_progress";
-}
-async function readCheckHistory(paths, filename) {
-  const records = await readJsonlObjects(paths, filename, "check history", true);
-  const operationIds = /* @__PURE__ */ new Set();
-  const revisions = /* @__PURE__ */ new Set();
-  return records.map((record) => {
-    if (!isCheckHistorySnapshot2(record)) {
-      throw new SchemaError(`Invalid check-history record in ${filename}.`);
-    }
-    const revisionKey = `${record.taskId}:${record.verificationRevision}`;
-    if (operationIds.has(record.operationId) || revisions.has(revisionKey)) {
-      throw new SchemaError(`Check history ${filename} has duplicate operation or task revision ${record.operationId}.`);
-    }
-    operationIds.add(record.operationId);
-    revisions.add(revisionKey);
-    return record;
-  });
-}
-async function readJsonlObjects(paths, filename, label, allowMissing = false) {
-  await assertNoSymlink(paths.repoRoot, filename);
-  let contents;
-  try {
-    contents = await readFile9(filename, "utf8");
-  } catch (error) {
-    if (allowMissing && isMissingFile(error)) return [];
-    throw new SchemaError(`Unable to read ${label} ${filename}`, error);
-  }
-  return contents.split("\n").filter((line) => line !== "").map((line, index) => {
-    try {
-      const value = JSON.parse(line);
-      if (!isRecord9(value)) throw new Error("record is not an object");
-      return value;
-    } catch (error) {
-      throw new SchemaError(`Invalid JSONL in ${label} ${filename} at line ${index + 1}`, error);
-    }
-  });
-}
-async function readTaskArtifact(paths, filename, label) {
-  await assertNoSymlink(paths.repoRoot, filename);
-  try {
-    return await readFile9(filename, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read ${label} ${filename}`, error);
-  }
-}
-function isJournalReworkIntent(value) {
-  return value.schemaVersion === SCHEMA_VERSION && value.type === "rework_intent" && typeof value.operationId === "string" && value.operationId !== "" && isIsoTimestamp5(value.timestamp) && typeof value.actor === "string" && value.actor.trim() !== "" && typeof value.reason === "string" && value.reason.trim() !== "" && isNonNegativeRevision(value.sourceVerificationRevision) && isCheckHistorySnapshot2(value.snapshot) && value.snapshot.taskId !== "" && value.snapshot.verificationRevision === value.sourceVerificationRevision && value.snapshot.operationId === value.operationId && value.snapshot.reworkReason === value.reason;
-}
-function isJournalReworked(value) {
-  return value.schemaVersion === SCHEMA_VERSION && value.type === "reworked" && typeof value.operationId === "string" && value.operationId !== "" && isIsoTimestamp5(value.timestamp) && typeof value.actor === "string" && value.actor.trim() !== "" && typeof value.reason === "string" && value.reason.trim() !== "" && isNonNegativeRevision(value.sourceVerificationRevision) && isNonNegativeRevision(value.verificationRevision) && value.verificationRevision === value.sourceVerificationRevision + 1 && value.status === "in_progress";
-}
-function isCheckHistorySnapshot2(value) {
-  if (!isRecord9(value) || value.schemaVersion !== SCHEMA_VERSION || typeof value.taskId !== "string" || value.taskId.trim() === "" || !isNonNegativeRevision(value.verificationRevision) || !isIsoTimestamp5(value.archivedAt) || typeof value.reworkReason !== "string" || value.reworkReason.trim() === "" || typeof value.operationId !== "string" || value.operationId.trim() === "" || !Array.isArray(value.rows)) {
-    return false;
-  }
-  const verificationRevision = value.verificationRevision;
-  return value.rows.every((row) => isCheckRowSnapshot(row, verificationRevision));
-}
-function isCheckRowSnapshot(value, verificationRevision) {
-  if (!isRecord9(value) || value.schemaVersion !== SCHEMA_VERSION || value.verificationRevision !== verificationRevision || typeof value.requirementId !== "string" || value.requirementId.trim() === "" || typeof value.planItem !== "string" || value.planItem.trim() === "" || !Array.isArray(value.paths) || !value.paths.every((path) => typeof path === "string") || !Array.isArray(value.evidenceIds) || !value.evidenceIds.every((id) => typeof id === "string") || value.result !== "pass" && value.result !== "fail" && value.result !== "uncovered" || typeof value.summary !== "string" || value.summary.trim() === "" || !isIsoTimestamp5(value.checkedAt)) {
-    return false;
-  }
-  return true;
-}
-function isNonNegativeRevision(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-function isMissingFile(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-function stableJson3(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson3).join(",")}]`;
-  if (isRecord9(value)) {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson3(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-async function finishTaskLocked(paths, taskId, input) {
-  if (!input.confirmed) throw new ValidationError("Finish requires explicit --confirmed.");
-  await readConfig(paths);
-  assertBoundedNonempty2(input.actor, "Finish actor", 200);
-  const location = await findTask(paths, taskId);
-  if (location.scope !== "active" || location.task.status !== "checking") {
-    throw new FinishGateError(
-      `Finish requires task ${taskId} to be active with status checking; found ${location.task.status}.`
-    );
-  }
-  await assertTaskLifecycleStructure(paths, location);
-  const { summary, evidence } = await readCheckForLocation(paths, location);
-  const declaredIds = [
-    ...location.task.requirements.map(({ id }) => id),
-    ...location.task.acceptanceCriteria.map(({ id }) => id)
-  ];
-  const coveredIds = new Set(summary.rows.map(({ requirementId }) => requirementId));
-  const missing = declaredIds.filter((id) => !coveredIds.has(id));
-  if (missing.length > 0) {
-    throw new FinishGateError(`Finish coverage is missing declared requirement or acceptance IDs: ${missing.join(", ")}.`);
-  }
-  const unsuccessful = summary.rows.filter(({ result }) => result !== "pass");
-  if (unsuccessful.length > 0) {
-    throw new FinishGateError(
-      `Finish is blocked by failed or uncovered check rows: ${unsuccessful.map(({ requirementId }) => requirementId).join(", ")}.`
-    );
-  }
-  const evidenceById = new Map(
-    evidence.filter((record) => record.verificationRevision === location.task.verificationRevision).map((record) => [record.id, record])
-  );
-  const withoutPassingEvidence = summary.rows.filter(
-    (row) => !row.evidenceIds.some((id) => evidenceById.get(id)?.result === "pass")
-  );
-  if (withoutPassingEvidence.length > 0) {
-    throw new FinishGateError(
-      `Finish is blocked by check rows without passing evidence: ${withoutPassingEvidence.map(({ requirementId }) => requirementId).join(", ")}.`
-    );
-  }
-  try {
-    await assertTddReadyForCheck(paths, location);
-  } catch (error) {
-    throw new FinishGateError(
-      `Finish TDD evidence is invalid; a valid tdd-red must precede tdd-green for ${taskId}.`
-    );
-  }
-  assertLearningCandidatesClassified(location.task);
-  const gitStatus = await inspectBusinessGitStatus(paths.repoRoot);
-  if (gitStatus.gitUnavailable) {
-    throw new FinishGateError(
-      `Finish gitUnavailable: ${gitStatus.error ?? "Git status could not be inspected."}`
-    );
-  }
-  if (gitStatus.businessDirtyPaths.length > 0) {
-    throw new FinishGateError(
-      `Finish is blocked by business dirty paths: ${gitStatus.businessDirtyPaths.join(", ")}.`
-    );
-  }
-  return transitionTask(paths, taskId, "finished", {
-    actor: input.actor,
-    reason: "Completion gates satisfied.",
-    now: input.now
-  });
-}
-async function archiveTask(paths, taskId, input, operationOverrides = {}) {
-  return withTaskLock(paths, taskId, () => archiveTaskLocked(paths, taskId, input, operationOverrides));
-}
-async function archiveTaskLocked(paths, taskId, input, operationOverrides) {
-  if (!input.confirmed) throw new ValidationError("Archive requires explicit --confirmed.");
-  await readConfig(paths);
-  assertBoundedNonempty2(input.actor, "Archive actor", 200);
-  const location = await findTask(paths, taskId);
-  if (location.task.status !== "finished") {
-    throw new TransitionError(
-      `Archive requires task ${taskId} to have status finished; found ${location.task.status}.`
-    );
-  }
-  await assertTaskLifecycleStructure(
-    paths,
-    location,
-    await hasMatchingPendingTaskTransition(paths, location, "finished", "archived")
-  );
-  const operations = { ...DEFAULT_ARCHIVE_OPERATIONS, ...operationOverrides };
-  await operations.removeTaskSessionBindings(paths, taskId);
-  return transitionTask(paths, taskId, "archived", {
-    actor: input.actor,
-    reason: "Task archived after confirmed finish.",
-    now: input.now
-  });
-}
-async function addRequirement(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return withTaskLock(paths, taskId, () => addRequirementLike(paths, taskId, input, "requirements", "requirement_added", now));
-}
-async function addAcceptanceCriterion(paths, taskId, input, now = () => /* @__PURE__ */ new Date()) {
-  return withTaskLock(paths, taskId, () => addRequirementLike(
-    paths,
-    taskId,
-    input,
-    "acceptanceCriteria",
-    "acceptance_criterion_added",
-    now
-  ));
-}
-async function setTaskBrief(paths, taskId, sourceFile, actor = "cli", now = () => /* @__PURE__ */ new Date()) {
-  return setTaskDocument(paths, taskId, sourceFile, "brief.md", actor, now);
-}
-async function setTaskPlan(paths, taskId, sourceFile, actor = "cli", now = () => /* @__PURE__ */ new Date()) {
-  return setTaskDocument(paths, taskId, sourceFile, "plan.md", actor, now);
-}
-function nextGate(task, rows = []) {
-  if (task.status === "blocked") return "unblock to ready, in_progress, or checking";
-  if (task.status === "archived") return "none";
-  if (task.status === "checking") {
-    if (isReworkEligible(task, rows)) return "task rework";
-    if (incompleteRequirements(task, rows).length > 0) return "continue checking";
-    return "finish";
-  }
-  return FORWARD_TRANSITIONS2[task.status] ?? "none";
-}
-function incompleteRequirements(task, rows = []) {
-  const passingIds = new Set(rows.filter((row) => row.result === "pass").map((row) => row.requirementId));
-  return [...task.requirements, ...task.acceptanceCriteria].map((requirement) => requirement.id).filter((id) => !passingIds.has(id));
-}
-function taskView(task, rows) {
-  return {
-    ...task,
-    failedOrUncoveredIds: failedOrUncoveredCheckIds(rows),
-    reworkEligible: isReworkEligible(task, rows),
-    nextAction: nextGate(task, rows)
-  };
-}
-function failedOrUncoveredCheckIds(rows) {
-  return rows.filter(({ result }) => result === "fail" || result === "uncovered").map(({ requirementId }) => requirementId);
-}
-function isReworkEligible(task, rows) {
-  return task.status === "checking" && failedOrUncoveredCheckIds(rows).length > 0;
-}
-function assertTransitionAllowed(oldStatus, newStatus, unblock) {
-  if (oldStatus === "blocked") {
-    if (unblock && UNBLOCK_TARGETS2.has(newStatus)) return;
-    throw new TransitionError(`Blocked task requires explicit unblock to ready, in_progress, or checking.`);
-  }
-  if (unblock) throw new TransitionError(`Only blocked tasks can be unblocked.`);
-  if (BLOCKABLE.has(oldStatus) && newStatus === "blocked") return;
-  if (FORWARD_TRANSITIONS2[oldStatus] === newStatus) return;
-  throw new TransitionError(`Cannot transition task from ${oldStatus} to ${newStatus}.`);
-}
-async function addRequirementLike(paths, taskId, input, collection, eventType, now) {
-  await readConfig(paths);
-  assertBoundedNonempty2(input.id, "Requirement ID", 200);
-  assertNonempty2(input.text, "Requirement text");
-  assertBoundedNonempty2(input.actor, "Requirement actor", 200);
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
-  const id = input.id.trim();
-  const text = input.text.trim();
-  const actor = input.actor.trim();
-  await executeTaskMutation(paths, location, {
-    mutationKind: eventType,
-    actor,
-    timestamp: now().toISOString(),
-    fingerprint: mutationFingerprint({
-      schemaVersion: SCHEMA_VERSION,
-      type: eventType,
-      actor,
-      requirementId: id,
-      text
-    })
-  }, async (timestamp, recovering) => {
-    const current = await findTask(paths, taskId);
-    assertTaskMutable(current);
-    const allRequirements = [...current.task.requirements, ...current.task.acceptanceCriteria];
-    if (allRequirements.some((requirement2) => requirement2.id === id)) {
-      if (recovering) {
-        throw new SchemaError(`Pending ${eventType} mutation already has requirement ${id}, but task.json does not match its recorded target.`);
-      }
-      throw new ValidationError(`Requirement ID already exists in task ${taskId}: ${id}`);
-    }
-    const requirement = {
-      schemaVersion: SCHEMA_VERSION,
-      id,
-      text,
-      createdAt: timestamp
-    };
-    const task = {
-      ...current.task,
-      [collection]: [...current.task[collection], requirement],
-      updatedAt: timestamp
-    };
-    return {
-      expected: mutationTargetSummary(paths, [{
-        filename: join9(current.directory, "task.json"),
-        contents: `${JSON.stringify(task, null, 2)}
-`
-      }], mutationValueIdentity({ requirementId: id }, requirement)),
-      completion: {
-        schemaVersion: SCHEMA_VERSION,
-        type: eventType,
-        mutationKind: eventType,
-        mutationProtocolVersion: 1,
-        timestamp,
-        actor,
-        requirementId: id
-      },
-      apply: () => writeJsonAtomic(join9(current.directory, "task.json"), task, paths.repoRoot)
-    };
-  });
-  return (await findTask(paths, taskId)).task;
-}
-async function setTaskDocument(paths, taskId, sourceFile, artifact, actor, now) {
-  return withTaskLock(paths, taskId, () => setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor, now));
-}
-async function setTaskDocumentLocked(paths, taskId, sourceFile, artifact, actor, now) {
-  await readConfig(paths);
-  assertNonempty2(sourceFile, "Source file");
-  assertBoundedNonempty2(actor, "Task document actor", 200);
-  const location = await findTask(paths, taskId);
-  assertTaskMutable(location);
-  const { bytes } = await readTaskDocumentSource(paths, sourceFile);
-  let contents;
-  try {
-    contents = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch (error) {
-    throw new ValidationError(`Task document source must contain valid UTF-8: ${sourceFile}`, error);
-  }
-  if (contents.trim() === "") {
-    throw new ValidationError(`Task document source must not be empty: ${sourceFile}`);
-  }
-  const type = artifact === "brief.md" ? "brief_set" : "plan_set";
-  const normalizedActor = actor.trim();
-  await executeTaskMutation(paths, location, {
-    mutationKind: type,
-    actor: normalizedActor,
-    timestamp: now().toISOString(),
-    fingerprint: mutationFingerprint({
-      schemaVersion: SCHEMA_VERSION,
-      type,
-      actor: normalizedActor,
-      artifact,
-      contentsSha256: mutationFingerprint(contents)
-    })
-  }, async (timestamp) => ({
-    expected: mutationTargetSummary(paths, [{
-      filename: join9(location.directory, artifact),
-      contents
-    }], { artifact, valueSha256: mutationFingerprint(contents) }),
-    completion: {
-      schemaVersion: SCHEMA_VERSION,
-      type,
-      mutationKind: type,
-      mutationProtocolVersion: 1,
-      timestamp,
-      actor: normalizedActor,
-      artifact
-    },
-    apply: () => writeManagedMutationTarget(paths, location, join9(location.directory, artifact), contents)
-  }));
-  return { taskId, artifact, estimatedBytes: bytes.byteLength };
-}
-async function assertTaskLifecycleStructure(paths, location, matchingPendingTransition = false) {
-  const report = await validateTaskStructure(paths, location);
-  const issues = matchingPendingTransition ? report.issues.filter(({ code }) => code !== "TASK_STATE_SCOPE_INVALID") : report.issues;
-  if (issues.length === 0) return;
-  const issue = issues[0];
-  throw new SchemaError(
-    `Task ${location.task.id} lifecycle is blocked by ${issue.code} at ${issue.path}: ${issue.message}. Run \`vinea validate\` to inspect all task-structure issues.`
-  );
-}
-async function readTaskDocumentSource(paths, sourceFile) {
-  const source = sourceFile.trim();
-  if (isAbsolute5(source) || /^\\/u.test(source) || /^[a-z]:[\\/]/iu.test(source) || source.includes("\0")) {
-    throw new ValidationError(`Task document source must be repository-relative: ${sourceFile}`);
-  }
-  const segments = source.split(/[\\/]/u);
-  if (segments.includes("..")) {
-    throw new ValidationError(`Task document source must not contain parent traversal: ${sourceFile}`);
-  }
-  const relativeSource = segments.filter((segment) => segment !== "" && segment !== ".").join("/");
-  if (relativeSource === "") {
-    throw new ValidationError(`Task document source must name a repository-relative file: ${sourceFile}`);
-  }
-  let filename;
-  try {
-    filename = assertInside(paths.repoRoot, resolve7(paths.repoRoot, relativeSource));
-    await assertNoSymlink(paths.repoRoot, filename);
-  } catch (error) {
-    throw new ValidationError(`Task document source must not contain symbolic links: ${sourceFile}`, error);
-  }
-  let entry;
-  try {
-    entry = await lstat11(filename);
-  } catch (error) {
-    throw new ValidationError(`Unable to inspect task document source ${sourceFile}`, error);
-  }
-  if (!entry.isFile() || entry.isSymbolicLink()) {
-    throw new ValidationError(`Task document source must be a regular non-symlink file: ${sourceFile}`);
-  }
-  try {
-    return { bytes: await readFile9(filename) };
-  } catch (error) {
-    throw new ValidationError(`Unable to read task document source ${sourceFile}`, error);
-  }
-}
-async function assertReadyPrerequisites(paths, location) {
-  const briefPath = join9(location.directory, "brief.md");
-  const planPath = join9(location.directory, "plan.md");
-  await Promise.all([
-    assertNoSymlink(paths.repoRoot, briefPath),
-    assertNoSymlink(paths.repoRoot, planPath)
-  ]);
-  const [brief, plan] = await Promise.all([
-    readFile9(briefPath, "utf8"),
-    readFile9(planPath, "utf8")
-  ]);
-  const missing = [];
-  if (brief.trim() === "") missing.push("brief.md");
-  if (plan.trim() === "") missing.push("plan.md");
-  const requirements = Array.isArray(location.task.requirements) ? location.task.requirements : [];
-  const acceptanceCriteria = Array.isArray(location.task.acceptanceCriteria) ? location.task.acceptanceCriteria : [];
-  if (![...requirements, ...acceptanceCriteria].some(isStructurallyValidRequirement)) {
-    missing.push("valid requirement or acceptance criterion");
-  }
-  if (missing.length > 0) {
-    throw new TransitionError(`Task is not ready; missing ${missing.join(", ")}.`);
-  }
-}
-function isStructurallyValidRequirement(value) {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value;
-  if (candidate.schemaVersion !== SCHEMA_VERSION) return false;
-  if (typeof candidate.id !== "string" || candidate.id.trim() === "") return false;
-  if (typeof candidate.text !== "string" || candidate.text.trim() === "") return false;
-  if (typeof candidate.createdAt !== "string") return false;
-  const parsed = new Date(candidate.createdAt);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === candidate.createdAt;
-}
-function matchedRules(searchable, rules) {
-  return rules.filter((rule) => {
-    const normalizedRule = normalize(rule);
-    return normalizedRule !== "" && ` ${searchable} `.includes(` ${normalizedRule} `);
-  });
-}
-function normalize(value) {
-  return value.normalize("NFKD").toLowerCase().replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
-}
-function slugify(value) {
-  return normalize(value).replace(/ /g, "-") || "task";
-}
-function formatTaskTimestamp(date) {
-  if (Number.isNaN(date.valueOf())) throw new ValidationError("Clock returned an invalid date.");
-  const iso = date.toISOString();
-  return `${iso.slice(0, 10).replace(/-/g, "")}-${iso.slice(11, 19).replace(/:/g, "")}`;
-}
-function assertNonempty2(value, label) {
-  if (value.trim() === "") throw new ValidationError(`${label} must not be empty.`);
-}
-function assertBoundedNonempty2(value, label, maxBytes) {
-  assertNonempty2(value, label);
-  if (Buffer.byteLength(value.trim(), "utf8") > maxBytes) {
-    throw new ValidationError(`${label} exceeds the ${maxBytes}-byte audit metadata limit.`);
-  }
-}
-function boundedTrimmed(value, label, maxBytes) {
-  assertBoundedNonempty2(value, label, maxBytes);
-  return value.trim();
-}
-function assertHost(value) {
-  if (value !== "codex" && value !== "claude") {
-    throw new ValidationError(`Invalid host: ${value}. Expected codex|claude.`);
-  }
-}
-function assertLearningCandidatesClassified(task) {
-  const candidates = task.learningCandidates;
-  if (candidates === void 0) return;
-  if (!Array.isArray(candidates)) {
-    throw new FinishGateError("Finish learning candidate data is malformed.");
-  }
-  for (const candidate of candidates) {
-    if (!isRecord9(candidate) || candidate.schemaVersion !== SCHEMA_VERSION || typeof candidate.id !== "string" || candidate.id.trim() === "" || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp5(candidate.proposedAt)) {
-      throw new FinishGateError("Finish learning candidate data is malformed.");
-    }
-    if (candidate.status === "accepted") {
-      if (candidate.confirmedBy !== "user" || !isIsoTimestamp5(candidate.acceptedAt)) {
-        throw new FinishGateError(`Finish learning candidate ${candidate.id} is not validly accepted.`);
-      }
-      continue;
-    }
-    if (candidate.status === "archived") {
-      if (!isIsoTimestamp5(candidate.archivedAt) || typeof candidate.archiveReason !== "string" || candidate.archiveReason.trim() === "") {
-        throw new FinishGateError(`Finish learning candidate ${candidate.id} is not validly archived.`);
-      }
-      continue;
-    }
-    throw new FinishGateError(
-      `Finish learning candidate ${candidate.id} must be accepted or archived before completion.`
-    );
-  }
-}
-function isIsoTimestamp5(value) {
-  if (typeof value !== "string") return false;
-  const parsed = new Date(value);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
-}
-function isRecord9(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-async function inspectGitStatus(repoRoot) {
-  try {
-    const result = await execFileAsync2("git", ["status", "--porcelain"], {
-      cwd: repoRoot,
-      encoding: "utf8"
-    });
-    return {
-      available: true,
-      porcelain: result.stdout,
-      error: null
-    };
-  } catch (error) {
-    return {
-      available: false,
-      porcelain: "",
-      error: error instanceof Error ? error.message : "Unable to run git status --porcelain."
-    };
-  }
-}
-var execFileAsync2, DEFAULT_ARCHIVE_OPERATIONS, DEFAULT_REWORK_OPERATIONS, FORWARD_TRANSITIONS2, BLOCKABLE, UNBLOCK_TARGETS2;
-var init_workflow = __esm({
-  "src/core/workflow.ts"() {
-    "use strict";
-    init_config();
-    init_check();
-    init_context();
-    init_errors();
-    init_evidence();
-    init_git();
-    init_task_store();
-    init_paths();
-    init_schema();
-    init_validate();
-    init_types();
-    init_json();
-    execFileAsync2 = promisify2(execFile2);
-    DEFAULT_ARCHIVE_OPERATIONS = { removeTaskSessionBindings };
-    DEFAULT_REWORK_OPERATIONS = {
-      appendJournal: appendJsonl,
-      appendHistory: appendJsonl,
-      writeCheck: (paths, location, contents) => writeManagedMutationTarget(
-        paths,
-        location,
-        join9(location.directory, "check.md"),
-        contents
-      ),
-      writeTask: writeJsonAtomic
-    };
-    FORWARD_TRANSITIONS2 = {
-      planning: "ready",
-      ready: "in_progress",
-      in_progress: "checking",
-      checking: "finished",
-      finished: "archived"
-    };
-    BLOCKABLE = /* @__PURE__ */ new Set(["planning", "ready", "in_progress", "checking"]);
-    UNBLOCK_TARGETS2 = /* @__PURE__ */ new Set(["ready", "in_progress", "checking"]);
-  }
-});
-
-// package.json
-var package_default = {
-  name: "vinea",
-  version: "0.3.1",
-  private: true,
-  type: "module",
-  engines: {
-    node: ">=18.18"
-  },
-  scripts: {
-    build: "node scripts/build.mjs",
-    typecheck: "tsc --noEmit",
-    test: "vitest run",
-    "package:plugin": "node scripts/package-public-plugin.mjs",
-    "check:plugin": "node scripts/check-public-plugin.mjs",
-    release: "node scripts/release.mjs",
-    check: "npm run typecheck && npm test && npm run package:plugin && npm run check:plugin",
-    "test:e2e:manual": "node dist/vinea.mjs --help"
-  },
-  devDependencies: {
-    "@types/node": "^18.19.76",
-    esbuild: "^0.25.2",
-    typescript: "^5.8.3",
-    vitest: "^2.1.9"
-  }
-};
-
-// src/cli/args.ts
-var UsageError = class extends Error {
-  constructor(message, details) {
-    super(message);
-    this.details = details;
-    this.name = "UsageError";
-  }
-  exitCode = 2;
-  code = "VINEA_VALIDATION_INVALID";
-};
-function parseOptions(args, valueOptions, booleanOptions) {
-  const parsed = /* @__PURE__ */ new Map();
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (parsed.has(argument)) throw new UsageError(`Duplicate option: ${argument}`);
-    if (booleanOptions.has(argument)) {
-      parsed.set(argument, true);
-      continue;
-    }
-    if (!valueOptions.has(argument)) throw new UsageError(`Unknown option: ${argument}`);
-    const value = args[index + 1];
-    if (value === void 0 || value.startsWith("--")) {
-      throw new UsageError(`Missing value for ${argument}.`);
-    }
-    parsed.set(argument, value);
-    index += 1;
-  }
-  return parsed;
-}
-function requiredOption(options, name) {
-  const value = options.get(name);
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new UsageError(`Missing required option: ${name}.`);
-  }
-  return value;
-}
-function optionalValue(options, name) {
-  const value = options.get(name);
-  return typeof value === "string" ? value : void 0;
-}
-function requiredTaskId(value) {
-  if (value === void 0 || value.startsWith("--") || value.trim() === "") {
-    throw new UsageError("Missing task ID.");
-  }
-  return value;
-}
-function oneOf(value, allowed, option) {
-  if (!allowed.includes(value)) {
-    throw new UsageError(`Invalid ${option} value: ${value}. Expected ${allowed.join("|")}.`);
-  }
-  return value;
-}
-function parseExitCode(value) {
-  if (!/^\d+$/.test(value)) {
-    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new UsageError(`Invalid --exit-code value: ${value}. Expected a non-negative integer.`);
-  }
-  return parsed;
-}
-function parseNonNegativeInteger(value, option) {
-  if (!/^\d+$/.test(value)) {
-    throw new UsageError(`Invalid ${option} value: ${value}. Expected a non-negative integer.`);
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) {
-    throw new UsageError(`Invalid ${option} value: ${value}. Expected a non-negative integer.`);
-  }
-  return parsed;
-}
-function commaList(value, option) {
-  const values = value.split(",").map((item) => item.trim());
-  if (values.some((item) => item === "")) {
-    throw new UsageError(`${option} must be a comma-separated list of nonempty values.`);
-  }
-  return values;
-}
-function requestsJson(args) {
-  return args.includes("--json");
-}
-
-// src/cli/render.ts
-init_errors();
-init_workflow();
-var helpText = `Usage: vinea <command>
-
-Commands:
-  init
-  migrate
-  orient
-  propose
-  continue
-  check
-  check show
-  check history
-  finish
-  archive
-  doctor
-  validate
-  task list
-  task show
-  task transition
-  task rework
-  task unblock
-  task require
-  task accept
-  task set-plan
-  task set-brief
-  context add
-  context list
-  evidence record
-  learning propose
-  learning accept
-  learning archive
-`;
-function writeOutput(value, json, human) {
-  process.stdout.write(json ? `${JSON.stringify(value)}
-` : human);
-}
-function reportError(error, json) {
-  const normalized = normalizeError(error);
-  if (json) {
-    const envelope = {
-      error: {
-        code: normalized.code,
-        message: normalized.message,
-        ...normalized.details === void 0 ? {} : { details: normalized.details }
-      }
-    };
-    process.stdout.write(`${JSON.stringify(envelope)}
-`);
-  } else {
-    process.stderr.write(`${normalized.code}: ${normalized.message}
-`);
-  }
-  return normalized.exitCode;
-}
-function renderProposal(proposal) {
-  return [
-    `title: ${proposal.title}`,
-    `description: ${proposal.description}`,
-    `risk: ${proposal.risk.level}`,
-    `risk reasons: ${proposal.risk.reasons.length ? proposal.risk.reasons.join(", ") : "none"}`,
-    `quality mode: ${proposal.qualityMode}`,
-    `execution mode: ${proposal.executionMode}`,
-    "confirmation required",
-    ""
-  ].join("\n");
-}
-function renderInlineAudit(record) {
-  return [
-    "Inline skip recorded.",
-    `timestamp: ${record.timestamp}`,
-    `request: ${record.requestSummary}`,
-    `reason: ${record.reason}`,
-    ""
-  ].join("\n");
-}
-function renderTask(task, checkRows = []) {
-  const incomplete = incompleteRequirements(task, checkRows);
-  const failedOrUncovered = failedOrUncoveredCheckIds(checkRows);
-  return [
-    `task ID: ${task.id}`,
-    `status: ${task.status}`,
-    `verification revision: ${task.verificationRevision}`,
-    `quality mode: ${task.qualityMode}`,
-    `execution mode: ${task.executionMode}`,
-    `risk: ${task.risk.level}`,
-    `risk reasons: ${task.risk.reasons.length ? task.risk.reasons.join(", ") : "none"}`,
-    `incomplete requirements: ${incomplete.length ? incomplete.join(", ") : "none"}`,
-    `failed or uncovered checks: ${failedOrUncovered.length ? failedOrUncovered.join(", ") : "none"}`,
-    `rework eligible: ${isReworkEligible(task, checkRows)}`,
-    `next gate: ${nextGate(task, checkRows)}`,
-    ""
-  ].join("\n");
-}
-function renderContextManifest(manifest) {
-  if (manifest.references.length === 0) {
-    return `No context references. Budget: 0/${manifest.limits.maxFiles} files, 0/${manifest.limits.maxEstimatedBytes} bytes.
-`;
-  }
-  return [
-    ...manifest.references.map(
-      (reference) => `${reference.path} (${reference.estimatedBytes} bytes): ${reference.purpose}`
-    ),
-    `Budget: ${manifest.totals.files}/${manifest.limits.maxFiles} files, ${manifest.totals.estimatedBytes}/${manifest.limits.maxEstimatedBytes} bytes.`,
-    ""
-  ].join("\n");
-}
-function renderEvidence(evidence) {
-  return [
-    `Evidence: ${evidence.id}`,
-    `kind: ${evidence.kind}`,
-    `result: ${evidence.result}`,
-    `summary: ${evidence.summary}`,
-    ""
-  ].join("\n");
-}
-function renderCheckSummary(summary) {
-  const lines = summary.rows.map(
-    (row) => `${row.requirementId}: ${row.result}; paths: ${row.paths.join(", ")}; evidence: ${row.evidenceIds.join(", ") || "none"}; ${row.summary}`
-  );
-  lines.push(
-    `Totals: ${summary.totals.total} rows; ${summary.totals.pass} pass; ${summary.totals.fail} fail; ${summary.totals.uncovered} uncovered.`,
-    ""
-  );
-  return lines.join("\n");
-}
-function renderCheckHistoryListing(history) {
-  if (history.revisions.length === 0) return `No check-history snapshots for ${history.taskId}.
-`;
-  return [
-    `Check history for ${history.taskId}:`,
-    ...history.revisions.map((revision) => [
-      `revision ${revision.verificationRevision}: ${revision.archivedAt}; ${revision.reworkReason}`,
-      `  ${revision.totals.pass} pass; ${revision.totals.fail} fail; ${revision.totals.uncovered} uncovered.`
-    ].join("\n")),
-    ""
-  ].join("\n");
-}
-function renderCheckHistorySnapshot(snapshot) {
-  return [
-    `Check history for ${snapshot.taskId}, revision ${snapshot.verificationRevision}:`,
-    `archived at: ${snapshot.archivedAt}`,
-    `reason: ${snapshot.reworkReason}`,
-    `operation: ${snapshot.operationId}`,
-    ...snapshot.rows.map((row) => `${row.requirementId}: ${row.result}; paths: ${row.paths.join(", ")}; evidence: ${row.evidenceIds.join(", ") || "none"}; ${row.summary}`),
-    ""
-  ].join("\n");
-}
-function renderOrient(summary) {
-  const lines = [
-    `workspace healthy: ${summary.health.healthy}`,
-    `git available: ${summary.gitStatus.available}`,
-    `git status: ${summary.gitStatus.porcelain === "" ? "clean" : summary.gitStatus.porcelain.trimEnd()}`,
-    `binding: ${summary.binding === null ? "none" : summary.binding.status}`,
-    `recommendation: ${summary.recommendation}`
-  ];
-  for (const candidate of summary.candidates) {
-    lines.push(
-      `${candidate.id}: ${candidate.title} [${candidate.status}; ${candidate.qualityMode}; ${candidate.executionMode}]`,
-      `  verification revision: ${candidate.verificationRevision}`,
-      `  requirements not covered: ${candidate.requirementsNotCovered.length ? candidate.requirementsNotCovered.join(", ") : "none"}`,
-      `  failed or uncovered checks: ${candidate.failedOrUncoveredIds.length ? candidate.failedOrUncoveredIds.join(", ") : "none"}`,
-      `  rework eligible: ${candidate.reworkEligible}`,
-      `  next action: ${candidate.nextAction}`,
-      `  context references: ${candidate.contextReferences.length ? candidate.contextReferences.map(({ path }) => path).join(", ") : "none"}`,
-      `  latest evidence: ${candidate.latestEvidence?.id ?? "none"}`,
-      `  latest check event: ${String(candidate.latestCheckEvent?.type ?? "none")}`
-    );
-  }
-  return `${lines.join("\n")}
-`;
-}
-function renderDoctorReport(report) {
-  const lines = [
-    `initialized: ${report.initialized}`,
-    `config schema: ${report.configSchemaVersion ?? "missing"}`,
-    `supported schema: ${report.supportedSchema}`,
-    `missing directories: ${report.missingRequiredDirectories.length ? report.missingRequiredDirectories.join(", ") : "none"}`,
-    `git available: ${report.gitStatus.available}`,
-    `healthy: ${report.healthy}`
-  ];
-  if (report.migrationGuidance) lines.push(`guidance: ${report.migrationGuidance}`);
-  for (const rework of report.rework) {
-    lines.push(
-      `rework: ${rework.taskId}; status: ${rework.status}; issues: ${rework.issues.map(({ code }) => code).join(", ")}`
-    );
-  }
-  if (report.gitStatus.error) lines.push(`git guidance: ${report.gitStatus.error}`);
-  for (const lock of report.taskLocks) {
-    const label = lock.path === ".vinea/.runtime/learning-promotion.lock" ? "learning promotion lock" : "task lock";
-    lines.push(
-      `${label}: ${lock.path}; task: ${lock.taskId ?? "unknown"}; age milliseconds: ${lock.ageMilliseconds ?? "unknown"}; owner: ${lock.owner.status}`,
-      `${label} guidance: ${lock.recoveryInstruction}`
-    );
-  }
-  return `${lines.join("\n")}
-`;
-}
-function renderValidationReport(report) {
-  if (report.issues.length === 0) return "Vinea state is valid.\n";
-  return `${report.issues.map(
-    (issue) => `[${issue.code}] ${issue.path}: ${issue.message}`
-  ).join("\n")}
-`;
-}
-function normalizeError(error) {
-  if (error instanceof UsageError) {
-    return {
-      code: error.code,
-      message: error.message,
-      details: error.details,
-      exitCode: error.exitCode
-    };
-  }
-  if (error instanceof VineaError) {
-    return { code: error.code, message: error.message, exitCode: 1 };
-  }
-  return {
-    code: "VINEA_SCHEMA_INVALID",
-    message: "Unexpected Vinea failure.",
-    exitCode: 1
-  };
-}
-
-// src/cli.ts
-init_config();
-
-// src/core/migrate.ts
-init_check();
-init_evidence();
-init_errors();
-init_json();
-init_migration_state();
-init_paths();
-init_schema();
-init_task_store();
-init_types();
-import { createHash as createHash3 } from "node:crypto";
-import { lstat as lstat12, readFile as readFile10, readdir as readdir4 } from "node:fs/promises";
-import { join as join10 } from "node:path";
-var TASK_ID_PATTERN4 = /^t-\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-var TASK_STATUSES = /* @__PURE__ */ new Set([
-  "planning",
-  "ready",
-  "in_progress",
-  "checking",
-  "finished",
-  "archived",
-  "blocked"
-]);
-async function migrateWorkspace(paths) {
-  const savedState = await readSchemaMigrationState(paths);
-  await assertNoSymlink(paths.repoRoot, paths.config);
-  const config = await readJson(paths.config, paths.repoRoot);
-  if (isCurrentConfig(config)) {
-    assertSupportedSchema(config, paths.config);
-    if (savedState?.phase === "intent") {
-      const taskDirectories2 = await listAllTaskDirectories(paths);
-      assertStateMatchesTaskDirectories(savedState, taskDirectories2);
-      await migrateTaskDirectories(paths, taskDirectories2);
-      await migrateSessionBindings(paths);
-      await completeMigrationState(paths, savedState);
-      return migrationResult(savedState.migratedTaskIds);
-    }
-    const migratedSessionBindings = await migrateSessionBindings(paths);
-    if (migratedSessionBindings.length > 0) {
-      return migrationResult([], SCHEMA_VERSION);
-    }
-    return {
-      status: "already-current",
-      fromSchemaVersion: SCHEMA_VERSION,
-      toSchemaVersion: SCHEMA_VERSION,
-      migratedTaskIds: []
-    };
-  }
-  if (!isLegacyConfig(config)) {
-    throw new SchemaError(`Vinea migration supports only schema version ${LEGACY_SCHEMA_VERSION} workspaces.`);
-  }
-  if (savedState?.phase === "completed") {
-    throw new SchemaError("Schema migration state is completed while config.json still uses schema version 1.");
-  }
-  const taskDirectories = await listAllTaskDirectories(paths);
-  const state = savedState ?? createMigrationState(taskDirectories);
-  assertStateMatchesTaskDirectories(state, taskDirectories);
-  if (savedState === null) await writeSchemaMigrationState(paths, state);
-  await migrateTaskDirectories(paths, taskDirectories);
-  await migrateSessionBindings(paths);
-  await writeJsonAtomic(paths.config, {
-    ...config,
-    schemaVersion: SCHEMA_VERSION
-  }, paths.repoRoot);
-  await completeMigrationState(paths, state);
-  return migrationResult(state.migratedTaskIds);
-}
-function createMigrationState(taskDirectories) {
-  const taskIds = taskDirectories.map(({ taskId }) => taskId);
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    type: "schema_migration",
-    operationId: `schema-v1-to-v2-${createHash3("sha256").update(taskIds.join("\n")).digest("hex").slice(0, 16)}`,
-    fromSchemaVersion: LEGACY_SCHEMA_VERSION,
-    toSchemaVersion: SCHEMA_VERSION,
-    phase: "intent",
-    taskIds,
-    migratedTaskIds: [...taskIds],
-    startedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-}
-async function completeMigrationState(paths, state) {
-  await writeSchemaMigrationState(paths, {
-    ...state,
-    phase: "completed",
-    completedAt: (/* @__PURE__ */ new Date()).toISOString()
-  });
-}
-function migrationResult(migratedTaskIds, fromSchemaVersion = LEGACY_SCHEMA_VERSION) {
-  return {
-    status: "migrated",
-    fromSchemaVersion,
-    toSchemaVersion: SCHEMA_VERSION,
-    migratedTaskIds
-  };
-}
-async function listAllTaskDirectories(paths) {
-  const taskDirectories = [
-    ...await listTaskDirectories(paths, paths.activeTasks, "active"),
-    ...await listTaskDirectories(paths, paths.archivedTasks, "archive")
-  ].sort((left, right) => left.taskId.localeCompare(right.taskId));
-  const ids = taskDirectories.map(({ taskId }) => taskId);
-  if (new Set(ids).size !== ids.length) {
-    throw new SchemaError("A schema migration cannot process duplicate task IDs across active and archive storage.");
-  }
-  return taskDirectories;
-}
-function assertStateMatchesTaskDirectories(state, taskDirectories) {
-  const taskIds = taskDirectories.map(({ taskId }) => taskId);
-  if (taskIds.length !== state.taskIds.length || taskIds.some((taskId, index) => taskId !== state.taskIds[index])) {
-    throw new SchemaError("Task storage changed during schema migration; rerun only after the workspace is stable.");
-  }
-}
-async function migrateTaskDirectories(paths, taskDirectories) {
-  for (const { directory, taskId, scope } of taskDirectories) {
-    const taskPath = join10(directory, "task.json");
-    await assertNoSymlink(paths.repoRoot, taskPath);
-    const task = await readJson(taskPath, paths.repoRoot);
-    const currentTask = isCurrentTaskRecord(task) ? task : isLegacyTaskRecord(task) && task.id === taskId ? migrateTaskRecord(task) : null;
-    if (currentTask === null) {
-      throw new SchemaError(`Unable to migrate invalid schema-v1 task record in ${taskPath}.`);
-    }
-    const taskWasMigrated = !isCurrentTaskRecord(task);
-    const checkPath = join10(directory, "check.md");
-    await assertNoSymlink(paths.repoRoot, checkPath);
-    const currentCheck = await readFile10(checkPath, "utf8");
-    const migratedCheck = migrateLegacyCheckDocument(
-      currentCheck,
-      paths.repoRoot,
-      [...currentTask.requirements, ...currentTask.acceptanceCriteria].map(({ id }) => id),
-      await readEvidenceForMigration(paths, directory),
-      checkPath
-    );
-    if (migratedCheck !== currentCheck) {
-      await writeManagedMutationTarget(
-        paths,
-        { task: currentTask, directory, scope },
-        checkPath,
-        migratedCheck
-      );
-    }
-    await ensureCheckHistoryArtifact(paths, { task: currentTask, directory, scope });
-    if (taskWasMigrated) await writeJsonAtomic(taskPath, currentTask, paths.repoRoot);
-  }
-}
-async function ensureCheckHistoryArtifact(paths, location) {
-  const filename = join10(location.directory, "check-history.jsonl");
-  await assertNoSymlink(paths.repoRoot, filename);
-  try {
-    const contents = await readFile10(filename, "utf8");
-    if (contents !== "") {
-      throw new SchemaError(`Legacy workspace has unexpected check history at ${filename}.`);
-    }
-  } catch (error) {
-    if (!isMissingFile2(error)) throw error;
-    await writeManagedMutationTarget(paths, location, filename, "");
-  }
-}
-async function migrateSessionBindings(paths) {
-  await assertNoSymlink(paths.repoRoot, paths.sessions);
-  let entries;
-  try {
-    entries = await readdir4(paths.sessions, { withFileTypes: true });
-  } catch (error) {
-    if (isMissingFile2(error)) return [];
-    throw new SchemaError(`Unable to list session bindings in ${paths.sessions} during migration.`, error);
-  }
-  const migrated = [];
-  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    const filename = join10(paths.sessions, entry.name);
-    if (!isSessionBindingFilename(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
-      throw new SchemaError(`Invalid session binding ${filename} during migration.`);
-    }
-    await assertNoSymlink(paths.repoRoot, filename);
-    const value = await readJson(filename, paths.repoRoot);
-    if (isCurrentSessionBinding(value)) continue;
-    if (!isLegacySessionBinding(value)) {
-      throw new SchemaError(`Unable to migrate invalid schema-v1 session binding ${filename}.`);
-    }
-    await writeJsonAtomic(filename, {
-      ...value,
-      schemaVersion: SCHEMA_VERSION
-    }, paths.repoRoot);
-    migrated.push(filename);
-  }
-  return migrated;
-}
-function migrateTaskRecord(task) {
-  const {
-    schemaVersion: _schemaVersion,
-    requirements,
-    acceptanceCriteria,
-    learningCandidates,
-    ...taskBase
-  } = task;
-  return {
-    ...taskBase,
-    schemaVersion: SCHEMA_VERSION,
-    verificationRevision: 0,
-    requirements: requirements.map(migrateRequirement),
-    acceptanceCriteria: acceptanceCriteria.map(migrateRequirement),
-    ...learningCandidates === void 0 ? {} : { learningCandidates: learningCandidates.map(migrateLearningCandidate) }
-  };
-}
-function migrateRequirement(requirement) {
-  return { ...requirement, schemaVersion: SCHEMA_VERSION };
-}
-function migrateLearningCandidate(candidate) {
-  return { ...candidate, schemaVersion: SCHEMA_VERSION };
-}
-async function listTaskDirectories(paths, root, scope) {
-  await assertNoSymlink(paths.repoRoot, root);
-  let entries;
-  try {
-    entries = await readdir4(root, { withFileTypes: true });
-  } catch (error) {
-    throw new SchemaError(`Unable to list task directory ${root} during migration.`, error);
-  }
-  const result = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-    if (!TASK_ID_PATTERN4.test(entry.name)) {
-      throw new SchemaError(`Invalid task directory ${entry.name} during migration.`);
-    }
-    const directory = join10(root, entry.name);
-    await assertNoSymlink(paths.repoRoot, directory);
-    const stat = await lstat12(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new SchemaError(`Invalid task directory ${directory} during migration.`);
-    }
-    result.push({ directory, taskId: entry.name, scope });
-  }
-  return result;
-}
-async function readEvidenceForMigration(paths, directory) {
-  const filename = join10(directory, "evidence.jsonl");
-  await assertNoSymlink(paths.repoRoot, filename);
-  let contents;
-  try {
-    contents = await readFile10(filename, "utf8");
-  } catch (error) {
-    throw new SchemaError(`Unable to read evidence records ${filename} during migration.`, error);
-  }
-  const seen = /* @__PURE__ */ new Set();
-  return contents.split("\n").filter(Boolean).map((line, index) => {
-    let value;
-    try {
-      value = JSON.parse(line);
-    } catch (error) {
-      throw new SchemaError(`Invalid evidence JSONL in ${filename} at line ${index + 1}`, error);
-    }
-    let evidence;
-    try {
-      evidence = normalizeEvidenceRecord(value, true);
-    } catch (error) {
-      throw new SchemaError(`Invalid evidence record in ${filename} at line ${index + 1}`, error);
-    }
-    if (seen.has(evidence.id)) {
-      throw new SchemaError(`Duplicate evidence ID ${evidence.id} in ${filename} during migration.`);
-    }
-    seen.add(evidence.id);
-    return evidence;
-  });
-}
-function isCurrentConfig(value) {
-  return isRecord10(value) && value.schemaVersion === SCHEMA_VERSION;
-}
-function isLegacyConfig(value) {
-  return isRecord10(value) && value.schemaVersion === LEGACY_SCHEMA_VERSION && hasOnlyKeys2(value, ["schemaVersion", "riskRules", "context"]) && isRiskRules(value.riskRules) && isContextLimits(value.context);
-}
-function isCurrentTaskRecord(value) {
-  return isRecord10(value) && value.schemaVersion === SCHEMA_VERSION && isTaskBase(value) && isNonNegativeSafeInteger3(value.verificationRevision) && isRequirements(value.requirements, SCHEMA_VERSION) && isRequirements(value.acceptanceCriteria, SCHEMA_VERSION) && isLearningCandidates2(value.learningCandidates, SCHEMA_VERSION) && isCommitMetadata3(value.commit);
-}
-function isCurrentSessionBinding(value) {
-  return isRecord10(value) && value.schemaVersion === SCHEMA_VERSION && isSessionBindingBase(value);
-}
-function isLegacySessionBinding(value) {
-  return isRecord10(value) && value.schemaVersion === LEGACY_SCHEMA_VERSION && isSessionBindingBase(value);
-}
-function isSessionBindingBase(value) {
-  return hasOnlyKeys2(value, ["schemaVersion", "taskId", "boundAt"]) && typeof value.taskId === "string" && TASK_ID_PATTERN4.test(value.taskId) && isIsoTimestamp6(value.boundAt);
-}
-function isLegacyTaskRecord(value) {
-  return isRecord10(value) && value.schemaVersion === LEGACY_SCHEMA_VERSION && hasOnlyKeys2(value, [
-    "schemaVersion",
-    "id",
-    "title",
-    "status",
-    "risk",
-    "qualityMode",
-    "executionMode",
-    "requirements",
-    "acceptanceCriteria",
-    "learningCandidates",
-    "commit",
-    "createdAt",
-    "updatedAt"
-  ]) && isTaskBase(value) && isRequirements(value.requirements, LEGACY_SCHEMA_VERSION) && isRequirements(value.acceptanceCriteria, LEGACY_SCHEMA_VERSION) && isLearningCandidates2(value.learningCandidates, LEGACY_SCHEMA_VERSION) && isCommitMetadata3(value.commit);
-}
-function isTaskBase(value) {
-  return typeof value.id === "string" && TASK_ID_PATTERN4.test(value.id) && typeof value.title === "string" && value.title.trim() !== "" && typeof value.status === "string" && TASK_STATUSES.has(value.status) && isRisk(value.risk) && (value.qualityMode === "standard" || value.qualityMode === "tdd") && (value.executionMode === "single-agent" || value.executionMode === "delegated") && isIsoTimestamp6(value.createdAt) && isIsoTimestamp6(value.updatedAt);
-}
-function isRequirements(value, schemaVersion) {
-  return Array.isArray(value) && value.every(
-    (requirement) => isRecord10(requirement) && hasOnlyKeys2(requirement, ["schemaVersion", "id", "text", "createdAt"]) && requirement.schemaVersion === schemaVersion && typeof requirement.id === "string" && requirement.id.trim() !== "" && typeof requirement.text === "string" && requirement.text.trim() !== "" && isIsoTimestamp6(requirement.createdAt)
-  );
-}
-function isLearningCandidates2(value, schemaVersion) {
-  if (value === void 0) return true;
-  if (!Array.isArray(value)) return false;
-  const ids = /* @__PURE__ */ new Set();
-  return value.every((candidate) => {
-    if (!isRecord10(candidate) || candidate.schemaVersion !== schemaVersion || typeof candidate.id !== "string" || candidate.id.trim() === "" || ids.has(candidate.id) || typeof candidate.domain !== "string" || candidate.domain.trim() === "" || typeof candidate.text !== "string" || candidate.text.trim() === "" || typeof candidate.rationale !== "string" || candidate.rationale.trim() === "" || !isIsoTimestamp6(candidate.proposedAt)) {
-      return false;
-    }
-    ids.add(candidate.id);
-    if (candidate.status === "proposed") return true;
-    if (candidate.status === "accepted") {
-      return candidate.confirmedBy === "user" && isIsoTimestamp6(candidate.acceptedAt);
-    }
-    return candidate.status === "archived" && typeof candidate.archiveReason === "string" && candidate.archiveReason.trim() !== "" && isIsoTimestamp6(candidate.archivedAt);
-  });
-}
-function isRiskRules(value) {
-  return isRecord10(value) && hasOnlyKeys2(value, ["medium", "high"]) && isStringArray2(value.medium) && isStringArray2(value.high);
-}
-function isContextLimits(value) {
-  return isRecord10(value) && hasOnlyKeys2(value, ["maxFiles", "maxEstimatedBytes"]) && isNonNegativeSafeInteger3(value.maxFiles) && isNonNegativeSafeInteger3(value.maxEstimatedBytes);
-}
-function isRisk(value) {
-  return isRecord10(value) && hasOnlyKeys2(value, ["level", "reasons"]) && (value.level === "low" || value.level === "medium" || value.level === "high") && isStringArray2(value.reasons);
-}
-function isCommitMetadata3(value) {
-  return value === null || isRecord10(value) && hasOnlyKeys2(value, ["sha", "message"]) && typeof value.sha === "string" && value.sha.trim() !== "" && (value.message === void 0 || typeof value.message === "string");
-}
-function isStringArray2(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-function isNonNegativeSafeInteger3(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-function isIsoTimestamp6(value) {
-  if (typeof value !== "string") return false;
-  const timestamp = new Date(value);
-  return !Number.isNaN(timestamp.valueOf()) && timestamp.toISOString() === value;
-}
-function hasOnlyKeys2(value, keys) {
-  return Object.keys(value).every((key) => keys.includes(key));
-}
-function isRecord10(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isSessionBindingFilename(value) {
-  return /^(codex|claude)-sid-[0-9a-f]+\.json$/u.test(value);
-}
-function isMissingFile2(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-// src/cli.ts
-init_check();
-init_context();
-init_evidence();
-
-// src/core/doctor.ts
-init_paths();
-init_migration_state();
-init_schema();
-init_task_locks();
-init_validate();
-import { execFile as execFile3 } from "node:child_process";
-import { lstat as lstat13, readdir as readdir5 } from "node:fs/promises";
-import { promisify as promisify3 } from "node:util";
-var execFileAsync3 = promisify3(execFile3);
-async function diagnoseWorkspace(paths) {
-  const [workspace, runtimeSessions, taskLocks, migration, gitStatus, validation] = await Promise.all([
-    inspectWorkspace(paths),
-    inspectRuntimeSessions(paths),
-    inspectTaskLocks(paths),
-    inspectSchemaMigration(paths),
-    inspectGitAvailability(paths.repoRoot),
-    validateWorkspace(paths)
-  ]);
-  const rework = workspace.supportedSchema ? collectReworkDiagnostics(validation.issues) : [];
-  const missingRequiredDirectories = workspace.missingRequiredDirectories.filter(
-    (directory) => directory !== ".runtime/sessions" || runtimeSessions !== "missing"
-  );
-  if (runtimeSessions === "invalid" && !missingRequiredDirectories.includes(".runtime/sessions")) {
-    missingRequiredDirectories.push(".runtime/sessions");
-  }
-  return {
-    ...workspace,
-    missingRequiredDirectories,
-    migrationGuidance: migration.status === "pending" ? `Schema migration ${migration.operationId} is incomplete. Run \`vinea migrate\` to resume it.` : migration.status === "invalid" ? "Repair or restore .runtime/schema-migration.json before using lifecycle commands." : rework.length > 0 && rework[0].status === "pending" ? `Task ${rework[0].taskId} has a pending rework. Run \`vinea task show ${rework[0].taskId}\` to resume it before continuing work.` : rework.length > 0 ? `Task ${rework[0].taskId} has invalid rework history. Run \`vinea validate\` and repair the reported records before continuing work.` : runtimeSessions === "invalid" && workspace.migrationGuidance === null ? "Repair or remove malformed local .runtime/sessions state before using session recovery." : workspace.migrationGuidance,
-    healthy: workspace.supportedSchema && missingRequiredDirectories.length === 0 && taskLocks.length === 0 && rework.length === 0 && migration.status !== "pending" && migration.status !== "invalid",
-    taskLocks,
-    rework,
-    migration,
-    gitStatus
-  };
-}
-function collectReworkDiagnostics(issues) {
-  const byTask = /* @__PURE__ */ new Map();
-  for (const issue of issues) {
-    if (!isReworkValidationIssue(issue.code)) continue;
-    const taskId = issue.path.match(/^\.vinea\/tasks\/(?:active|archive)\/([^/]+)\//u)?.[1] ?? "unknown";
-    const taskIssues = byTask.get(taskId) ?? [];
-    taskIssues.push(issue);
-    byTask.set(taskId, taskIssues);
-  }
-  return [...byTask.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([taskId, taskIssues]) => ({
-    taskId,
-    status: taskIssues.some(({ code }) => isInvalidReworkCode(code)) ? "invalid" : "pending",
-    issues: taskIssues
-  }));
-}
-function isReworkValidationIssue(code) {
-  return code.startsWith("REWORK_") || code.startsWith("CHECK_HISTORY_") || code === "JOURNAL_REWORK_DISCONTINUITY" || code === "JOURNAL_TASK_REVISION_MISMATCH" || code === "EVIDENCE_REVISION_INVALID" || code === "CHECK_PAYLOAD_INVALID";
-}
-function isInvalidReworkCode(code) {
-  return code === "REWORK_COMPLETION_ORPHAN" || code === "REWORK_COMPLETION_MISMATCH" || code === "REWORK_INTENT_DUPLICATE" || code === "JOURNAL_REWORK_DISCONTINUITY" || code === "CHECK_HISTORY_OPERATION_DUPLICATE" || code === "CHECK_HISTORY_REVISION_DUPLICATE" || code === "CHECK_HISTORY_ORPHAN" || code === "JOURNAL_TASK_REVISION_MISMATCH" || code === "EVIDENCE_REVISION_INVALID" || code === "CHECK_PAYLOAD_INVALID";
-}
-async function inspectSchemaMigration(paths) {
-  try {
-    const state = await readSchemaMigrationState(paths);
-    if (state === null) return { status: "none" };
-    return state.phase === "intent" ? { status: "pending", operationId: state.operationId } : { status: "completed", operationId: state.operationId };
   } catch {
-    return { status: "invalid" };
+    throw new KernelError("NOT_GIT_REPOSITORY", "A Git working tree is required; no repository was initialized");
   }
 }
-async function inspectRuntimeSessions(paths) {
-  try {
-    await assertNoSymlink(paths.repoRoot, paths.sessions);
-    const entry = await lstat13(paths.sessions);
-    if (!entry.isDirectory() || entry.isSymbolicLink()) return "invalid";
-    await readdir5(paths.sessions);
-    return "usable";
-  } catch (error) {
-    return isMissing7(error) ? "missing" : "invalid";
-  }
+function newActor(host, hostSessionId) {
+  const actor = { instanceId: randomUUID(), host, ...hostSessionId ? { hostSessionId } : {} };
+  actorRule(actor);
+  return actor;
 }
-async function inspectGitAvailability(repoRoot) {
+var execute;
+var init_repository = __esm({
+  "src/kernel/repository.ts"() {
+    "use strict";
+    init_errors();
+    init_schema();
+    execute = promisify(execFile);
+  }
+});
+
+// src/kernel/io.ts
+import { lstat, mkdir, open, readFile, rename, unlink, link } from "node:fs/promises";
+import { dirname, join as join2, relative, resolve as resolve2, isAbsolute } from "node:path";
+import { randomUUID as randomUUID2 } from "node:crypto";
+function assertPersistence(meta) {
+  if (!meta.invocation.persist) throw new KernelError("PERSISTENCE_DISABLED", "This invocation must not write files");
+}
+async function safePath(root, target) {
+  const full = resolve2(target), rel = relative(root, full);
+  if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)) {
+    throw new KernelError("UNSAFE_PATH", "Path escapes its authorized root");
+  }
+  let current = resolve2(root);
+  for (const part of ["", ...rel.split(/[\\/]/).filter(Boolean)]) {
+    if (part) current = join2(current, part);
+    try {
+      if ((await lstat(current)).isSymbolicLink()) throw new KernelError("UNSAFE_PATH", "Symbolic links are not allowed in managed paths");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return full;
+}
+async function storagePath(ctx, rel) {
+  const target = resolve2(ctx.storeRoot, rel);
+  await safePath(ctx.storeRoot, target);
+  return safePath(ctx.commonGitDir, target);
+}
+async function readManaged(ctx, rel) {
+  const file = await storagePath(ctx, rel);
+  const info = await lstat(file);
+  if (!info.isFile() || info.size > 64 * 1024 * 1024) throw new KernelError("STATE_INVALID", "Invalid or oversized managed file");
+  return readFile(file);
+}
+async function writeManaged(ctx, meta, rel, bytes, immutable = false) {
+  assertPersistence(meta);
+  if (Buffer.byteLength(bytes) > 64 * 1024 * 1024) throw new KernelError("STATE_TOO_LARGE", "Managed files cannot exceed the read limit of 64 MiB");
+  const path = await storagePath(ctx, rel);
+  await mkdir(dirname(path), { recursive: true });
+  await storagePath(ctx, rel);
+  const temp = `${path}.${randomUUID2()}.tmp`;
   try {
-    await execFileAsync3("git", ["--no-optional-locks", "status", "--porcelain"], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
+    const file = await open(temp, "wx", 384);
+    try {
+      await file.writeFile(bytes);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    if (immutable) {
+      try {
+        await link(temp, path);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        if (!(await readManaged(ctx, rel)).equals(Buffer.from(bytes))) throw new KernelError("ARTIFACT_CONFLICT", "Immutable artifact differs");
+      }
+    } else await rename(temp, path);
+  } finally {
+    await unlink(temp).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
     });
-    return { available: true, error: null };
-  } catch (error) {
-    return {
-      available: false,
-      error: error instanceof Error ? error.message : "Unable to run git status --porcelain."
-    };
   }
 }
-function isMissing7(error) {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+async function writeJson(ctx, meta, rel, value, immutable = false) {
+  await writeManaged(ctx, meta, rel, `${canonicalJson(value)}
+`, immutable);
+}
+var init_io = __esm({
+  "src/kernel/io.ts"() {
+    "use strict";
+    init_errors();
+    init_schema();
+  }
+});
+
+// src/kernel/policy.ts
+function getTask(state, taskId, mutable = true) {
+  id(taskId);
+  const task2 = state.tasks[taskId];
+  requireThat(task2, "TASK_NOT_FOUND", "Task was not found");
+  if (mutable) requireThat(task2.status === "active", "TASK_READ_ONLY", "Delivered and archived tasks are immutable; open a linked repair");
+  return task2;
+}
+function currentContract(task2) {
+  return task2.contracts[task2.contracts.length - 1];
+}
+function assertContract(task2, version2) {
+  requireThat(currentContract(task2).version === version2, "CONTRACT_VERSION_CHANGED", "Read the current contract before continuing");
+}
+function assertOwner(task2, meta, epoch) {
+  requireThat(task2.owner.instanceId === meta.actor.instanceId && task2.owner.epoch === epoch, "OWNER_CHANGED", "Delivery ownership has changed");
+}
+function assertEntry(meta, task2, capability) {
+  metaRule(meta);
+  assertPersistence(meta);
+  requireThat(meta.invocation.activation !== "none", "ACTIVATION_REQUIRED", "Explicit Vinea activation is required");
+  requireThat(!["orient", "doctor"].includes(meta.invocation.entry), "ENTRY_SCOPE_DENIED", "This entry is read-only");
+  if (meta.invocation.activation === "bound-followup") requireThat(task2, "BINDING_REQUIRED", "A bound task is required");
+  if (capability !== "state-write") {
+    requireThat(
+      ["run", "continue", "debug"].includes(meta.invocation.entry) && !meta.invocation.analysisOnly,
+      "ENTRY_SCOPE_DENIED",
+      "This entry does not authorize business changes or delegation"
+    );
+  }
+  if (task2 && capability === "business-write") {
+    const grant = currentContract(task2).grant;
+    requireThat(grant.businessWrite && grant.allowedPaths.length > 0, "BUSINESS_WRITE_NOT_GRANTED", "No business paths are writable");
+  }
+  if (task2 && capability === "delegate") requireThat(currentContract(task2).grant.delegate, "DELEGATION_NOT_GRANTED", "Delegation is not authorized");
+}
+function assertWritablePath(task2, path) {
+  const grant = currentContract(task2).grant;
+  requireThat(
+    grant.businessWrite && grant.allowedPaths.some((root) => path === root || path.startsWith(`${root}/`)),
+    "PATH_NOT_GRANTED",
+    "Path is outside the task grant"
+  );
+}
+var init_policy = __esm({
+  "src/kernel/policy.ts"() {
+    "use strict";
+    init_errors();
+    init_io();
+    init_schema();
+  }
+});
+
+// src/kernel/ownership.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+function executionKey(taskId, assignmentId) {
+  return JSON.stringify([taskId, assignmentId]);
+}
+function assertWorkspaceClaimable(state, workspaceId) {
+  requireThat(!state.claims[workspaceId] || state.claims[workspaceId].state === "released", "WORKSPACE_OCCUPIED", "Workspace is written, restoring, or held by an unknown writer");
+}
+function assertCurrentToken(ctx, state, meta, token) {
+  tokenRule(token);
+  const claim = state.claims[ctx.workspaceId], task2 = getTask(state, token.taskId);
+  requireThat(
+    claim?.state === "writer" && token.workspaceId === ctx.workspaceId && claim.instanceId === meta.actor.instanceId && token.instanceId === claim.instanceId && token.epoch === claim.epoch && token.taskId === claim.taskId && token.assignmentId === claim.assignmentId && token.epoch === state.epochs[executionKey(token.taskId, token.assignmentId)],
+    "STALE_WRITE_TOKEN",
+    "Write ownership is absent, stale, held, or restoring"
+  );
+  assertContract(task2, token.contractVersion);
+  assertContract(task2, claim.contractVersion);
+}
+function assertWriteToken(ctx, state, meta, token) {
+  assertCurrentToken(ctx, state, meta, token);
+  assertEntry(meta, getTask(state, token.taskId), "business-write");
+}
+async function addAssignment(ctx, meta, input) {
+  const result = await mutateState(ctx, meta, { command: "assignment.add", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "delegate");
+    assertOwner(task2, meta, input.ownerEpoch);
+    const assignment2 = { ...structuredClone(input.assignment), id: randomUUID3(), status: "open" };
+    task2.assignments[assignment2.id] = assignment2;
+    return [assignment2.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].assignments[result.resourceIds[0]];
+}
+async function claimWork(ctx, meta, input) {
+  const receipt = await mutateState(ctx, meta, { command: "work.claim", input, workspaceId: ctx.workspaceId }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "business-write");
+    assertContract(task2, input.contractVersion);
+    const assignment2 = input.assignmentId === null ? null : task2.assignments[input.assignmentId];
+    const previous = state.claims[ctx.workspaceId];
+    const key = executionKey(input.taskId, input.assignmentId);
+    const same = previous?.state === "writer" && previous.instanceId === meta.actor.instanceId && previous.taskId === input.taskId && previous.assignmentId === input.assignmentId && previous.epoch === state.epochs[key];
+    if (same && previous.contractVersion === input.contractVersion) return [ctx.workspaceId, String(previous.epoch)];
+    if (!same) assertWorkspaceClaimable(state, ctx.workspaceId);
+    if (input.assignmentId !== null) requireThat(assignment2?.status === "open" && assignment2.businessWrite && (assignment2.assignee === null || assignment2.assignee === meta.actor.instanceId), "ASSIGNMENT_NOT_GRANTED", "Assignment is not granted to this writer");
+    else requireThat(same || task2.owner.instanceId === meta.actor.instanceId, "ASSIGNMENT_NOT_GRANTED", "Only the owner or current handed-off writer can claim unassigned implementation");
+    requireThat(!Object.values(state.claims).some((c) => c.workspaceId !== ctx.workspaceId && c.taskId === input.taskId && c.assignmentId === input.assignmentId && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "Execution is occupied in another workspace");
+    const epoch = (state.epochs[key] ?? 0) + 1;
+    state.epochs[key] = epoch;
+    state.claims[ctx.workspaceId] = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch, state: "writer", recovery: null };
+    return [ctx.workspaceId, String(epoch)];
+  });
+  const token = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch: Number(receipt.resourceIds[1]) };
+  assertWriteToken(ctx, await readState(ctx), meta, token);
+  return token;
+}
+function toWriteToken(claim) {
+  const { taskId, assignmentId, workspaceId, instanceId, epoch, contractVersion } = claim;
+  return { taskId, assignmentId, workspaceId, instanceId, epoch, contractVersion };
+}
+async function releaseWork(ctx, meta, token) {
+  tokenRule(token);
+  await mutateState(ctx, meta, { command: "work.release", token }, (state) => {
+    assertEntry(meta, getTask(state, token.taskId, false), "state-write");
+    const claim = state.claims[ctx.workspaceId];
+    requireThat(
+      claim?.state === "writer" && claim.instanceId === meta.actor.instanceId && claim.instanceId === token.instanceId && token.workspaceId === ctx.workspaceId && claim.taskId === token.taskId && claim.assignmentId === token.assignmentId && claim.epoch === token.epoch,
+      "STALE_WRITE_TOKEN",
+      "Cannot release a different, held, or restoring writer"
+    );
+    state.claims[ctx.workspaceId] = { ...claim, state: "released", recovery: null };
+    return [ctx.workspaceId];
+  });
+}
+var init_ownership = __esm({
+  "src/kernel/ownership.ts"() {
+    "use strict";
+    init_errors();
+    init_store();
+    init_policy();
+    init_schema();
+  }
+});
+
+// src/kernel/snapshots.ts
+var snapshots_exports = {};
+__export(snapshots_exports, {
+  captureSnapshot: () => captureSnapshot,
+  compareSnapshot: () => compareSnapshot,
+  fingerprintSnapshot: () => fingerprintSnapshot,
+  loadSnapshot: () => loadSnapshot,
+  restoreSnapshot: () => restoreSnapshot,
+  validateSnapshotContents: () => validateSnapshotContents
+});
+import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
+import { lstat as lstat2, readFile as readFile2, mkdir as mkdir2, unlink as unlink2, chmod, open as open2, rename as rename2 } from "node:fs/promises";
+import { dirname as dirname2, join as join3 } from "node:path";
+function fingerprintSnapshot(baseCommit, scope, entries) {
+  return hash2(canonicalJson({ baseCommit, scope, entries }));
+}
+function safeInput(path) {
+  pathRule(path);
+  requireThat(!path.split("/").some((p) => [".git", ".vinea", ".ssh", ".aws", "credentials"].includes(p) || /^\.env(?:\.|$)/.test(p) || /\.(?:pem|key|p12|pfx)$/i.test(p)), "SENSITIVE_INPUT", "Sensitive or managed paths cannot be snapshotted");
+}
+async function head(ctx) {
+  try {
+    return (await gitOutput(ctx.worktreeRoot, ["rev-parse", "--verify", "HEAD"])).trim();
+  } catch {
+    return null;
+  }
+}
+async function collect(ctx, scope, limits) {
+  scope.forEach(safeInput);
+  for (const path of scope) await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, path));
+  const baseCommit = await head(ctx);
+  const currentPaths = await gitOutput(ctx.worktreeRoot, ["--literal-pathspecs", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...scope]);
+  const baselinePaths = baseCommit === null ? "" : await gitOutput(ctx.worktreeRoot, ["--literal-pathspecs", "ls-tree", "-r", "-z", "--name-only", baseCommit, "--", ...scope]);
+  const names = [...new Set([...currentPaths.split("\0"), ...baselinePaths.split("\0")].filter(Boolean))].sort();
+  requireThat(names.length <= limits.maxFiles, "SNAPSHOT_LIMIT", "Snapshot file limit exceeded");
+  const entries = [], blobs = /* @__PURE__ */ new Map();
+  let bytes = 0;
+  for (const path of names) {
+    safeInput(path);
+    const target = await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, path));
+    try {
+      const info = await lstat2(target);
+      requireThat(info.isFile(), "UNSAFE_PATH", "Snapshot inputs must be regular files");
+      requireThat(info.size <= limits.maxFileBytes && bytes + info.size <= limits.maxTotalBytes, "SNAPSHOT_LIMIT", "Snapshot byte limit exceeded");
+      const contents = await readFile2(target);
+      bytes += contents.length;
+      requireThat(contents.length <= limits.maxFileBytes && bytes <= limits.maxTotalBytes, "SNAPSHOT_LIMIT", "Input grew beyond snapshot limit");
+      requireThat(!/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/.test(contents.toString("utf8")), "SENSITIVE_INPUT", "Private key material cannot be snapshotted");
+      const sha256 = hash2(contents);
+      blobs.set(sha256, contents);
+      entries.push({ path, kind: "file", sha256, mode: info.mode & 73 ? "100755" : "100644" });
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      entries.push({ path, kind: "deleted", sha256: null, mode: null });
+    }
+  }
+  return { baseCommit, entries, blobs, fingerprint: fingerprintSnapshot(baseCommit, scope, entries) };
+}
+async function captureSnapshot(ctx, meta, input) {
+  assertPersistence(meta);
+  const state = await readState(ctx), task2 = getTask(state, input.taskId);
+  assertEntry(meta, task2, "state-write");
+  if (input.token) assertWriteToken(ctx, state, meta, input.token);
+  requireThat(Array.isArray(input.paths) && input.paths.length > 0, "SNAPSHOT_SCOPE_REQUIRED", "Explicit snapshot scope is required");
+  const request = { command: "snapshot.capture", input, workspaceId: ctx.workspaceId };
+  const previous = await lookupOperation(ctx, meta, request);
+  if (previous) return (await readState(ctx)).snapshots[previous.resourceIds[0]];
+  const scope = [...new Set(input.paths)].sort(), limits = input.limits ?? defaults;
+  requireThat(Object.values(limits).every((n) => Number.isSafeInteger(n) && n > 0), "SNAPSHOT_LIMIT", "Limits must be positive integers");
+  requireThat(Object.keys(defaults).every((key) => limits[key] <= defaults[key]), "SNAPSHOT_LIMIT", "Custom limits may tighten, not exceed, the recovery limits");
+  const first = await collect(ctx, scope, limits), second = await collect(ctx, scope, limits);
+  requireThat(first.fingerprint === second.fingerprint, "SNAPSHOT_CHANGED", "Inputs changed during capture");
+  const snapshot2 = {
+    id: randomUUID4(),
+    fingerprint: first.fingerprint,
+    baseCommit: first.baseCommit,
+    scope,
+    entries: first.entries,
+    workspaceId: ctx.workspaceId,
+    createdBy: meta.actor.instanceId,
+    capturedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  for (const [sha, bytes] of first.blobs) await writeManaged(ctx, meta, `blobs/${sha}`, bytes, true);
+  await writeJson(ctx, meta, `snapshots/${snapshot2.id}.json`, snapshot2, true);
+  const receipt = await mutateState(ctx, meta, request, (current) => {
+    assertEntry(meta, getTask(current, input.taskId), "state-write");
+    if (input.token) assertWriteToken(ctx, current, meta, input.token);
+    current.snapshots[snapshot2.id] = snapshot2;
+    return [snapshot2.id];
+  });
+  return (await readState(ctx)).snapshots[receipt.resourceIds[0]];
+}
+async function compareSnapshot(ctx, snapshot2) {
+  snapshotRule(snapshot2);
+  const now = await collect(ctx, snapshot2.scope, defaults);
+  const previous = new Map(snapshot2.entries.map((e) => [e.path, canonicalJson(e)]));
+  const next = new Map(now.entries.map((e) => [e.path, canonicalJson(e)]));
+  const changedPaths = [.../* @__PURE__ */ new Set([...previous.keys(), ...next.keys()])].filter((p) => previous.get(p) !== next.get(p));
+  return {
+    matches: snapshot2.fingerprint === now.fingerprint,
+    changedPaths,
+    missingInputs: now.baseCommit !== snapshot2.baseCommit ? ["Git baseline changed"] : []
+  };
+}
+async function loadSnapshot(ctx, snapshotId) {
+  id(snapshotId);
+  const snapshot2 = (await readState(ctx)).snapshots[snapshotId];
+  requireThat(snapshot2, "SNAPSHOT_UNAVAILABLE", "Snapshot is not admitted in the shared store");
+  return validateSnapshotContents(ctx, snapshot2);
+}
+async function validateSnapshotContents(ctx, snapshot2) {
+  try {
+    const manifest = JSON.parse((await readManaged(ctx, `snapshots/${snapshot2.id}.json`)).toString("utf8"));
+    snapshotRule(manifest);
+    requireThat(canonicalJson(manifest) === canonicalJson(snapshot2), "SNAPSHOT_UNAVAILABLE", "Snapshot manifest changed");
+    requireThat(fingerprintSnapshot(snapshot2.baseCommit, snapshot2.scope, snapshot2.entries) === snapshot2.fingerprint, "SNAPSHOT_UNAVAILABLE", "Snapshot fingerprint is invalid");
+    for (const entry of snapshot2.entries) if (entry.sha256) {
+      requireThat(
+        hash2(await readManaged(ctx, `blobs/${entry.sha256}`)) === entry.sha256,
+        "SNAPSHOT_UNAVAILABLE",
+        "Snapshot content is corrupt"
+      );
+    }
+  } catch {
+    throw new KernelError("SNAPSHOT_UNAVAILABLE", "Snapshot content is missing or corrupt; no current file was substituted");
+  }
+  return snapshot2;
+}
+async function restoreSnapshot(ctx, meta, input) {
+  assertPersistence(meta);
+  const snapshot2 = await loadSnapshot(ctx, input.snapshotId), state = await readState(ctx), task2 = getTask(state, input.taskId);
+  assertEntry(meta, task2, "business-write");
+  assertContract(task2, input.token.contractVersion);
+  const claim = state.claims[ctx.workspaceId];
+  requireThat(claim?.state === "restore-target" && claim.recovery.snapshotId === snapshot2.id && claim.instanceId === meta.actor.instanceId && input.token.instanceId === claim.instanceId && claim.taskId === input.taskId && claim.epoch === input.token.epoch && claim.workspaceId === input.token.workspaceId && state.epochs[executionKey(claim.taskId, claim.assignmentId)] === claim.epoch, "STALE_WRITE_TOKEN", "Restore reservation is stale");
+  requireThat(snapshot2.baseCommit === input.expectedTargetBase && await head(ctx) === input.expectedTargetBase, "SNAPSHOT_UNAVAILABLE", "Restore baseline is unavailable or changed");
+  const contents = /* @__PURE__ */ new Map();
+  for (const entry of snapshot2.entries) {
+    safeInput(entry.path);
+    assertWritablePath(task2, entry.path);
+    await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, entry.path));
+    if (entry.sha256) {
+      const bytes = await readManaged(ctx, `blobs/${entry.sha256}`);
+      requireThat(hash2(bytes) === entry.sha256, "SNAPSHOT_UNAVAILABLE", "Snapshot content is missing or corrupt");
+      contents.set(entry.path, bytes);
+    }
+  }
+  const status = (await gitOutput(ctx.worktreeRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).split("\0").filter(Boolean);
+  for (const line of status) {
+    requireThat(line.length > 3 && !/[RC]/.test(line.slice(0, 2)), "RECOVERY_CONFLICT", "Unconfirmed rename or dirty target");
+    const path = line.slice(3), expected = snapshot2.entries.find((e) => e.path === path);
+    requireThat(expected, "RECOVERY_CONFLICT", "Unconfirmed target changes are preserved");
+    const bytes = await readFile2(await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, path))).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    requireThat(expected.kind === "deleted" ? bytes === null : bytes !== null && hash2(bytes) === expected.sha256, "RECOVERY_CONFLICT", "Target differs from baseline and recovery contents");
+  }
+  for (const entry of snapshot2.entries) {
+    const file = await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, entry.path));
+    if (entry.kind === "deleted") await unlink2(file).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    else {
+      await mkdir2(dirname2(file), { recursive: true });
+      const tmp = `${file}.${randomUUID4()}.vinea-restore`;
+      try {
+        const handle = await open2(tmp, "wx", entry.mode === "100755" ? 493 : 420);
+        try {
+          await handle.writeFile(contents.get(entry.path));
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await rename2(tmp, file);
+        await chmod(file, entry.mode === "100755" ? 493 : 420);
+      } finally {
+        await unlink2(tmp).catch((error) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }
+    }
+  }
+  requireThat((await compareSnapshot(ctx, snapshot2)).matches, "RECOVERY_CONFLICT", "Restored inputs do not match snapshot");
+  await mutateState(ctx, { ...meta, operationId: `restore-${hash2(claim.recovery.operationId)}` }, { command: "restore.publish", input }, (current) => {
+    const held = current.claims[ctx.workspaceId];
+    requireThat(
+      held?.state === "restore-target" && held.epoch === claim.epoch && held.instanceId === meta.actor.instanceId,
+      "STALE_WRITE_TOKEN",
+      "Restore ownership changed before publication"
+    );
+    assertContract(getTask(current, input.taskId), claim.contractVersion);
+    current.claims[ctx.workspaceId] = { ...held, state: "writer", recovery: null };
+    return [ctx.workspaceId];
+  });
+}
+var defaults, hash2;
+var init_snapshots = __esm({
+  "src/kernel/snapshots.ts"() {
+    "use strict";
+    init_errors();
+    init_policy();
+    init_ownership();
+    init_io();
+    init_store();
+    init_repository();
+    init_schema();
+    defaults = { maxFiles: 2e3, maxTotalBytes: 64 * 1024 * 1024, maxFileBytes: 8 * 1024 * 1024 };
+    hash2 = (bytes) => createHash2("sha256").update(bytes).digest("hex");
+  }
+});
+
+// src/kernel/store.ts
+import { mkdir as mkdir3, lstat as lstat3, rmdir, unlink as unlink3, readdir } from "node:fs/promises";
+import { join as join4 } from "node:path";
+import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+async function initializeStore(ctx, meta, decision) {
+  metaRule(meta);
+  assertPersistence(meta);
+  decisionRule(decision);
+  if (!["named-entry", "named-request"].includes(meta.invocation.activation)) throw new KernelError("ACTIVATION_REQUIRED", "Explicit Vinea activation required");
+  if (["orient", "doctor"].includes(meta.invocation.entry)) throw new KernelError("ENTRY_SCOPE_DENIED", "This entry cannot initialize storage");
+  const root = await storagePath(ctx, ".");
+  try {
+    await mkdir3(root);
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    await readState(ctx);
+    return;
+  }
+  const state = {
+    kernelSchemaVersion: 1,
+    repositoryId: randomUUID5(),
+    revision: 0,
+    tasks: {},
+    claims: {},
+    epochs: {},
+    snapshots: {},
+    operations: {}
+  };
+  assertRepositoryState(state);
+  await writeJson(ctx, meta, "tasks/state.json", state);
+}
+async function readState(ctx) {
+  try {
+    const state = JSON.parse((await readManaged(ctx, "tasks/state.json")).toString("utf8"));
+    assertRepositoryState(state);
+    return state;
+  } catch (error) {
+    if (error instanceof KernelError && error.code === "UNSAFE_PATH") throw error;
+    if (error.code === "ENOENT") {
+      const exists = await lstat3(await storagePath(ctx, ".")).then(() => true, (e) => {
+        if (e.code === "ENOENT") return false;
+        throw e;
+      });
+      throw new KernelError(exists ? "INCOMPLETE_INITIALIZATION" : "STORE_MISSING", "Shared store is unavailable; no replacement was created");
+    }
+    throw new KernelError("STATE_INVALID", "Shared state is malformed or unsupported; it was not repaired");
+  }
+}
+async function withLock(ctx, meta, operation) {
+  assertPersistence(meta);
+  const path = await storagePath(ctx, "runtime/store.lock");
+  await mkdir3(await storagePath(ctx, "runtime"), { recursive: true });
+  const deadline = Date.now() + 5e3;
+  for (; ; ) {
+    await storagePath(ctx, "runtime/store.lock");
+    try {
+      await mkdir3(path);
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) throw new KernelError("STORE_LOCKED", "Store is busy; locks are never automatically stolen");
+      await delay(10);
+    }
+  }
+  try {
+    await writeJson(ctx, meta, "runtime/store.lock/owner.json", { pid: process.pid, token: randomUUID5(), createdAt: (/* @__PURE__ */ new Date()).toISOString() });
+    return await operation();
+  } finally {
+    await unlink3(join4(path, "owner.json")).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    await rmdir(path);
+  }
+}
+async function mutateState(ctx, meta, request, change) {
+  metaRule(meta);
+  assertPersistence(meta);
+  if (meta.invocation.activation === "none") throw new KernelError("ACTIVATION_REQUIRED", "Explicit Vinea activation is required before any write");
+  await readState(ctx);
+  const requestHash = createHash3("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex");
+  return withLock(ctx, meta, async () => {
+    const before = await readState(ctx), previous = before.operations[meta.operationId];
+    if (previous) {
+      if (previous.requestHash !== requestHash) throw new KernelError("OPERATION_ID_REUSED", "Operation payload or actor differs");
+      return previous;
+    }
+    const state = structuredClone(before);
+    const resourceIds = change(state);
+    state.revision = before.revision + 1;
+    const receipt = { operationId: meta.operationId, requestHash, revision: state.revision, resourceIds };
+    state.operations[meta.operationId] = receipt;
+    assertRepositoryState(state);
+    await writeJson(ctx, meta, "tasks/state.json", state);
+    return receipt;
+  });
+}
+async function lookupOperation(ctx, meta, request) {
+  metaRule(meta);
+  assertPersistence(meta);
+  const previous = (await readState(ctx)).operations[meta.operationId];
+  if (previous && previous.requestHash !== createHash3("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex")) {
+    throw new KernelError("OPERATION_ID_REUSED", "Operation payload or actor differs");
+  }
+  return previous;
+}
+async function inspectStore(ctx) {
+  const issues = [];
+  let status = "ready";
+  let state;
+  try {
+    state = await readState(ctx);
+  } catch (error) {
+    const e = error;
+    status = e.code === "STORE_MISSING" ? "missing" : e.code === "INCOMPLETE_INITIALIZATION" ? "incomplete" : "invalid";
+    issues.push({ code: e.code, path: ctx.storeRoot, message: e.message });
+  }
+  if (status !== "ready") return { status, issues };
+  const { validateSnapshotContents: validateSnapshotContents2 } = await Promise.resolve().then(() => (init_snapshots(), snapshots_exports));
+  for (const snapshot2 of Object.values(state.snapshots)) {
+    try {
+      await validateSnapshotContents2(ctx, snapshot2);
+    } catch {
+      status = "invalid";
+      issues.push({ code: "SNAPSHOT_UNAVAILABLE", path: `snapshots/${snapshot2.id}.json`, message: "Admitted snapshot content is missing or invalid; no replacement was made" });
+    }
+  }
+  for (const task2 of Object.values(state.tasks)) for (const evidence2 of Object.values(task2.evidence)) {
+    if (evidence2.artifactId) {
+      const path = `artifacts/${evidence2.artifactId}/result.json`;
+      try {
+        const artifact = JSON.parse((await readManaged(ctx, path)).toString("utf8"));
+        if (artifact.snapshotId !== evidence2.snapshotId || artifact.code !== evidence2.exitCode || canonicalJson(artifact.argv) !== canonicalJson(evidence2.argv) || canonicalJson(artifact.environment) !== canonicalJson(evidence2.environment)) throw new Error("mismatch");
+      } catch {
+        status = "invalid";
+        issues.push({ code: "ARTIFACT_UNAVAILABLE", path, message: "Evidence artifact is missing or invalid" });
+      }
+    }
+  }
+  try {
+    await (await Promise.resolve().then(() => (init_sessions(), sessions_exports))).readBindings(ctx);
+  } catch {
+    status = "invalid";
+    issues.push({ code: "BINDING_INVALID", path: "runtime/bindings", message: "Binding data is invalid; durable ownership was not changed" });
+  }
+  try {
+    const entries = await readdir(await storagePath(ctx, "runtime/store.lock"));
+    if (status === "ready") status = "locked";
+    issues.push({ code: "STORE_LOCKED", path: "runtime/store.lock", message: `Lock present (${entries.length} files); inspect the owner before manual recovery` });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  return { status, issues };
+}
+var init_store = __esm({
+  "src/kernel/store.ts"() {
+    "use strict";
+    init_errors();
+    init_schema();
+    init_io();
+    init_io();
+  }
+});
+
+// src/kernel/sessions.ts
+var sessions_exports = {};
+__export(sessions_exports, {
+  bindSession: () => bindSession,
+  readBindings: () => readBindings,
+  resolveActor: () => resolveActor
+});
+import { createHash as createHash4 } from "node:crypto";
+import { readdir as readdir2 } from "node:fs/promises";
+async function readBindings(ctx) {
+  let names;
+  try {
+    names = await readdir2(await storagePath(ctx, "runtime/bindings"));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+  const out = [];
+  for (const name of names.sort()) {
+    requireThat(/^[a-f0-9]{64}\.json$/.test(name), "BINDING_INVALID", "Unexpected binding artifact");
+    const value = JSON.parse((await readManaged(ctx, `runtime/bindings/${name}`)).toString("utf8"));
+    bindingRule(value);
+    out.push(value);
+  }
+  return out;
+}
+async function resolveActor(ctx, selector) {
+  requireThat(typeof selector.host === "string" && !!selector.host.trim(), "ACTOR_RESOLUTION_REQUIRED", "Host is required");
+  requireThat(!(selector.newInstance && selector.instanceId), "ACTOR_IDENTITY_MISMATCH", "New and existing identities cannot be combined");
+  const all = await readBindings(ctx);
+  const matches = all.filter((b) => b.actor.host === selector.host && !!selector.hostSessionId && b.actor.hostSessionId === selector.hostSessionId);
+  const ids = new Set(matches.map((b) => b.actor.instanceId));
+  requireThat(ids.size <= 1, "ACTOR_IDENTITY_MISMATCH", "Host session has ambiguous instances");
+  if (selector.instanceId) {
+    id(selector.instanceId);
+    const previous = all.find((b) => b.actor.instanceId === selector.instanceId)?.actor;
+    requireThat(
+      !previous || previous.host === selector.host && (!selector.hostSessionId || !previous.hostSessionId || previous.hostSessionId === selector.hostSessionId),
+      "ACTOR_IDENTITY_MISMATCH",
+      "Instance host/session differs"
+    );
+    requireThat(matches.every((b) => b.actor.instanceId === selector.instanceId), "ACTOR_IDENTITY_MISMATCH", "Host session belongs to another instance");
+    const actor = {
+      ...previous ?? {},
+      instanceId: selector.instanceId,
+      host: selector.host,
+      ...selector.hostSessionId ? { hostSessionId: selector.hostSessionId } : {}
+    };
+    actorRule(actor);
+    return actor;
+  }
+  if (matches.length) return matches[0].actor;
+  if (selector.newInstance) return newActor(selector.host, selector.hostSessionId);
+  throw new KernelError("ACTOR_RESOLUTION_REQUIRED", "Reuse the echoed instance ID, resolve a real host session, or explicitly open a new instance");
+}
+async function bindSession(ctx, meta, input) {
+  const task2 = getTask(await readState(ctx), input.taskId, false);
+  requireThat(input.assignmentId === null || task2.assignments[input.assignmentId], "ASSIGNMENT_NOT_FOUND", "Assignment does not exist");
+  const binding = { actor: meta.actor, workspaceId: ctx.workspaceId, ...input };
+  bindingRule(binding);
+  if (meta.invocation.persist) {
+    assertEntry(meta, task2, "state-write");
+    const hash3 = createHash4("sha256").update(JSON.stringify([meta.actor.instanceId, ctx.workspaceId])).digest("hex");
+    await writeJson(ctx, meta, `runtime/bindings/${hash3}.json`, binding);
+  }
+  return binding;
+}
+var bindingRule;
+var init_sessions = __esm({
+  "src/kernel/sessions.ts"() {
+    "use strict";
+    init_errors();
+    init_schema();
+    init_policy();
+    init_repository();
+    init_store();
+    init_io();
+    bindingRule = object({ actor: actorRule, workspaceId: id, taskId: id, assignmentId: nullable(id) });
+  }
+});
+
+// src/cli.ts
+init_repository();
+init_errors();
+init_io();
+import { parseArgs } from "node:util";
+import { readFile as readFile4 } from "node:fs/promises";
+import { resolve as resolve4 } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// src/application.ts
+init_sessions();
+init_store();
+init_policy();
+
+// src/legacy/read.ts
+init_io();
+init_schema();
+import { readdir as readdir3, readFile as readFile3, lstat as lstat4 } from "node:fs/promises";
+import { join as join5, resolve as resolve3, relative as relative2 } from "node:path";
+import { createHash as createHash5 } from "node:crypto";
+function issueCode(error) {
+  const code = error?.code;
+  if (typeof code === "string" && /^[A-Z_]+$/.test(code)) return code;
+  const message = error instanceof Error ? error.message : "";
+  return /^LEGACY_[A-Z_]+$/.test(message) ? message : "LEGACY_INVALID";
+}
+async function inspectLegacy(sourceRoot) {
+  const root = resolve3(sourceRoot), files = /* @__PURE__ */ new Map(), records = [], issues = [];
+  let total = 0;
+  async function read(path) {
+    await safePath(root, path);
+    const info = await lstat4(path);
+    if (!info.isFile() || info.size > 4 * 1024 * 1024 || (total += info.size) > 32 * 1024 * 1024) throw new Error("LEGACY_LIMIT");
+    const bytes = await readFile3(path);
+    files.set(relative2(root, path), bytes);
+    return bytes;
+  }
+  try {
+    const config = record(JSON.parse((await read(join5(root, "config.json"))).toString()));
+    if (![1, 2].includes(config.schemaVersion)) throw new Error("LEGACY_SCHEMA_UNSUPPORTED");
+    const walk = async (directory) => {
+      await safePath(root, directory);
+      const children = await readdir3(directory, { withFileTypes: true }).catch((e) => {
+        if (e.code === "ENOENT") return [];
+        throw e;
+      });
+      if (children.some((e) => e.name === "task.json")) {
+        try {
+          const bytes = await read(join5(directory, "task.json")), task2 = record(JSON.parse(bytes.toString()));
+          if (![1, 2].includes(task2.schemaVersion)) throw new Error("LEGACY_SCHEMA_UNSUPPORTED");
+          text(task2.id);
+          text(task2.title);
+          text(task2.status);
+          let evidence2 = [];
+          if (children.some((e) => e.name === "evidence.jsonl")) evidence2 = (await read(join5(directory, "evidence.jsonl"))).toString().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+          const constraints = Array.isArray(task2.requirements) ? task2.requirements.map((r) => record(r).text).filter((t) => typeof t === "string" && !!t.trim()) : [];
+          for (const entry of children) if (entry.isFile() && !["task.json", "evidence.jsonl"].includes(entry.name)) await read(join5(directory, entry.name));
+          const journal = files.get(relative2(root, join5(directory, "journal.md")))?.toString() ?? "";
+          const pending = /* @__PURE__ */ new Set();
+          for (const line of journal.split("\n").filter((l) => l.trim().startsWith("{"))) {
+            const event = record(JSON.parse(line));
+            if (typeof event.operationId === "string") {
+              if (String(event.type).endsWith("_intent")) pending.add(event.operationId);
+              else pending.delete(event.operationId);
+            }
+          }
+          if (pending.size) throw new Error("LEGACY_PENDING_MUTATION");
+          records.push({
+            path: directory,
+            fingerprint: createHash5("sha256").update(bytes).digest("hex"),
+            originalId: task2.id,
+            originalStatus: task2.status,
+            title: task2.title,
+            goal: constraints.join("\n") || task2.title,
+            constraints,
+            historicalEvidence: evidence2,
+            quality: task2.qualityMode === "tdd" ? "tdd" : "standard"
+          });
+        } catch (error) {
+          issues.push({ path: directory, code: issueCode(error) });
+        }
+      }
+      for (const child of children) {
+        if (child.isSymbolicLink()) {
+          issues.push({ path: join5(directory, child.name), code: "UNSAFE_PATH" });
+          continue;
+        }
+        if (child.isDirectory()) await walk(join5(directory, child.name));
+      }
+    };
+    await walk(join5(root, "tasks", "active"));
+    await walk(join5(root, "tasks", "archive"));
+    const migration = join5(root, ".runtime", "schema-migration.json");
+    try {
+      const value = record(JSON.parse((await read(migration)).toString()));
+      if (value.phase === "intent") issues.push({ path: migration, code: "LEGACY_PENDING_MIGRATION" });
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
+  } catch (error) {
+    issues.push({ path: root, code: issueCode(error) });
+  }
+  const fingerprints = [...files].sort(([a], [b]) => a.localeCompare(b)).map(([path, bytes]) => [path, createHash5("sha256").update(bytes).digest("hex")]);
+  return { records, fingerprint: createHash5("sha256").update(canonicalJson(fingerprints)).digest("hex"), issues };
+}
+
+// src/application.ts
+init_schema();
+
+// src/cli/commands.ts
+init_store();
+
+// src/kernel/contracts.ts
+init_policy();
+init_schema();
+init_store();
+init_errors();
+import { randomUUID as randomUUID6 } from "node:crypto";
+function makeTask(title, draft, decision, meta) {
+  return {
+    id: randomUUID6(),
+    title,
+    status: "active",
+    contracts: [{ ...structuredClone(draft), version: 1, decision }],
+    owner: { instanceId: meta.actor.instanceId, epoch: 1 },
+    assignments: {},
+    contributions: {},
+    evidence: {},
+    checks: {},
+    diagnostics: [],
+    deliveries: {},
+    userAcceptances: [],
+    relatedTo: null,
+    legacySource: null
+  };
+}
+async function createGoal(ctx, meta, input) {
+  assertEntry(meta, null, "business-write");
+  contractDraftRule(input.contract);
+  decisionRule(input.decision);
+  text(input.title);
+  requireThat(input.contract.acceptance.length > 0, "ACCEPTANCE_REQUIRED", "At least one acceptance criterion is required");
+  const receipt = await mutateState(ctx, meta, { command: "task.create", input }, (state) => {
+    const task2 = makeTask(input.title, input.contract, input.decision, meta);
+    state.tasks[task2.id] = task2;
+    return [task2.id];
+  });
+  return (await readState(ctx)).tasks[receipt.resourceIds[0]];
+}
+async function reviseContract(ctx, meta, input) {
+  contractDraftRule(input.contract);
+  decisionRule(input.decision);
+  requireThat(input.contract.acceptance.length > 0, "ACCEPTANCE_REQUIRED", "At least one acceptance criterion is required");
+  const receipt = await mutateState(ctx, meta, { command: "task.revise", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    assertOwner(task2, meta, input.ownerEpoch);
+    assertContract(task2, input.expectedVersion);
+    const previous = currentContract(task2);
+    const widensPaths = input.contract.grant.allowedPaths.some((path) => !previous.grant.allowedPaths.some((root) => path === root || path.startsWith(`${root}/`)));
+    if (widensPaths || ["businessWrite", "delegate", "commit", "deploy"].some((key) => !previous.grant[key] && input.contract.grant[key])) {
+      assertEntry(meta, null, "business-write");
+    }
+    task2.contracts.push({ ...structuredClone(input.contract), version: previous.version + 1, decision: input.decision });
+    return [task2.id, String(previous.version + 1)];
+  });
+  return (await readState(ctx)).tasks[input.taskId].contracts[Number(receipt.resourceIds[1]) - 1];
+}
+
+// src/cli/commands.ts
+init_ownership();
+
+// src/kernel/continuation.ts
+init_schema();
+init_errors();
+init_policy();
+init_store();
+init_ownership();
+init_sessions();
+init_snapshots();
+init_repository();
+function occupancyRef(claim) {
+  const { taskId, assignmentId, workspaceId, instanceId, epoch } = claim;
+  return { taskId, assignmentId, workspaceId, instanceId, epoch };
+}
+function sourceClaim(state, from) {
+  const claim = state.claims[from.workspaceId];
+  requireThat(claim && canonicalJson(occupancyRef(claim)) === canonicalJson(from), "OCCUPANCY_CHANGED", "Source occupancy changed; refresh its public reference");
+  return claim;
+}
+async function continueGoal(ctx, meta, input) {
+  metaRule(meta);
+  requireThat(meta.invocation.activation !== "none", "ACTIVATION_REQUIRED", "Continuation must be explicitly requested or bound");
+  const state = await readState(ctx), task2 = getTask(state, input.taskId);
+  const binding = await bindSession(ctx, meta, input), missing = [];
+  let writeToken = null;
+  const mine = state.claims[ctx.workspaceId];
+  if (mine?.instanceId === meta.actor.instanceId && mine.taskId === input.taskId && mine.assignmentId === input.assignmentId) {
+    try {
+      assertWriteToken(ctx, state, meta, toWriteToken(mine));
+      writeToken = toWriteToken(mine);
+    } catch (error) {
+      missing.push(error.code);
+    }
+  }
+  const occupiedWrites = Object.values(state.claims).filter((c) => c.state !== "released" && (c.taskId === task2.id || c.workspaceId === ctx.workspaceId)).map((c) => ({ ref: occupancyRef(c), state: c.state, contractVersion: c.contractVersion }));
+  if (occupiedWrites.some((c) => c.state === "unknown-writer-hold")) missing.push("UNKNOWN_WRITER_HOLD");
+  return {
+    taskId: task2.id,
+    contract: currentContract(task2),
+    owner: task2.owner,
+    binding,
+    writeToken,
+    assignment: input.assignmentId ? task2.assignments[input.assignmentId] : null,
+    occupiedWrites,
+    diagnostics: task2.diagnostics.slice(-20),
+    pendingContributionIds: Object.values(task2.contributions).filter((c) => !c.integrated).map((c) => c.id),
+    evidenceIds: Object.values(task2.evidence).sort((a, b) => a.sequence - b.sequence).slice(-20).map((e) => e.id),
+    missing,
+    nextCursor: state.revision,
+    unchanged: input.afterRevision === state.revision
+  };
+}
+function transferAuthority(state, meta, input) {
+  const task2 = getTask(state, input.from.taskId);
+  assertEntry(meta, task2, "business-write");
+  assertContract(task2, input.contractVersion);
+  actorRule(input.to);
+  if (input.decision) decisionRule(input.decision);
+  requireThat(input.decision || input.from.instanceId === meta.actor.instanceId, "TRANSFER_DECISION_REQUIRED", "Transferring another instance requires a user decision");
+  if (input.to.instanceId !== meta.actor.instanceId) requireThat(
+    input.decision || currentContract(task2).grant.delegate,
+    "TRANSFER_DECISION_REQUIRED",
+    "Handing work to another actor requires authorized collaboration or a user decision"
+  );
+  if (input.transferOwner) {
+    requireThat(input.ownerEpoch === task2.owner.epoch, "OWNER_CHANGED", "Delivery owner changed");
+    requireThat(task2.owner.instanceId === meta.actor.instanceId || input.decision, "TRANSFER_DECISION_REQUIRED", "A contributor cannot transfer delivery responsibility without its owner or a user decision");
+  } else requireThat(input.ownerEpoch === null, "OWNER_CHANGED", "Owner epoch is only used when transferring ownership");
+  return task2;
+}
+async function handoffWork(ctx, meta, input) {
+  requireThat(ctx.workspaceId === input.from.workspaceId, "ISOLATED_RECOVERY_REQUIRED", "Cross-workspace transfers use snapshot recovery");
+  const receipt = await mutateState(ctx, meta, { command: "work.handoff", input }, (state) => {
+    const task2 = transferAuthority(state, meta, input), old = sourceClaim(state, input.from);
+    requireThat(["writer", "released"].includes(old.state), "OCCUPANCY_CHANGED", "A held or restoring workspace cannot be directly handed off");
+    requireThat(old.state === "released" || old.instanceId === meta.actor.instanceId, "HOLDER_RELEASE_REQUIRED", "An active writer must hand off itself; other actors use the controlled takeover path");
+    const key = executionKey(old.taskId, old.assignmentId);
+    requireThat(old.epoch === state.epochs[key], "OCCUPANCY_CHANGED", "A newer executor exists");
+    const epoch = old.epoch + 1;
+    state.epochs[key] = epoch;
+    state.claims[ctx.workspaceId] = { ...old, instanceId: input.to.instanceId, epoch, contractVersion: input.contractVersion, state: "writer", recovery: null };
+    if (old.assignmentId) task2.assignments[old.assignmentId].assignee = input.to.instanceId;
+    if (input.transferOwner) task2.owner = { instanceId: input.to.instanceId, epoch: task2.owner.epoch + 1 };
+    return [ctx.workspaceId, String(epoch)];
+  });
+  const token = { ...input.from, instanceId: input.to.instanceId, epoch: Number(receipt.resourceIds[1]), contractVersion: input.contractVersion };
+  assertWriteToken(ctx, await readState(ctx), { ...meta, actor: input.to }, token);
+  return token;
+}
+async function takeoverWork(ctx, meta, input) {
+  one("holder-release", "host-stop-receipt", "user-declared-stop", "unknown")(input.stopBasis);
+  requireThat(input.to.instanceId === meta.actor.instanceId, "TRANSFER_DECISION_REQUIRED", "The receiving executor performs its own recovery");
+  decisionRule(input.decision);
+  const isolated = input.from.workspaceId !== ctx.workspaceId;
+  if (input.stopBasis === "unknown") requireThat(isolated && input.baselineSnapshotId, "ISOLATED_RECOVERY_REQUIRED", "Unknown writer requires an isolated snapshot target");
+  if (input.stopBasis === "host-stop-receipt") requireThat(input.stopReference, "STOP_EVIDENCE_REQUIRED", "A real stop receipt is required");
+  const request = { command: "work.takeover", input, workspaceId: ctx.workspaceId };
+  const previous = await lookupOperation(ctx, meta, request);
+  if (!previous) {
+    if (isolated) {
+      requireThat(input.baselineSnapshotId, "SNAPSHOT_UNAVAILABLE", "An isolated target needs a complete snapshot");
+      const snapshot2 = await loadSnapshot(ctx, input.baselineSnapshotId);
+      const task2 = getTask(await readState(ctx), input.from.taskId);
+      snapshot2.entries.forEach((e) => assertWritablePath(task2, e.path));
+      requireThat(!await gitOutput(ctx.worktreeRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]), "RECOVERY_CONFLICT", "Target has unconfirmed changes");
+      const base = await gitOutput(ctx.worktreeRoot, ["rev-parse", "--verify", "HEAD"]).then((s) => s.trim(), () => null);
+      requireThat(base === snapshot2.baseCommit, "SNAPSHOT_UNAVAILABLE", "Target baseline differs");
+    }
+    await mutateState(ctx, meta, request, (state2) => {
+      const task2 = transferAuthority(state2, meta, input), old = sourceClaim(state2, input.from);
+      requireThat(["writer", "restore-target", "released"].includes(old.state), "OCCUPANCY_CHANGED", "Only the current executor can be replaced");
+      const key = executionKey(old.taskId, old.assignmentId);
+      requireThat(old.epoch === state2.epochs[key], "OCCUPANCY_CHANGED", "Executor changed before takeover");
+      if (isolated) assertWorkspaceClaimable(state2, ctx.workspaceId);
+      if (input.stopBasis === "holder-release") requireThat(old.state === "released", "STOP_EVIDENCE_REQUIRED", "Holder has not released the workspace");
+      const epoch = old.epoch + 1;
+      state2.epochs[key] = epoch;
+      state2.claims[old.workspaceId] = input.stopBasis === "unknown" ? { ...old, state: "unknown-writer-hold" } : { ...old, state: "released", recovery: null };
+      const token2 = { ...toWriteToken(old), workspaceId: ctx.workspaceId, instanceId: input.to.instanceId, epoch, contractVersion: input.contractVersion };
+      state2.claims[ctx.workspaceId] = isolated ? { ...token2, state: "restore-target", recovery: { snapshotId: input.baselineSnapshotId, operationId: meta.operationId } } : { ...token2, state: "writer", recovery: null };
+      if (old.assignmentId) task2.assignments[old.assignmentId].assignee = input.to.instanceId;
+      if (input.transferOwner) task2.owner = { instanceId: input.to.instanceId, epoch: task2.owner.epoch + 1 };
+      return [ctx.workspaceId, String(epoch)];
+    });
+  }
+  const state = await readState(ctx), claim = state.claims[ctx.workspaceId];
+  const receipt = state.operations[meta.operationId];
+  requireThat(claim && claim.instanceId === meta.actor.instanceId && claim.epoch === Number(receipt.resourceIds[1]) && ["writer", "restore-target"].includes(claim.state), "OCCUPANCY_CHANGED", "Recovery target changed");
+  if (claim.state === "restore-target") {
+    const snapshot2 = await loadSnapshot(ctx, claim.recovery.snapshotId);
+    await restoreSnapshot(ctx, meta, { taskId: claim.taskId, snapshotId: snapshot2.id, token: toWriteToken(claim), expectedTargetBase: snapshot2.baseCommit });
+  }
+  const token = toWriteToken(claim);
+  assertWriteToken(ctx, await readState(ctx), meta, token);
+  return token;
+}
+async function clearWorkspaceHold(ctx, meta, input) {
+  one("holder-release", "host-stop-receipt", "user-declared-stop")(input.stopBasis);
+  await mutateState(ctx, meta, { command: "work.clear-hold", input }, (state) => {
+    const task2 = getTask(state, input.from.taskId, false), claim = sourceClaim(state, input.from);
+    assertEntry(meta, task2, "state-write");
+    requireThat(claim.state === "unknown-writer-hold", "OCCUPANCY_CHANGED", "Workspace is not an unknown writer hold");
+    if (input.stopBasis === "holder-release") requireThat(meta.actor.instanceId === claim.instanceId, "STOP_EVIDENCE_REQUIRED", "Only the original holder may declare its release");
+    else {
+      requireThat(task2.owner.instanceId === meta.actor.instanceId || input.decision, "STOP_EVIDENCE_REQUIRED", "Current owner or user decision required");
+      if (input.stopBasis === "host-stop-receipt") requireThat(input.stopReference, "STOP_EVIDENCE_REQUIRED", "Host stop receipt required");
+      else {
+        requireThat(input.decision, "STOP_EVIDENCE_REQUIRED", "Explicit stop decision required");
+        decisionRule(input.decision);
+      }
+    }
+    state.claims[claim.workspaceId] = { ...claim, state: "released", recovery: null };
+    return [claim.workspaceId];
+  });
+}
+
+// src/cli/commands.ts
+init_snapshots();
+
+// src/kernel/evidence.ts
+init_errors();
+init_policy();
+init_schema();
+init_store();
+init_io();
+import { randomUUID as randomUUID7 } from "node:crypto";
+async function appendEvidence(ctx, meta, input, source, artifactId) {
+  assertPersistence(meta);
+  environmentRule(input.environment);
+  one("pass", "fail", "unverified")(input.result);
+  nullable(one("red", "green"))(input.phase);
+  nullable(array(text))(input.argv);
+  nullable(integer)(input.exitCode);
+  text(input.summary);
+  if (input.result === "pass" && input.exitCode !== null) requireThat(input.exitCode === 0, "EVIDENCE_INVALID", "Passing command cannot have a failing exit code");
+  if (input.phase === "red") requireThat(input.result === "fail" && input.exitCode !== null && input.exitCode > 0, "EVIDENCE_INVALID", "RED needs a real nonzero failure");
+  if (input.phase === "green") requireThat(input.result === "pass" && input.exitCode === 0, "EVIDENCE_INVALID", "GREEN needs exit zero");
+  const receipt = await mutateState(ctx, meta, { command: "evidence.append", input, source, artifactId }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    assertContract(task2, input.contractVersion);
+    requireThat(state.snapshots[input.snapshotId], "SNAPSHOT_UNAVAILABLE", "Evidence snapshot does not exist");
+    const { taskId: _, ...fields } = input;
+    const e = { ...fields, id: randomUUID7(), actor: meta.actor, source, artifactId, cwd: ctx.worktreeRoot, sequence: state.revision + 1 };
+    task2.evidence[e.id] = e;
+    return [e.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].evidence[receipt.resourceIds[0]];
+}
+async function recordReportedEvidence(ctx, meta, input) {
+  return appendEvidence(ctx, meta, input, "agent-report", null);
+}
+async function recordUserObservation(ctx, meta, input) {
+  decisionRule(input.decision);
+  return appendEvidence(ctx, meta, {
+    taskId: input.taskId,
+    contractVersion: input.contractVersion,
+    snapshotId: input.snapshotId,
+    environment: input.environment,
+    result: "unverified",
+    phase: null,
+    argv: null,
+    exitCode: null,
+    summary: input.decision.summary
+  }, "user-observation", null);
+}
+
+// src/kernel/verification.ts
+init_io();
+init_schema();
+init_policy();
+init_store();
+init_snapshots();
+import { spawn } from "node:child_process";
+import { randomUUID as randomUUID8, createHash as createHash6 } from "node:crypto";
+init_errors();
+async function runVerification(ctx, meta, input) {
+  assertPersistence(meta);
+  decisionRule(input.commandAuthorization);
+  environmentRule(input.environment);
+  array(text)(input.argv);
+  nullable(one("red", "green"))(input.phase);
+  id(input.taskId);
+  id(input.snapshotId);
+  integer(input.contractVersion);
+  requireThat(input.argv.length > 0 && Number.isSafeInteger(input.timeoutMs) && input.timeoutMs > 0 && input.timeoutMs <= 36e5, "COMMAND_REQUIRED", "Command and bounded timeout required");
+  requireThat(!input.argv.some((a) => /(?:Bearer\s+|(?:password|token|secret|api[_-]?key)=)/i.test(a)) && !Object.keys(input.environment.labels).some((k) => /password|token|secret|cookie|authorization|api.?key/i.test(k)), "SENSITIVE_INPUT", "Do not put credentials in recorded arguments or environment labels");
+  requireThat(input.environment.runtime === process.version && input.environment.platform === process.platform, "VERIFICATION_CONDITIONS_MISMATCH", "Runtime describes the actual Node verifier; other runtimes belong in labels");
+  const task2 = getTask(await readState(ctx), input.taskId);
+  assertEntry(meta, task2, "state-write");
+  assertContract(task2, input.contractVersion);
+  const request = { command: "verify.reserve", input, workspaceId: ctx.workspaceId };
+  const existing = await lookupOperation(ctx, meta, request);
+  if (existing) {
+    const previous = Object.values((await readState(ctx)).tasks[input.taskId].evidence).find((e) => e.artifactId === existing.resourceIds[0]);
+    if (previous) return previous;
+    throw new KernelError("VERIFICATION_INCOMPLETE", "The command was reserved or started; inspect its result before explicitly scheduling another attempt");
+  }
+  const snapshot2 = await loadSnapshot(ctx, input.snapshotId);
+  requireThat((await compareSnapshot(ctx, snapshot2)).matches, "SNAPSHOT_CHANGED", "Verification inputs have changed");
+  let reserved = false;
+  const reservation = await mutateState(ctx, meta, request, (state) => {
+    const current = getTask(state, input.taskId);
+    assertEntry(meta, current, "state-write");
+    assertContract(current, input.contractVersion);
+    reserved = true;
+    return [randomUUID8()];
+  });
+  requireThat(reserved, "VERIFICATION_INCOMPLETE", "Another invocation owns this verification; the command was not repeated");
+  const artifactId = reservation.resourceIds[0];
+  const [command, ...args] = input.argv;
+  const result = await new Promise((resolve5, reject) => {
+    const child = spawn(command, args, { cwd: ctx.worktreeRoot, shell: false, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+    let timedOut = false, stdoutBytes = 0, stderrBytes = 0;
+    let escalation;
+    const stop = (signal) => {
+      try {
+        if (child.pid && process.platform !== "win32") process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch (error) {
+        if (error.code !== "ESRCH") child.kill(signal);
+      }
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      stop("SIGTERM");
+      escalation = setTimeout(() => stop("SIGKILL"), 250);
+    }, input.timeoutMs);
+    child.stdout.on("data", (b) => {
+      stdoutBytes += b.length;
+    });
+    child.stderr.on("data", (b) => {
+      stderrBytes += b.length;
+    });
+    child.once("error", () => {
+      clearTimeout(timeout);
+      if (escalation) clearTimeout(escalation);
+      reject(new KernelError("COMMAND_START_FAILED", "Verifier could not start"));
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timeout);
+      if (escalation) clearTimeout(escalation);
+      resolve5({ code, signal, timedOut, stdoutBytes, stderrBytes });
+    });
+  });
+  const stillMatches = await compareSnapshot(ctx, snapshot2).then((r) => r.matches, () => false);
+  assertContract(getTask(await readState(ctx), input.taskId), input.contractVersion);
+  const status = result.timedOut || result.signal || result.code === null || !stillMatches ? "unverified" : result.code === 0 ? "pass" : "fail";
+  await writeJson(ctx, meta, `artifacts/${artifactId}/result.json`, {
+    ...result,
+    argv: input.argv,
+    snapshotId: snapshot2.id,
+    environment: input.environment,
+    rawOutputStored: false
+  }, true);
+  return appendEvidence(ctx, { ...meta, operationId: `evidence-${createHash6("sha256").update(meta.operationId).digest("hex")}` }, {
+    taskId: input.taskId,
+    contractVersion: input.contractVersion,
+    snapshotId: snapshot2.id,
+    result: status,
+    phase: status === "unverified" ? null : input.phase,
+    argv: input.argv,
+    exitCode: result.code,
+    environment: input.environment,
+    summary: status === "unverified" ? "Command timed out, terminated, or input changed; not verified" : `Command exited ${result.code}`
+  }, "command-runner", artifactId);
+}
+
+// src/kernel/contributions.ts
+init_errors();
+init_store();
+init_policy();
+init_ownership();
+init_snapshots();
+import { randomUUID as randomUUID9 } from "node:crypto";
+async function submitContribution(ctx, meta, input) {
+  const c = input.contribution;
+  if (c.kind === "change") {
+    requireThat(c.snapshotId && c.writeToken, "CONTRIBUTION_INVALID", "Changes require a snapshot and write token");
+    const snapshot2 = await loadSnapshot(ctx, c.snapshotId);
+    requireThat(
+      snapshot2.workspaceId === ctx.workspaceId && (await compareSnapshot(ctx, snapshot2)).matches,
+      "SNAPSHOT_CHANGED",
+      "Contribution must describe this workspace's current inputs"
+    );
+  }
+  const receipt = await mutateState(ctx, meta, { command: "contribution.submit", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    assertContract(task2, c.contractVersion);
+    if (c.kind === "change") {
+      requireThat(c.writeToken && c.writeToken.taskId === task2.id && c.writeToken.assignmentId === c.assignmentId, "CONTRIBUTION_INVALID", "Contribution and token refer to different work");
+      assertWriteToken(ctx, state, meta, c.writeToken);
+    }
+    requireThat(c.evidenceIds.every((e) => !!task2.evidence[e]), "EVIDENCE_NOT_FOUND", "Contribution evidence is absent");
+    const contribution2 = { ...structuredClone(c), id: randomUUID9(), submittedBy: meta.actor.instanceId, integrated: null };
+    task2.contributions[contribution2.id] = contribution2;
+    return [contribution2.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].contributions[receipt.resourceIds[0]];
+}
+async function integrateContribution(ctx, meta, input) {
+  const snapshot2 = await loadSnapshot(ctx, input.snapshotId);
+  requireThat((await compareSnapshot(ctx, snapshot2)).matches, "SNAPSHOT_CHANGED", "Integrated inputs have changed");
+  await mutateState(ctx, meta, { command: "contribution.integrate", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    assertOwner(task2, meta, input.ownerEpoch);
+    assertContract(task2, input.contractVersion);
+    const c = task2.contributions[input.contributionId];
+    requireThat(c && c.contractVersion === input.contractVersion, "EVIDENCE_VERSION_MISMATCH", "Contribution is absent or uses an older contract");
+    requireThat(input.rationale.trim(), "RATIONALE_REQUIRED", "Explain the integration decision");
+    c.integrated = { snapshotId: snapshot2.id, owner: { ...task2.owner }, rationale: input.rationale };
+    return [c.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].contributions[input.contributionId];
+}
+
+// src/kernel/delivery.ts
+init_errors();
+init_policy();
+init_store();
+init_io();
+init_schema();
+init_snapshots();
+init_ownership();
+import { randomUUID as randomUUID10 } from "node:crypto";
+function verifyRows(task2, version2, snapshotId, rows, verification) {
+  assertContract(task2, version2);
+  array(checkRowRule)(rows);
+  array(verificationRule)(verification);
+  const criteria = new Set(currentContract(task2).acceptance.map((c) => c.id));
+  requireThat(new Set(rows.map((r) => r.acceptanceId)).size === rows.length, "CHECK_INVALID", "Duplicate acceptance rows");
+  requireThat(new Set(verification.map((v) => v.evidenceId)).size === verification.length, "CHECK_INVALID", "Duplicate verification requirements");
+  const expected = new Map(verification.map((v) => [v.evidenceId, v]));
+  for (const row of rows) {
+    requireThat(criteria.has(row.acceptanceId), "CHECK_INVALID", "Unknown acceptance criterion");
+    if (row.result === "accepted-gap") requireThat(row.gapDecision, "GAP_REQUIRES_DECISION", "Accepted gap needs a user decision");
+    if (row.result === "pass") requireThat(row.evidenceIds.length > 0, "PASS_REQUIRES_EVIDENCE", "Passing rows need evidence");
+    for (const id2 of row.evidenceIds) {
+      const e = task2.evidence[id2];
+      requireThat(e, "EVIDENCE_NOT_FOUND", "Evidence is absent");
+      if (row.result !== "pass") continue;
+      requireThat(e.contractVersion === version2 && e.snapshotId === snapshotId, "EVIDENCE_VERSION_MISMATCH", "Evidence describes a different contract or snapshot");
+      requireThat(e.result === "pass", "EVIDENCE_NOT_PASSING", "Nonpassing evidence cannot support a pass");
+      const basis = expected.get(id2);
+      requireThat(
+        basis && canonicalJson(basis.argv) === canonicalJson(e.argv) && canonicalJson(basis.environment) === canonicalJson(e.environment),
+        "VERIFICATION_CONDITIONS_MISMATCH",
+        "Current command or environment differs from the evidence"
+      );
+    }
+  }
+}
+async function recordCheckSet(ctx, meta, input) {
+  assertPersistence(meta);
+  const snapshot2 = await loadSnapshot(ctx, input.snapshotId);
+  requireThat((await compareSnapshot(ctx, snapshot2)).matches, "SNAPSHOT_CHANGED", "Check inputs changed");
+  const receipt = await mutateState(ctx, meta, { command: "check.record", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    verifyRows(task2, input.contractVersion, input.snapshotId, input.rows, input.verification);
+    if (input.independent) {
+      requireThat(meta.invocation.entry === "check", "CHECK_INVALID", "Independent check requires the explicit check entry");
+      requireThat(input.rows.every((r) => r.evidenceIds.every((e) => task2.evidence[e].actor.instanceId === meta.actor.instanceId)), "CHECK_INVALID", "Do not relabel another assessor's evidence as your own check");
+    }
+    const { taskId: _, ...fields } = input;
+    const checks = { ...structuredClone(fields), id: randomUUID10(), assessor: meta.actor };
+    task2.checks[checks.id] = checks;
+    return [checks.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].checks[receipt.resourceIds[0]];
+}
+async function finishGoal(ctx, meta, input) {
+  assertPersistence(meta);
+  requireThat(["run", "continue", "debug", "finish"].includes(meta.invocation.entry) && !meta.invocation.analysisOnly, "ENTRY_SCOPE_DENIED", "This entry cannot finalize delivery");
+  const snapshot2 = await loadSnapshot(ctx, input.snapshotId);
+  requireThat((await compareSnapshot(ctx, snapshot2)).matches, "SNAPSHOT_CHANGED", "Delivery inputs changed");
+  const receipt = await mutateState(ctx, meta, { command: "finish", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    assertOwner(task2, meta, input.ownerEpoch);
+    assertContract(task2, input.contractVersion);
+    const rows = [];
+    for (const id2 of input.checkSetIds) {
+      const checks = task2.checks[id2];
+      requireThat(checks && checks.snapshotId === input.snapshotId, "CHECK_INVALID", "A selected check describes different inputs");
+      verifyRows(task2, input.contractVersion, snapshot2.id, checks.rows, input.verification);
+      rows.push(...checks.rows);
+    }
+    requireThat(currentContract(task2).acceptance.every((a) => rows.some((r) => r.acceptanceId === a.id)), "COVERAGE_MISSING", "Acceptance criteria are not covered");
+    requireThat(rows.every((r) => ["pass", "accepted-gap"].includes(r.result)), "CHECK_NOT_PASSING", "Unresolved failures or unverified results remain");
+    for (const checks of Object.values(task2.checks)) if (!input.checkSetIds.includes(checks.id) && checks.snapshotId === snapshot2.id && checks.contractVersion === input.contractVersion && checks.rows.some((r) => r.result === "fail" || r.result === "unverified")) {
+      requireThat(input.exclusions.some((reason) => reason.includes(checks.id)), "UNRESOLVED_CHECK", "Explain why a current unsuccessful check is not used");
+    }
+    for (const id2 of input.contributionIds) requireThat(
+      task2.contributions[id2]?.integrated?.snapshotId === snapshot2.id,
+      "CONTRIBUTION_NOT_INTEGRATED",
+      "Contribution is not integrated into this snapshot"
+    );
+    requireThat(!Object.values(state.claims).some((c) => c.taskId === task2.id && c.workspaceId !== ctx.workspaceId && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "Another executor is still active for this task");
+    const claim = state.claims[ctx.workspaceId];
+    if (claim && claim.state !== "released") {
+      assertCurrentToken(ctx, state, meta, toWriteToken(claim));
+      requireThat(claim.taskId === task2.id, "WORKSPACE_OCCUPIED", "Another task still owns this workspace");
+      state.claims[ctx.workspaceId] = { ...claim, state: "released", recovery: null };
+    }
+    if (currentContract(task2).quality === "tdd") {
+      const evidence2 = Object.values(task2.evidence).filter((e) => e.contractVersion === input.contractVersion).sort((a, b) => a.sequence - b.sequence);
+      const red = evidence2.find((e) => e.phase === "red" && e.result === "fail" && e.exitCode !== null && e.exitCode > 0);
+      requireThat(red && evidence2.some((e) => e.phase === "green" && e.result === "pass" && e.exitCode === 0 && e.sequence > red.sequence && e.snapshotId === snapshot2.id), "TDD_EVIDENCE_REQUIRED", "Current TDD evidence needs RED before GREEN");
+    }
+    const delivery = {
+      id: randomUUID10(),
+      contractVersion: input.contractVersion,
+      snapshotId: snapshot2.id,
+      checkSetIds: input.checkSetIds,
+      contributionIds: input.contributionIds,
+      exclusions: input.exclusions,
+      owner: { ...task2.owner },
+      acceptedGaps: rows.filter((r) => r.result === "accepted-gap").map((r) => ({ acceptanceId: r.acceptanceId, decision: r.gapDecision })),
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    task2.deliveries[delivery.id] = delivery;
+    task2.status = "delivered";
+    return [delivery.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].deliveries[receipt.resourceIds[0]];
+}
+async function acceptDelivery(ctx, meta, input) {
+  decisionRule(input.decision);
+  await mutateState(ctx, meta, { command: "delivery.accept", input }, (state) => {
+    const task2 = getTask(state, input.taskId, false);
+    assertEntry(meta, task2, "state-write");
+    requireThat(task2.deliveries[input.deliveryId], "DELIVERY_NOT_FOUND", "Delivery is absent");
+    task2.userAcceptances.push({ deliveryId: input.deliveryId, decision: input.decision, actor: meta.actor, recordedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    return [input.deliveryId];
+  });
+}
+async function archiveGoal(ctx, meta, input) {
+  decisionRule(input.decision);
+  await mutateState(ctx, meta, { command: "archive", input }, (state) => {
+    const task2 = getTask(state, input.taskId, false);
+    assertEntry(meta, task2, "state-write");
+    requireThat(task2.owner.instanceId === meta.actor.instanceId && task2.status === "delivered", "ARCHIVE_NOT_READY", "Only the owner can archive a delivered task");
+    requireThat(!Object.values(state.claims).some((c) => c.taskId === task2.id && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "An executor is still active");
+    task2.status = "archived";
+    return [task2.id];
+  });
+}
+
+// src/kernel/debug.ts
+init_store();
+init_policy();
+init_schema();
+import { randomUUID as randomUUID11 } from "node:crypto";
+init_errors();
+async function recordDiagnostic(ctx, meta, input) {
+  text(input.text);
+  array(id)(input.evidenceIds);
+  one("fact", "hypothesis", "ruled-out", "change", "validation-gap")(input.kind);
+  const receipt = await mutateState(ctx, meta, { command: "debug.record", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    requireThat(input.evidenceIds.every((e) => !!task2.evidence[e]), "EVIDENCE_NOT_FOUND", "Diagnostic evidence is absent");
+    const record2 = { id: randomUUID11(), kind: input.kind, text: input.text, evidenceIds: input.evidenceIds, actor: meta.actor, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+    task2.diagnostics.push(record2);
+    return [record2.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].diagnostics.find((d) => d.id === receipt.resourceIds[0]);
+}
+async function openRepair(ctx, meta, input) {
+  decisionRule(input.decision);
+  text(input.title);
+  text(input.expected);
+  text(input.actual);
+  requireThat(["run", "continue", "debug"].includes(meta.invocation.entry), "ENTRY_SCOPE_DENIED", "This entry cannot open repair work");
+  const receipt = await mutateState(ctx, meta, { command: "debug.open", input }, (state) => {
+    const source = getTask(state, input.taskId, false);
+    assertEntry(meta, source, "state-write");
+    let task2 = source;
+    if (source.status !== "active" || input.deliveryId) {
+      const candidates = Object.keys(source.deliveries);
+      const deliveryId = input.deliveryId ?? (candidates.length === 1 ? candidates[0] : null);
+      requireThat(deliveryId && source.deliveries[deliveryId], "DELIVERY_SELECTION_REQUIRED", "Select a real delivery to repair");
+      const original = currentContract(source);
+      task2 = makeTask(input.title, {
+        ...structuredClone(original),
+        goal: input.title,
+        acceptance: [{ id: "repair", text: input.expected }],
+        grant: meta.invocation.analysisOnly ? { businessWrite: false, delegate: false, commit: false, deploy: false, allowedPaths: [] } : { ...original.grant, delegate: false, commit: false, deploy: false }
+      }, input.decision, meta);
+      task2.relatedTo = { taskId: source.id, deliveryId };
+      state.tasks[task2.id] = task2;
+    }
+    task2.diagnostics.push({
+      id: randomUUID11(),
+      kind: "fact",
+      text: `Expected: ${input.expected}
+Reported actual: ${input.actual}`,
+      evidenceIds: [],
+      actor: meta.actor,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    return [task2.id];
+  });
+  return (await readState(ctx)).tasks[receipt.resourceIds[0]];
+}
+
+// src/legacy/import.ts
+init_store();
+init_io();
+init_policy();
+init_schema();
+init_errors();
+async function importLegacy(ctx, meta, input) {
+  assertPersistence(meta);
+  decisionRule(input.decision);
+  assertEntry(meta, null, "state-write");
+  const source = await inspectLegacy(input.sourceRoot);
+  requireThat(source.issues.length === 0, "LEGACY_INVALID", "Legacy source has unresolved diagnostics");
+  requireThat(source.fingerprint === input.expectedFingerprint, "LEGACY_SOURCE_CHANGED", "Preview and explicitly approve the current source");
+  const receipt = await mutateState(ctx, meta, { command: "legacy.import", input }, (state) => source.records.map((record2) => {
+    const existing = Object.values(state.tasks).find((t) => t.legacySource?.path === record2.path && t.legacySource.fingerprint === source.fingerprint);
+    if (existing) return existing.id;
+    const task2 = makeTask(record2.title, {
+      goal: record2.goal,
+      scope: [],
+      constraints: record2.constraints,
+      acceptance: [{ id: "review-import", text: "Review imported requirements before authorizing execution" }],
+      quality: record2.quality,
+      grant: { businessWrite: false, delegate: false, commit: false, deploy: false, allowedPaths: [] }
+    }, input.decision, meta);
+    task2.legacySource = { path: record2.path, fingerprint: source.fingerprint, originalStatus: record2.originalStatus };
+    task2.diagnostics.push({
+      id: `legacy-${task2.id}`,
+      kind: "fact",
+      text: `Imported historical task ${record2.originalId}; ${record2.historicalEvidence.length} historical evidence records remain at the source and are not current verification`,
+      evidenceIds: [],
+      actor: meta.actor,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    state.tasks[task2.id] = task2;
+    return task2.id;
+  }));
+  return receipt.resourceIds;
+}
+
+// src/cli/commands.ts
+init_schema();
+var route = (handler, check) => ({ handler, check });
+var task = { taskId: id };
+var version = { ...task, contractVersion: integer };
+var snapshot = { ...version, snapshotId: id };
+var ref = object({ taskId: id, assignmentId: nullable(id), workspaceId: id, instanceId: id, epoch: integer });
+var transfer = { from: ref, to: actorRule, contractVersion: integer, transferOwner: bool, ownerEpoch: nullable(integer), decision: nullable(decisionRule) };
+var evidence = { ...snapshot, result: one("pass", "fail", "unverified"), phase: nullable(one("red", "green")), argv: nullable(array(text)), exitCode: nullable(integer), summary: text, environment: environmentRule };
+var assignment = object({ outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool });
+var contribution = object({
+  kind: one("analysis", "change"),
+  assignmentId: nullable(id),
+  contractVersion: integer,
+  snapshotId: nullable(id),
+  evidenceIds: array(id),
+  summary: text,
+  writeToken: nullable(tokenRule)
+});
+var commands = {
+  "init": route(initializeStore, decisionRule),
+  "task create": route(createGoal, object({ title: text, contract: contractDraftRule, decision: decisionRule })),
+  "task revise": route(reviseContract, object({ ...task, expectedVersion: integer, ownerEpoch: integer, contract: contractDraftRule, decision: decisionRule })),
+  "assignment add": route(addAssignment, object({ ...task, ownerEpoch: integer, assignment })),
+  "continue": route(continueGoal, object({ ...task, assignmentId: nullable(id) }, { afterRevision: integer })),
+  "work claim": route(claimWork, object({ ...version, assignmentId: nullable(id) })),
+  "work release": route(releaseWork, tokenRule),
+  "work handoff": route(handoffWork, object(transfer)),
+  "work takeover": route(takeoverWork, object({
+    ...transfer,
+    decision: decisionRule,
+    stopBasis: one("holder-release", "host-stop-receipt", "user-declared-stop", "unknown"),
+    stopReference: nullable(text),
+    baselineSnapshotId: nullable(id)
+  })),
+  "work clear-hold": route(clearWorkspaceHold, object({ from: ref, stopBasis: one("holder-release", "host-stop-receipt", "user-declared-stop"), stopReference: nullable(text), decision: nullable(decisionRule) })),
+  "snapshot capture": route(captureSnapshot, object({ ...task, paths: array(text), token: nullable(tokenRule) }, { limits: object({ maxFiles: integer, maxTotalBytes: integer, maxFileBytes: integer }) })),
+  "snapshot restore": route(restoreSnapshot, object({ ...task, snapshotId: id, token: tokenRule, expectedTargetBase: nullable(text) })),
+  "evidence report": route(recordReportedEvidence, object(evidence)),
+  "evidence observe": route(recordUserObservation, object({ ...snapshot, decision: decisionRule, environment: environmentRule })),
+  "verify": route(runVerification, object({ ...snapshot, argv: array(text), phase: nullable(one("red", "green")), timeoutMs: integer, environment: environmentRule, commandAuthorization: decisionRule })),
+  "contribution submit": route(submitContribution, object({ ...task, contribution })),
+  "contribution integrate": route(integrateContribution, object({ ...snapshot, contributionId: id, ownerEpoch: integer, rationale: text })),
+  "check record": route(recordCheckSet, object({ ...snapshot, independent: bool, rows: array(checkRowRule), verification: array(verificationRule) })),
+  "finish": route(finishGoal, object({ ...snapshot, ownerEpoch: integer, checkSetIds: array(id), contributionIds: array(id), exclusions: array(text), verification: array(verificationRule) })),
+  "delivery accept": route(acceptDelivery, object({ ...task, deliveryId: id, decision: decisionRule })),
+  "archive": route(archiveGoal, object({ ...task, decision: decisionRule })),
+  "debug open": route(openRepair, object({ ...task, deliveryId: nullable(id), title: text, expected: text, actual: text, decision: decisionRule })),
+  "debug record": route(recordDiagnostic, object({ ...task, kind: one("fact", "hypothesis", "ruled-out", "change", "validation-gap"), text, evidenceIds: array(id) })),
+  "legacy import": route(importLegacy, object({ sourceRoot: text, expectedFingerprint: text, decision: decisionRule }))
+};
+
+// src/application.ts
+init_errors();
+init_snapshots();
+var selectorRule = object({ host: text }, { instanceId: id, hostSessionId: text, newInstance: bool });
+var envelopeRule = object({ meta: object({ operationId: id, actor: selectorRule, invocation: invocationRule }), payload: () => {
+} });
+function taskSummary(task2) {
+  return {
+    id: task2.id,
+    title: task2.title,
+    status: task2.status,
+    contract: currentContract(task2),
+    owner: task2.owner,
+    assignments: Object.values(task2.assignments),
+    contributionIds: Object.keys(task2.contributions),
+    evidenceIds: Object.values(task2.evidence).sort((a, b) => a.sequence - b.sequence).slice(-20).map((e) => e.id),
+    checkSetIds: Object.keys(task2.checks),
+    deliveryIds: Object.keys(task2.deliveries),
+    userAcceptances: task2.userAcceptances,
+    relatedTo: task2.relatedTo,
+    legacySource: task2.legacySource,
+    diagnostics: task2.diagnostics.slice(-20)
+  };
+}
+async function executeCommand(ctx, command, envelope) {
+  envelopeRule(envelope);
+  requireThat(command === "session resolve" || !envelope.meta.actor.newInstance, "ACTOR_RESOLUTION_REQUIRED", "Resolve a new instance once, then reuse the returned Actor");
+  const actor = await resolveActor(ctx, envelope.meta.actor), meta = { ...envelope.meta, actor };
+  metaRule(meta);
+  const reply = (data) => ({ actor, workspaceId: ctx.workspaceId, operationId: meta.operationId, data });
+  try {
+    if (command === "session resolve") {
+      object({})(envelope.payload);
+      return reply(actor);
+    }
+    requireThat(Object.hasOwn(commands, command), "COMMAND_UNKNOWN", "Unknown command; use --help");
+    const entry = commands[command];
+    entry.check(envelope.payload);
+    if (meta.invocation.activation === "bound-followup") {
+      const payload = record(envelope.payload);
+      const taskId = payload.taskId ?? (payload.from ? record(payload.from).taskId : void 0);
+      const bound = (await readBindings(ctx)).some((b) => b.actor.instanceId === actor.instanceId && b.workspaceId === ctx.workspaceId && b.taskId === taskId);
+      requireThat(bound, "BINDING_REQUIRED", "Follow-up has no matching task binding");
+    }
+    let data = await entry.handler(ctx, meta, envelope.payload);
+    if (command === "task create" || command === "debug open") {
+      const task2 = data;
+      await bindSession(ctx, meta, { taskId: task2.id, assignmentId: null });
+      data = taskSummary(task2);
+    }
+    if (command === "snapshot capture") {
+      const s = data;
+      data = {
+        id: s.id,
+        fingerprint: s.fingerprint,
+        baseCommit: s.baseCommit,
+        scope: s.scope,
+        entries: s.entries.length,
+        manifest: `snapshots/${s.id}.json`
+      };
+    }
+    return reply(data ?? null);
+  } catch (error) {
+    const known = error instanceof KernelError;
+    const causeCode = error?.code;
+    if (!known && command === "init" && (causeCode === "EPERM" || causeCode === "EACCES")) {
+      return { ...reply(null), error: {
+        code: "STORAGE_PERMISSION_DENIED",
+        message: "The host denied Vinea storage access. Request access to the exact store directory; do not create alternate task state or bypass host permissions.",
+        details: { storeRoot: ctx.storeRoot, causeCode }
+      } };
+    }
+    return { ...reply(null), error: {
+      code: known ? error.code : "COMMAND_FAILED",
+      message: known ? error.message : "Command failed; inspect current state before retrying",
+      details: known ? error.details : {}
+    } };
+  }
+}
+async function executeReadCommand(ctx, command, input) {
+  let data;
+  if (["doctor", "validate"].includes(command)) data = await inspectStore(ctx);
+  else if (command === "snapshot show") {
+    requireThat(input.resourceId, "ID_REQUIRED", "Specify --id");
+    data = await loadSnapshot(ctx, input.resourceId);
+  } else if (command === "legacy inspect") {
+    requireThat(input.sourceRoot, "SOURCE_REQUIRED", "Specify the exact legacy source root");
+    data = await inspectLegacy(input.sourceRoot);
+  } else {
+    const state = await readState(ctx);
+    if (command === "task show") {
+      requireThat(input.taskId, "TASK_REQUIRED", "Specify --task");
+      data = taskSummary(getTask(state, input.taskId, false));
+    } else if (["evidence show", "check show", "contribution show", "delivery show"].includes(command)) {
+      requireThat(input.taskId && input.resourceId, "ID_REQUIRED", "Specify --task and --id");
+      id(input.resourceId);
+      const task2 = getTask(state, input.taskId, false);
+      const resources = command === "evidence show" ? task2.evidence : command === "check show" ? task2.checks : command === "contribution show" ? task2.contributions : task2.deliveries;
+      data = resources[input.resourceId];
+      requireThat(data, "RESOURCE_NOT_FOUND", "Resource is absent in the selected task");
+    } else {
+      const limit = input.limit ?? 20;
+      requireThat(Number.isSafeInteger(limit) && limit >= 1 && limit <= 100, "LIMIT_INVALID", "Page size must be between 1 and 100");
+      if (input.after) id(input.after);
+      const tasks = Object.values(state.tasks).filter((t) => !input.after || t.id > input.after).sort((a, b) => a.id < b.id ? -1 : 1);
+      const page = tasks.slice(0, limit);
+      data = {
+        revision: state.revision,
+        tasks: page.map((t) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          goal: currentContract(t).goal,
+          contractVersion: currentContract(t).version,
+          owner: t.owner,
+          relatedTo: t.relatedTo
+        })),
+        nextAfter: tasks.length > limit ? page.at(-1).id : null
+      };
+    }
+  }
+  return { actor: null, workspaceId: ctx.workspaceId, operationId: null, data };
 }
 
 // src/cli.ts
-init_learning();
-init_paths();
-init_validate();
-init_workflow();
-async function main(args) {
-  const json = requestsJson(args);
+var reads = ["task show", "task list", "orient", "doctor", "validate", "legacy inspect", "snapshot show", "evidence show", "check show", "contribution show", "delivery show"];
+var legacy = ["propose", "migrate", "learning", "task transition", "task unblock", "task require", "task accept", "task set-plan", "task set-brief", "task rework", "evidence record"];
+var help = `Vinea: explicit local task collaboration
+
+vinea <command> --input - --json
+Read commands: --task <id> or --source <legacy-directory>
+
+${["session resolve", ...Object.keys(commands), ...reads].sort().join("\n")}
+
+Resolve an instance once; reuse its echoed Actor. No automatic Git, migration, or agent dispatch.
+`;
+async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr }) {
   try {
-    const command = args[0];
-    if (command === "--help" || command === "-h") {
-      parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set());
-      process.stdout.write(helpText);
+    if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
+      io.stdout.write(help);
       return 0;
     }
-    if (command === "--version" || command === "-V") {
-      parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set());
-      process.stdout.write(`${package_default.version}
+    if (legacy.some((c) => argv.slice(0, c.split(" ").length).join(" ") === c)) throw new KernelError("LEGACY_COMMAND_REMOVED", "Legacy stage commands are read-only history; use legacy inspect/import explicitly");
+    const parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {
+      input: { type: "string" },
+      json: { type: "boolean" },
+      task: { type: "string" },
+      source: { type: "string" },
+      id: { type: "string" },
+      limit: { type: "string" },
+      after: { type: "string" }
+    } });
+    const command = parsed.positionals.join(" ");
+    if (!reads.includes(command) && command !== "session resolve" && !Object.hasOwn(commands, command)) throw new KernelError("COMMAND_UNKNOWN", "Unknown command; use --help");
+    const ctx = await discoverRepository(process.cwd());
+    let result;
+    if (reads.includes(command)) result = await executeReadCommand(ctx, command, {
+      taskId: parsed.values.task,
+      sourceRoot: parsed.values.source,
+      resourceId: parsed.values.id,
+      limit: parsed.values.limit === void 0 ? void 0 : Number(parsed.values.limit),
+      after: parsed.values.after
+    });
+    else {
+      if (!parsed.values.input) throw new KernelError("INPUT_REQUIRED", "Use --input - for the structured command envelope");
+      let content = "";
+      if (parsed.values.input === "-") {
+        for await (const chunk of io.stdin) {
+          content += chunk.toString();
+          if (Buffer.byteLength(content) > 2 * 1024 * 1024) throw new KernelError("INPUT_TOO_LARGE", "Input exceeds 2 MiB");
+        }
+      } else content = await readFile4(await safePath(ctx.worktreeRoot, resolve4(ctx.worktreeRoot, parsed.values.input)), "utf8");
+      if (Buffer.byteLength(content) > 2 * 1024 * 1024) throw new KernelError("INPUT_TOO_LARGE", "Input exceeds 2 MiB");
+      let envelope;
+      try {
+        envelope = JSON.parse(content);
+      } catch {
+        throw new KernelError("INPUT_INVALID", "Input must be a JSON command envelope");
+      }
+      result = await executeCommand(ctx, command, envelope);
+    }
+    io.stdout.write(`${JSON.stringify(result, null, parsed.values.json ? void 0 : 2)}
 `);
-      return 0;
-    }
-    if (command === "init") {
-      const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
-      await initializeWorkspace(resolveVineaPaths(process.cwd()));
-      writeOutput({ initialized: true }, options.has("--json"), "Initialized Vinea workspace.\n");
-      return 0;
-    }
-    if (command === "doctor") {
-      const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
-      const report = await diagnoseWorkspace(resolveVineaPaths(process.cwd()));
-      writeOutput(report, options.has("--json"), renderDoctorReport(report));
-      return report.healthy ? 0 : 1;
-    }
-    if (command === "migrate") {
-      const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
-      const result = await migrateWorkspace(resolveVineaPaths(process.cwd()));
-      writeOutput(
-        result,
-        options.has("--json"),
-        result.status === "migrated" ? result.fromSchemaVersion === result.toSchemaVersion ? `Migrated Vinea runtime state for schema ${result.toSchemaVersion}.
-` : `Migrated Vinea workspace from schema ${result.fromSchemaVersion} to ${result.toSchemaVersion}.
-` : `Vinea workspace already uses schema ${result.toSchemaVersion}.
-`
-      );
-      return 0;
-    }
-    if (command === "validate") {
-      const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
-      const report = await validateWorkspace(resolveVineaPaths(process.cwd()));
-      writeOutput(report, options.has("--json"), renderValidationReport(report));
-      return report.issues.length === 0 ? 0 : 1;
-    }
-    if (command === "propose") {
-      return await handlePropose(args.slice(1));
-    }
-    if (command === "orient") {
-      return await handleOrient(args.slice(1));
-    }
-    if (command === "continue") {
-      return await handleContinue(args.slice(1));
-    }
-    if (command === "task") {
-      return await handleTask(args.slice(1));
-    }
-    if (command === "context") {
-      return await handleContext(args.slice(1));
-    }
-    if (command === "evidence") {
-      return await handleEvidence(args.slice(1));
-    }
-    if (command === "learning") {
-      return await handleLearning(args.slice(1));
-    }
-    if (command === "check") {
-      return await handleCheck(args.slice(1));
-    }
-    if (command === "finish") {
-      return await handleFinish(args.slice(1));
-    }
-    if (command === "archive") {
-      return await handleArchive(args.slice(1));
-    }
-    throw new UsageError(`Unknown command: ${command ?? "(none)"}`);
+    return result.error || command === "validate" && result.data.status !== "ready" ? 1 : 0;
   } catch (error) {
-    return reportError(error, json);
+    const known = error instanceof KernelError;
+    io.stdout.write(`${JSON.stringify({
+      actor: null,
+      workspaceId: null,
+      operationId: null,
+      data: null,
+      error: { code: known ? error.code : "COMMAND_FAILED", message: known ? error.message : "Command failed; inspect current state before retrying", details: known ? error.details : {} }
+    })}
+`);
+    return 1;
   }
 }
-async function handleOrient(args) {
-  const options = parseOptions(
-    args,
-    /* @__PURE__ */ new Set(["--host", "--session-id"]),
-    /* @__PURE__ */ new Set(["--json"])
-  );
-  const host = oneOf(requiredOption(options, "--host"), ["codex", "claude"], "--host");
-  const summary = await orientWorkspace(resolveVineaPaths(process.cwd()), {
-    host,
-    sessionId: optionalValue(options, "--session-id")
-  });
-  writeOutput(summary, options.has("--json"), renderOrient(summary));
-  return summary.health.initialized && summary.health.supportedSchema ? 0 : 1;
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve4(process.argv[1])) {
+  process.exitCode = await main(process.argv.slice(2));
 }
-async function handleContinue(args) {
-  const taskId = requiredTaskId(args[0]);
-  const options = parseOptions(
-    args.slice(1),
-    /* @__PURE__ */ new Set(["--host", "--session-id", "--reason"]),
-    /* @__PURE__ */ new Set(["--confirmed", "--start", "--json"])
-  );
-  if (!options.has("--confirmed")) {
-    throw new UsageError("Continuation requires explicit --confirmed.");
-  }
-  const start = options.has("--start");
-  const reason = optionalValue(options, "--reason");
-  if (start && reason === void 0) {
-    throw new UsageError("--start requires --reason.");
-  }
-  if (!start && reason !== void 0) {
-    throw new UsageError("--reason requires --start.");
-  }
-  const host = oneOf(requiredOption(options, "--host"), ["codex", "claude"], "--host");
-  const result = await continueTask(resolveVineaPaths(process.cwd()), taskId, {
-    host,
-    sessionId: optionalValue(options, "--session-id"),
-    confirmed: true,
-    start,
-    reason
-  });
-  writeOutput(
-    result,
-    options.has("--json"),
-    `Continued ${result.task.id} on ${host}; status: ${result.task.status}; binding: ${result.binding === null ? "none" : "saved"}.
-`
-  );
-  return 0;
-}
-async function handlePropose(args) {
-  const options = parseOptions(
-    args,
-    /* @__PURE__ */ new Set(["--title", "--description", "--risk", "--quality", "--execution", "--inline-skip-reason"]),
-    /* @__PURE__ */ new Set(["--confirmed", "--json"])
-  );
-  const title = requiredOption(options, "--title");
-  const description = requiredOption(options, "--description");
-  const requestedRisk = oneOf(requiredOption(options, "--risk"), ["auto", "low", "medium", "high"], "--risk");
-  const qualityMode = oneOf(requiredOption(options, "--quality"), ["standard", "tdd"], "--quality");
-  const executionMode = oneOf(
-    requiredOption(options, "--execution"),
-    ["single-agent", "delegated"],
-    "--execution"
-  );
-  const confirmed = options.has("--confirmed");
-  const inlineSkipReason = optionalValue(options, "--inline-skip-reason");
-  const json = options.has("--json");
-  if (confirmed && inlineSkipReason !== void 0) {
-    throw new UsageError("--confirmed cannot be combined with --inline-skip-reason.");
-  }
-  const paths = resolveVineaPaths(process.cwd());
-  const config = await readConfig(paths);
-  const suggested = suggestRisk(title, description, [], config.riskRules);
-  const risk = {
-    level: requestedRisk === "auto" ? suggested.level : requestedRisk,
-    reasons: suggested.reasons
-  };
-  const proposal = { title: title.trim(), description: description.trim(), risk, qualityMode, executionMode };
-  if (inlineSkipReason !== void 0) {
-    const record = await appendInlineAudit(paths, {
-      title,
-      description,
-      proposedRisk: risk,
-      reason: inlineSkipReason
-    });
-    writeOutput(record, json, renderInlineAudit(record));
-    return 0;
-  }
-  if (confirmed) {
-    const created = await createTask(paths, {
-      title,
-      risk,
-      qualityMode,
-      executionMode,
-      confirmation: "user"
-    });
-    await writeTaskOutput(paths, created.task, json);
-    return 0;
-  }
-  writeOutput(proposal, json, renderProposal(proposal));
-  return 0;
-}
-async function handleTask(args) {
-  const subcommand = args[0];
-  const paths = resolveVineaPaths(process.cwd());
-  if (subcommand === "list") {
-    const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(["--status"]), /* @__PURE__ */ new Set(["--json"]));
-    const status = oneOf(optionalValue(options, "--status") ?? "active", ["active", "all"], "--status");
-    const tasks = await listTasks(paths, status);
-    const json = options.has("--json");
-    const checks = await Promise.all(tasks.map((task) => showCheck(paths, task.id)));
-    writeOutput(
-      tasks,
-      json,
-      tasks.length === 0 ? "No tasks.\n" : tasks.map((task, index) => renderTask(task, checks[index].rows)).join("\n")
-    );
-    return 0;
-  }
-  if (subcommand === "show") {
-    const taskId = requiredTaskId(args[1]);
-    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
-    const task = await readTask(paths, taskId);
-    const check = await showCheck(paths, taskId);
-    writeOutput(taskView(task, check.rows), options.has("--json"), renderTask(task, check.rows));
-    return 0;
-  }
-  if (subcommand === "rework") {
-    const taskId = requiredTaskId(args[1]);
-    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--reason"]), /* @__PURE__ */ new Set(["--json"]));
-    const task = await reworkTask(paths, taskId, {
-      actor: "cli",
-      reason: requiredOption(options, "--reason")
-    });
-    await writeTaskOutput(paths, task, options.has("--json"));
-    return 0;
-  }
-  if (subcommand === "transition" || subcommand === "unblock") {
-    const taskId = requiredTaskId(args[1]);
-    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--to", "--reason"]), /* @__PURE__ */ new Set(["--json"]));
-    const to = oneOf(
-      requiredOption(options, "--to"),
-      ["planning", "ready", "in_progress", "checking", "finished", "archived", "blocked"],
-      "--to"
-    );
-    if (to === "finished" || to === "archived") {
-      throw new UsageError(`Use the confirmed ${to === "finished" ? "finish" : "archive"} command for ${to} transitions.`);
-    }
-    if (subcommand === "unblock" && !["ready", "in_progress", "checking"].includes(to)) {
-      throw new UsageError("unblock --to must be ready, in_progress, or checking.");
-    }
-    const task = await transitionTask(paths, taskId, to, {
-      actor: "cli",
-      reason: requiredOption(options, "--reason"),
-      unblock: subcommand === "unblock"
-    });
-    await writeTaskOutput(paths, task, options.has("--json"));
-    return 0;
-  }
-  if (subcommand === "require" || subcommand === "accept") {
-    const taskId = requiredTaskId(args[1]);
-    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--id", "--text"]), /* @__PURE__ */ new Set(["--json"]));
-    const input = {
-      id: requiredOption(options, "--id"),
-      text: requiredOption(options, "--text"),
-      actor: "cli"
-    };
-    const task = subcommand === "require" ? await addRequirement(paths, taskId, input) : await addAcceptanceCriterion(paths, taskId, input);
-    await writeTaskOutput(paths, task, options.has("--json"));
-    return 0;
-  }
-  if (subcommand === "set-plan" || subcommand === "set-brief") {
-    const taskId = requiredTaskId(args[1]);
-    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--file"]), /* @__PURE__ */ new Set(["--json"]));
-    const result = subcommand === "set-plan" ? await setTaskPlan(paths, taskId, requiredOption(options, "--file"), "cli") : await setTaskBrief(paths, taskId, requiredOption(options, "--file"), "cli");
-    writeOutput(
-      result,
-      options.has("--json"),
-      `Updated ${result.artifact} for ${result.taskId} (${result.estimatedBytes} bytes).
-`
-    );
-    return 0;
-  }
-  throw new UsageError(`Unknown task command: ${subcommand ?? "(none)"}`);
-}
-async function handleContext(args) {
-  const subcommand = args[0];
-  const taskId = requiredTaskId(args[1]);
-  const paths = resolveVineaPaths(process.cwd());
-  if (subcommand === "add") {
-    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--path", "--purpose"]), /* @__PURE__ */ new Set(["--json"]));
-    const reference = await addContextReference(paths, taskId, {
-      path: requiredOption(options, "--path"),
-      purpose: requiredOption(options, "--purpose"),
-      actor: "cli"
-    });
-    writeOutput(
-      reference,
-      options.has("--json"),
-      `Added context ${reference.path} (${reference.estimatedBytes} bytes).
-`
-    );
-    return 0;
-  }
-  if (subcommand === "list") {
-    const options = parseOptions(args.slice(2), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
-    const manifest = await listContextReferences(paths, taskId);
-    writeOutput(manifest, options.has("--json"), renderContextManifest(manifest));
-    return 0;
-  }
-  throw new UsageError(`Unknown context command: ${subcommand ?? "(none)"}`);
-}
-async function handleEvidence(args) {
-  const subcommand = args[0];
-  if (subcommand !== "record") {
-    throw new UsageError(`Unknown evidence command: ${subcommand ?? "(none)"}`);
-  }
-  const taskId = requiredTaskId(args[1]);
-  const options = parseOptions(
-    args.slice(2),
-    /* @__PURE__ */ new Set(["--kind", "--summary", "--command", "--exit-code", "--result"]),
-    /* @__PURE__ */ new Set(["--json"])
-  );
-  const kind = oneOf(
-    requiredOption(options, "--kind"),
-    ["command", "manual", "tdd-red", "tdd-green"],
-    "--kind"
-  );
-  const resultValue = optionalValue(options, "--result");
-  const result = resultValue === void 0 ? void 0 : oneOf(resultValue, ["pass", "fail"], "--result");
-  const exitCodeValue = optionalValue(options, "--exit-code");
-  const exitCode = exitCodeValue === void 0 ? void 0 : parseExitCode(exitCodeValue);
-  const evidence = await recordEvidence(resolveVineaPaths(process.cwd()), taskId, {
-    kind,
-    summary: requiredOption(options, "--summary"),
-    command: optionalValue(options, "--command"),
-    exitCode,
-    result,
-    actor: "cli"
-  });
-  writeOutput(evidence, options.has("--json"), renderEvidence(evidence));
-  return 0;
-}
-async function handleLearning(args) {
-  const subcommand = args[0];
-  const taskId = requiredTaskId(args[1]);
-  const paths = resolveVineaPaths(process.cwd());
-  if (subcommand === "propose") {
-    const options = parseOptions(
-      args.slice(2),
-      /* @__PURE__ */ new Set(["--id", "--domain", "--text", "--rationale"]),
-      /* @__PURE__ */ new Set(["--json"])
-    );
-    const task = await proposeLearning(paths, taskId, {
-      id: requiredOption(options, "--id"),
-      domain: requiredOption(options, "--domain"),
-      text: requiredOption(options, "--text"),
-      rationale: requiredOption(options, "--rationale"),
-      actor: "cli"
-    });
-    await writeTaskOutput(paths, task, options.has("--json"));
-    return 0;
-  }
-  if (subcommand === "accept") {
-    const options = parseOptions(
-      args.slice(2),
-      /* @__PURE__ */ new Set(["--id", "--confirmed-by"]),
-      /* @__PURE__ */ new Set(["--json"])
-    );
-    const confirmedBy = oneOf(
-      requiredOption(options, "--confirmed-by"),
-      ["user"],
-      "--confirmed-by"
-    );
-    const task = await acceptLearning(paths, taskId, {
-      id: requiredOption(options, "--id"),
-      confirmedBy,
-      actor: "cli"
-    });
-    await writeTaskOutput(paths, task, options.has("--json"));
-    return 0;
-  }
-  if (subcommand === "archive") {
-    const options = parseOptions(
-      args.slice(2),
-      /* @__PURE__ */ new Set(["--id", "--reason"]),
-      /* @__PURE__ */ new Set(["--json"])
-    );
-    const task = await archiveLearning(paths, taskId, {
-      id: requiredOption(options, "--id"),
-      reason: requiredOption(options, "--reason"),
-      actor: "cli"
-    });
-    await writeTaskOutput(paths, task, options.has("--json"));
-    return 0;
-  }
-  throw new UsageError(`Unknown learning command: ${subcommand ?? "(none)"}`);
-}
-async function handleCheck(args) {
-  const paths = resolveVineaPaths(process.cwd());
-  if (args[0] === "history") {
-    const taskId2 = requiredTaskId(args[1]);
-    const options2 = parseOptions(args.slice(2), /* @__PURE__ */ new Set(["--revision"]), /* @__PURE__ */ new Set(["--json"]));
-    const revision = optionalValue(options2, "--revision");
-    if (revision === void 0) {
-      const history = await listCheckHistory(paths, taskId2);
-      writeOutput(history, options2.has("--json"), renderCheckHistoryListing(history));
-    } else {
-      const snapshot = await readCheckHistoryRevision(
-        paths,
-        taskId2,
-        parseNonNegativeInteger(revision, "--revision")
-      );
-      writeOutput(snapshot, options2.has("--json"), renderCheckHistorySnapshot(snapshot));
-    }
-    return 0;
-  }
-  if (args[0] === "show") {
-    const taskId2 = requiredTaskId(args[1]);
-    const options2 = parseOptions(args.slice(2), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--json"]));
-    const summary2 = await showCheck(paths, taskId2);
-    writeOutput(summary2, options2.has("--json"), renderCheckSummary(summary2));
-    return 0;
-  }
-  const taskId = requiredTaskId(args[0]);
-  const options = parseOptions(
-    args.slice(1),
-    /* @__PURE__ */ new Set(["--requirement", "--plan-item", "--paths", "--evidence", "--result", "--summary"]),
-    /* @__PURE__ */ new Set(["--json"])
-  );
-  const evidence = optionalValue(options, "--evidence");
-  const summary = await upsertCheck(paths, taskId, {
-    requirementId: requiredOption(options, "--requirement"),
-    planItem: requiredOption(options, "--plan-item"),
-    paths: commaList(requiredOption(options, "--paths"), "--paths"),
-    evidenceIds: evidence === void 0 ? [] : commaList(evidence, "--evidence"),
-    result: oneOf(
-      requiredOption(options, "--result"),
-      ["pass", "fail", "uncovered"],
-      "--result"
-    ),
-    summary: requiredOption(options, "--summary"),
-    actor: "cli"
-  });
-  writeOutput(summary, options.has("--json"), renderCheckSummary(summary));
-  return 0;
-}
-async function handleFinish(args) {
-  const taskId = requiredTaskId(args[0]);
-  const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--confirmed", "--json"]));
-  if (!options.has("--confirmed")) throw new UsageError("Finish requires explicit --confirmed.");
-  const paths = resolveVineaPaths(process.cwd());
-  const task = await finishTask(paths, taskId, {
-    confirmed: true,
-    actor: "cli"
-  });
-  await writeTaskOutput(paths, task, options.has("--json"));
-  return 0;
-}
-async function handleArchive(args) {
-  const taskId = requiredTaskId(args[0]);
-  const options = parseOptions(args.slice(1), /* @__PURE__ */ new Set(), /* @__PURE__ */ new Set(["--confirmed", "--json"]));
-  if (!options.has("--confirmed")) throw new UsageError("Archive requires explicit --confirmed.");
-  const paths = resolveVineaPaths(process.cwd());
-  const task = await archiveTask(paths, taskId, {
-    confirmed: true,
-    actor: "cli"
-  });
-  await writeTaskOutput(paths, task, options.has("--json"));
-  return 0;
-}
-async function writeTaskOutput(paths, task, json) {
-  const check = await showCheck(paths, task.id);
-  writeOutput(task, json, renderTask(task, check.rows));
-}
-void main(process.argv.slice(2)).then((exitCode) => {
-  process.exitCode = exitCode;
-});
 export {
   main
 };

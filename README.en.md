@@ -2,14 +2,20 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Vinea is a lightweight, file-first workflow for AI coding teams. Its task
-state lives in the target Git repository, so Codex and Claude Code can
-deliberately recover the same work in a new session.
+Vinea is a lightweight collaboration kernel for AI coding. The user defines
+the goal, constraints and acceptance criteria; agents choose the execution
+path. State stays in the local Git common directory, shared by linked
+worktrees, never tracked, committed or pushed through Git.
 
 The committed public plugin is [`plugins/vinea`](plugins/vinea). It contains
-one bundled Node CLI and eight host-prefixed skills: `vinea:orient`,
-`vinea:propose`, `vinea:brainstorm`, `vinea:plan`, `vinea:continue`,
-`vinea:check`, `vinea:finish`, and `vinea:doctor`.
+one bundled Node CLI and nine host-prefixed skills: `vinea:run`,
+`vinea:brainstorm`, `vinea:plan`, `vinea:continue`, `vinea:check`,
+`vinea:debug`, `vinea:finish`, `vinea:orient`, and `vinea:doctor`.
+
+Version `v1.0.0` introduces this kernel rewrite, breaking compatibility with the
+stage commands and task storage of `v0.3.x`. Upgrades do not migrate old `.vinea`
+data automatically; legacy data stays read-only and explicit imports grant no
+execution authority.
 
 ## Install from the Git marketplace
 
@@ -28,7 +34,7 @@ To pin an exact release instead of following `main`, register the marketplace
 at an annotated tag:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -42,7 +48,7 @@ claude plugin install vinea@vinea --scope user
 To pin an exact release:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v0.3.1
+claude plugin marketplace add anlostsheep/vinea@v1.0.0
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -158,7 +164,7 @@ create a local release with:
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 0.3.1
+npm run release -- 1.0.1
 ```
 
 The command runs the full checks, stages only release artifacts, creates a
@@ -168,59 +174,69 @@ Publication remains a separate, explicitly approved action. See
 
 ## Workflow
 
-Start every new or uncertain session with `vinea:orient`. First-release
-recovery is intentionally explicit: there is no hook that attaches a task in
-the background. Only when Codex actually supplies a nonempty
-`CODEX_THREAD_ID` does the skill pass it as `--session-id` and create a session
-binding. Without that value, Codex uses the same explicit candidate
-confirmation flow as Claude Code. Claude has no Vinea session-ID environment
-variable fallback in this release; `vinea:orient` presents active candidates
-and requires the user to confirm one.
+Explicitly invoke `vinea:run` or ask to use Vinea for a goal. Ordinary coding
+requests do not create Vinea tasks. Select brainstorm, plan, check or debug
+directly when that is the desired scope. These are capabilities, not mandatory
+phases. The logical `/vinea` shorthand is not a registered bare alias.
 
-A concise medium-risk lifecycle looks like this:
+- Brainstorm investigates facts, challenges material assumptions, batches
+  independent decisions, and follows dependent choices only after feedback.
+- Plan delivers appropriately sized implementation and verification work.
+  Design approval alone is not permission to execute.
+- Run implements, internally debugs and verifies within the actual grant.
+  TDD, independent reviewers and assignments are optional.
+- Continue reads current goals, ownership and relevant evidence. Joining
+  does not seize a write token. Reuse the CLI's echoed instance ID across
+  processes; do not invent a host session ID.
+- Standalone check does not fix business code. An explicit debug request may
+  authorize repairs; internal checks during authorized development can repair
+  within their existing scope.
+- Debug supports diagnosis-only and bounded repair. Post-delivery defects
+  create a related task, preserving original delivery facts and evidence.
+- Finish accepts recoverable uncommitted work. Commit, deployment, user
+  acceptance and archive are distinct actions. Learning is not a gate.
 
-1. Use `vinea:propose`, review the risk and mode options, then create the task
-   only after the user confirms.
-2. Use `vinea:brainstorm` only for a real design choice. It asks every
-   currently blocking decision in one round, with 2–3 options, a
-   recommendation, and trade-offs, then writes brief/plan after approval.
-   Use `vinea:plan` to record implementation and quality choices; if TDD and
-   execution mode are both open, present them together.
-3. For a user-confirmed TDD task, record a real failing `tdd-red` result before
-   implementation and a later passing `tdd-green` result. TDD is optional,
-   never a default requirement.
-4. Use `vinea:check` to cover every requirement with observed evidence. Commit
-   or otherwise handle the business Git changes through the repository's own
-   workflow before `vinea:finish` and `vinea:archive`.
-5. `vinea:finish` proposes learning candidates but never promotes them by
-   itself. The user must explicitly accept reusable learning; otherwise archive
-   it with the task.
-
-Delegated work is also optional. It requires user confirmation and a host that
-can actually provide the roles: research/check agents stay read-only and one
-implementer owns business writes. When the host cannot support this, Vinea asks
-for single-agent execution or another host; it does not silently substitute a
-different mode.
+One physical worktree admits one cooperating business writer; independent
+assignments can use separate worktrees. Hosts perform actual dispatch, waiting
+and cancellation; Vinea records bounded contributions and owner integration.
+Missing host facilities are disclosed and replaced by explicit relay when
+authorized, not fictitious dispatch. Unknown-writer takeover requires an
+authorized isolated recovery target and retains a hold on the original directory.
 
 ## Repository state and validation
 
-Vinea writes only the target repository's `.vinea/` directory. The workspace,
-task records, artifacts, and runtime pointers carry explicit schema versions;
-a later unsupported version is reported rather than silently rewritten. Active
-tasks live below `.vinea/tasks/active/<task-id>/`, while completed task records
-move to `.vinea/tasks/archive/<task-id>/`. Reusable rules appear below
-`.vinea/specs/` only after an explicit user acceptance.
+Use `git rev-parse --git-common-dir` to locate the common directory. State lives
+in its `vinea/` subdirectory, normally `.git/vinea/` in the primary checkout.
+Linked worktrees resolve to that same local store. Runtime bindings can be
+rebuilt without releasing ownership. Clones and machines do not share state.
 
-Use the host-independent validator in CI when you want to check Vinea state:
+Snapshots store selected file contents, additions, deletions and executable
+bits, including uncommitted inputs, while rejecting sensitive paths. Evidence
+separates command-runner results, agent reports and user observations. Matching
+hashes alone do not prove current commands or external environments match.
+Old contracts, stale epochs, missing blobs and mismatched conditions are rejected.
+
+`legacy inspect` reads old `.vinea` data; explicitly approved `legacy import`
+creates zero-grant historical references without modifying the source or
+promoting old passes. Retain the original historical artifacts at their source.
+
+Validate the local store:
 
 ```sh
 node plugins/vinea/bin/vinea.mjs validate --json
 ```
 
-`validate` reads versioned Vinea state and local session pointers without
-writing or requiring an AI host. It is not a replacement for the consuming
-project's unit, integration, lint, build, or deployment checks; configure
-those separately.
+`validate` is read-only and exits nonzero for missing, invalid, incomplete or
+locked state. It does not run business tests or initialize a fresh CI clone.
+The protocol coordinates cooperating agents; it is not a sandbox against
+arbitrary local filesystem access.
+
+See the [CLI reference](hosts/public-plugin/CLI.md),
+[execution evidence](docs/verification/vinea-vnext-execution.md), and
+[real-host acceptance](docs/verification/vinea-vnext-host-acceptance.md).
+For denied shared-store access, see [least-privilege host setup](hosts/public-plugin/HOSTS.md),
+not a sandbox bypass or alternate state root. The [single-task comparison](docs/verification/vinea-vnext-benchmark-2026-09-08.md)
+does not establish general token savings.
 
 Vinea deliberately ships no MCP server, daemon, hooks, apps, or cloud service.
 

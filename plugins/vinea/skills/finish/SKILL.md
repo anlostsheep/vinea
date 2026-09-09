@@ -1,20 +1,16 @@
 ---
 name: finish
-description: Use when a Vinea task appears implemented and needs final regression, learning, and archive gates.
+description: Use when the user explicitly asks Vinea to deliver a task with acceptance evidence and clearly identified remaining gaps.
 ---
 
 # Vinea Finish
 
-Public skill: `vinea:finish`.
+Public entry: `vinea:finish`.
 
-## Bundled CLI contract
+Resolve `<plugin-root>` by removing `/skills/finish/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` in the target worktree. Read [CLI.md](../../CLI.md) for delivery operations.
 
-Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the target Git repository. In Codex, derive `<plugin-root>` from the absolute path of this current `SKILL.md` by removing `/skills/<current-skill>/SKILL.md`, then run `node <plugin-root>/bin/vinea.mjs`. In Claude Code, run `node ${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs`.
+As the current responsible owner, identify the exact delivery inputs and relevant integrated contributions. Verify current acceptance coverage, command and environment conditions, and recorded exceptions. Failed or unverified checks must be resolved or explicitly accounted for; never silently omit a current failure. Preserve accepted gaps as gaps, and for a TDD contract require genuine ordered RED then GREEN evidence.
 
-## Finish gates
+Capture recoverable selected inputs even if business changes are uncommitted. Do not require an unrelated clean-worktree gate or automatically commit, push, deploy or archive. Submitted contributions are not integrated until the owner records that decision. Task delivery and user acceptance are separate records; only an actual user acceptance may be recorded as such.
 
-Verify that business changes have been handled through the repository's Git workflow, every check row is covered and passing, and a TDD task contains red and green evidence. If a gate fails, stop and report it.
-
-Propose only learning candidates that are stable, portable, verifiable, and not duplicates. Present all candidates in one list for accept or archive. Do not ask about them one candidate per turn. Promote an accepted candidate only with `learning accept <task-id> --id <id> --confirmed-by user`; archive the rest with a stated reason. Never promote learning without that user decision.
-
-After all gates and confirmations pass, run `finish <task-id> --confirmed`, then `archive <task-id> --confirmed` only when the user also confirms archival. Vinea never commits business code for the user.
+Deliver the result, verification and limitations. A defect found by this standalone entry does not expand its authority into repair; use already authorized development or an explicit debug request. Post-delivery repair opens a related task and leaves original evidence unchanged. Reusable learning, additional reviewers and archive are optional, not completion gates.

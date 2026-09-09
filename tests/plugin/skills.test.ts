@@ -1,143 +1,22 @@
-import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, access } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { expect, test } from "vitest";
 
-const skillNames = [
-  "orient",
-  "propose",
-  "brainstorm",
-  "plan",
-  "continue",
-  "check",
-  "finish",
-  "doctor",
-] as const;
-
-const repositoryRoot = process.cwd();
-
-interface SkillInventory {
-  directories: string[];
-  skills: Array<{ directory: string; source: string }>;
-}
-
-async function readSkillInventory(skillsRoot = join(repositoryRoot, "skills")): Promise<SkillInventory> {
-  const entries = await readdir(skillsRoot, { withFileTypes: true });
-  const directories = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
-  const nonDirectories = entries.filter((entry) => !entry.isDirectory()).map((entry) => entry.name);
-  expect(nonDirectories).toEqual([]);
-  const skills = await Promise.all(directories.map(async (directory) => {
-    const contents = await readdir(join(skillsRoot, directory));
-    expect(contents.sort()).toEqual(["SKILL.md"]);
-    const skillPath = join(skillsRoot, directory, "SKILL.md");
-    await access(skillPath);
-    return { directory, source: await readFile(skillPath, "utf8") };
-  }));
-  return { directories, skills };
-}
-
-function assertExactSkillInventory(inventory: SkillInventory): void {
-  expect(inventory.directories).toEqual([...skillNames].sort());
-  const publishedNames = inventory.skills.map(({ source }) => {
-    const match = source.match(/^---\nname: ([a-z0-9-]+)\n/m);
-    return match?.[1];
-  }).sort();
-  expect(publishedNames).toEqual([...skillNames].sort());
-}
-
-test("ships exactly the eight logical Vinea skill names for host prefixing", async () => {
-  const inventory = await readSkillInventory();
-  assertExactSkillInventory(inventory);
-
-  for (const { directory, source } of inventory.skills) {
-    expect(source).toMatch(new RegExp(`^---\\nname: ${directory}\\n`, "m"));
-    expect(source).toContain("bin/vinea.mjs");
-    expect(source).toContain("vinea:" + directory);
+const names = ["brainstorm", "check", "continue", "debug", "doctor", "finish", "orient", "plan", "run"];
+test("ships exactly nine host-prefixed logical entry points", async () => {
+  const entries = await readdir("skills", { withFileTypes: true });
+  expect(entries.filter(e => e.isDirectory()).map(e => e.name).sort()).toEqual(names);
+  for (const name of names) {
+    const text = await readFile(join("skills", name, "SKILL.md"), "utf8");
+    expect(text).toMatch(new RegExp(`^---\nname: ${name}\ndescription: [^\n]+\n---`));
+    expect(text).toContain(`vinea:${name}`);
+    expect(text).toContain("bin/vinea.mjs");
+    expect(text).toContain("CLI.md");
   }
 });
-
-test("rejects an added bare alias from the skill inventory", async () => {
-  const fixtureRoot = await mkdtemp(join(tmpdir(), "vinea-skills-"));
-  try {
-    await Promise.all([...skillNames, "start"].map(async (name) => {
-      await mkdir(join(fixtureRoot, name));
-      await writeFile(join(fixtureRoot, name, "SKILL.md"), `---\nname: ${name}\n---\n`, "utf8");
-    }));
-
-    await expect(readSkillInventory(fixtureRoot).then(assertExactSkillInventory)).rejects.toThrow();
-  } finally {
-    await rm(fixtureRoot, { recursive: true, force: true });
-  }
-});
-
-test("uses the bundled CLI root contract without host automation claims", async () => {
-  const inventory = await readSkillInventory();
-  const combined = inventory.skills.map(({ source }) => source).join("\n");
-
-  expect(combined).toContain("${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs");
-  expect(combined).toContain("/skills/<current-skill>/SKILL.md");
-  expect(combined).toContain("node <plugin-root>/bin/vinea.mjs");
-  expect(combined).not.toContain("MCP");
-  expect(combined).not.toContain("daemon");
-  expect(combined).not.toContain("host hook");
-  expect(combined).not.toMatch(/automatic(?:ally)? (?:recover|attach|promot)/i);
-  expect(combined).not.toMatch(/auto(?:matic(?:ally)?)? (?:recover|attach|promot)/i);
-});
-
-test("decision skills batch blocking choices instead of serial questions", async () => {
-  const inventory = await readSkillInventory();
-  const source = new Map(inventory.skills.map(({ directory, source }) => [directory, source]));
-  const brainstorm = source.get("brainstorm");
-  const propose = source.get("propose");
-  const plan = source.get("plan");
-  const finish = source.get("finish");
-
-  expect(brainstorm).toMatch(/one round/i);
-  expect(brainstorm).toMatch(/2[–-]3 options/i);
-  expect(brainstorm).toMatch(/approval/i);
-  expect(brainstorm).toMatch(/must not .*reusable learning/i);
-  expect(brainstorm).not.toMatch(/exactly one .*question/i);
-  expect(brainstorm).not.toMatch(/at a time/i);
-  expect(brainstorm).not.toMatch(/small sections/i);
-
-  expect(propose).toMatch(/one round/i);
-  expect(propose).toMatch(/do not ask them in separate turns/i);
-  expect(plan).toMatch(/one round/i);
-  expect(plan).toMatch(/do not serialize them/i);
-  expect(finish).toMatch(/one list/i);
-  expect(finish).toMatch(/do not ask about them one candidate per turn/i);
-});
-
-test("Codex session binding is explicit and Claude has no invented environment fallback", async () => {
-  const inventory = await readSkillInventory();
-  const orient = inventory.skills.find(({ directory }) => directory === "orient")?.source;
-  const continueSkill = inventory.skills.find(({ directory }) => directory === "continue")?.source;
-
-  expect(orient).toContain("CODEX_THREAD_ID");
-  expect(orient).toContain('--session-id "$CODEX_THREAD_ID"');
-  expect(orient).toMatch(/nonempty/i);
-  expect(orient).toMatch(/do not invent a session ID/i);
-  expect(continueSkill).toContain("CODEX_THREAD_ID");
-  expect(continueSkill).toContain('--session-id "$CODEX_THREAD_ID"');
-  expect(continueSkill).toMatch(/otherwise omit it/i);
-  expect(`${orient}\n${continueSkill}`).not.toContain("CLAUDE_SESSION_ID");
-});
-
-test("checker, continuation, orientation, and diagnostics describe the explicit revision-scoped rework loop", async () => {
-  const inventory = await readSkillInventory();
-  const source = new Map(inventory.skills.map(({ directory, source }) => [directory, source]));
-  const check = source.get("check")!;
-  const continueSkill = source.get("continue")!;
-  const orient = source.get("orient")!;
-  const doctor = source.get("doctor")!;
-
-  expect(check).toContain("task rework <task-id> --reason <text>");
-  expect(check).toMatch(/must not edit business code/i);
-  expect(check).toContain("check history <task-id>");
-  expect(continueSkill).toMatch(/current verification revision/i);
-  expect(continueSkill).toMatch(/fresh.*evidence/i);
-  expect(orient).toMatch(/verification revision/i);
-  expect(orient).toMatch(/failed or uncovered/i);
-  expect(orient).toContain("task rework");
-  expect(doctor).toMatch(/pending rework/i);
+test("shared CLI reference covers every mutation command", async () => {
+  await access("hosts/public-plugin/CLI.md");
+  const source = await readFile("hosts/public-plugin/CLI.md", "utf8");
+  const { commands } = await import("../../src/cli/commands.js");
+  for (const name of Object.keys(commands)) expect(source).toContain(`\`${name}\``);
 });

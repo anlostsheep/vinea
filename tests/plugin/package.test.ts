@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeAll, expect, test } from "vitest";
+import { newActor } from "../../src/kernel/repository.js";
+import { testMeta } from "../helpers/kernel-fixture.js";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = process.cwd();
@@ -15,10 +17,10 @@ const languageSwitch = "[简体中文](README.md) | [English](README.en.md)";
 const operationalCommands = [
   "codex plugin marketplace add anlostsheep/vinea",
   "codex plugin add vinea@vinea",
-  "codex plugin marketplace add anlostsheep/vinea --ref v0.3.1",
+  "codex plugin marketplace add anlostsheep/vinea --ref v1.0.0",
   "claude plugin marketplace add anlostsheep/vinea",
   "claude plugin install vinea@vinea --scope user",
-  "claude plugin marketplace add anlostsheep/vinea@v0.3.1",
+  "claude plugin marketplace add anlostsheep/vinea@v1.0.0",
   "codex plugin marketplace upgrade vinea",
   "codex plugin remove vinea@vinea",
   "claude plugin marketplace update vinea",
@@ -32,11 +34,12 @@ const skillNames = [
   "brainstorm",
   "check",
   "continue",
+  "debug",
   "doctor",
   "finish",
   "orient",
   "plan",
-  "propose",
+  "run",
 ] as const;
 
 beforeAll(async () => {
@@ -134,6 +137,8 @@ test("packages parity manifests, all public skills, and one host-independent CLI
     expect(source).toContain(`vinea:${name}`);
   }
   const cliPath = join(publicRoot, "bin", "vinea.mjs");
+  expect(await readFile(join(publicRoot, "CLI.md"), "utf8")).toBe(await readFile(join(repositoryRoot, "hosts/public-plugin/CLI.md"), "utf8"));
+  expect(await readFile(join(publicRoot, "HOSTS.md"), "utf8")).toBe(await readFile(join(repositoryRoot, "hosts/public-plugin/HOSTS.md"), "utf8"));
   await access(cliPath);
   expect((await stat(cliPath)).mode & 0o111).not.toBe(0);
 });
@@ -159,14 +164,19 @@ test("packages Chinese-first bilingual READMEs with equivalent operational comma
   expect(packagedEnglish).toBe(sourceEnglish);
 });
 
-test("the public CLI initializes and validates a fresh repository", async () => {
+test("the public CLI initializes only an explicit Git repository and validates it", async () => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "vinea-public-plugin-"));
   try {
-    const initialized = await runPublicCli(["init", "--json"], fixtureRoot);
-    expect(JSON.parse(initialized.stdout)).toEqual({ initialized: true });
+    await expect(runPublicCli(["validate", "--json"], fixtureRoot)).rejects.toMatchObject({ code: 1 });
+    await execFileAsync("git", ["init"], { cwd: fixtureRoot });
+    const input = join(fixtureRoot, "request.json"), actor = newActor("package-fixture");
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(input, JSON.stringify({ meta: testMeta(actor), payload: { summary: "initialize fixture", reference: null } }));
+    const initialized = await runPublicCli(["init", "--input", "request.json", "--json"], fixtureRoot);
+    expect(JSON.parse(initialized.stdout)).toMatchObject({ actor, data: null });
 
     const validated = await runPublicCli(["validate", "--json"], fixtureRoot);
-    expect(JSON.parse(validated.stdout)).toEqual({ issues: [] });
+    expect(JSON.parse(validated.stdout)).toMatchObject({ data: { status: "ready", issues: [] } });
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }

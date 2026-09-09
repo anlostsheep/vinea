@@ -1,22 +1,14 @@
 ---
 name: doctor
-description: Use when Vinea initialization, schema, Git availability, or task-state diagnostics prevent safe progress.
+description: Use when Vinea reports unavailable Git context, invalid local state, occupancy or recovery problems that need read-only diagnosis.
 ---
 
 # Vinea Doctor
 
-Public skill: `vinea:doctor`.
+Public entry: `vinea:doctor`.
 
-## Bundled CLI contract
+Resolve `<plugin-root>` by removing `/skills/doctor/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Run `node <plugin-root>/bin/vinea.mjs doctor --json` or `validate --json` from the affected Git worktree. See [CLI.md](../../CLI.md) for targeted reads.
 
-Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the target Git repository. In Codex, derive `<plugin-root>` from the absolute path of this current `SKILL.md` by removing `/skills/<current-skill>/SKILL.md`, then run `node <plugin-root>/bin/vinea.mjs`. In Claude Code, run `node ${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs`.
+Distinguish missing initialization, malformed or future schema, active lock, stale identity, unavailable snapshot and unresolved writer hold. Inspect only facts that determine the next safe action. Do not repair state by deleting it, steal a lock on timeout, clear a hold without stop evidence, rewrite history or initialize Git in a non-Git directory.
 
-## Diagnose before mutation
-
-Run `doctor --json` read-only and report initialization state, supported schema, missing directories, migration guidance, and Git diagnostics. When it is healthy but task state remains questionable, run `validate --json` for aggregated file and lifecycle issues.
-
-Explain the exact next safe action: initialize only an uninitialized target repository, follow stated migration guidance for an unsupported schema, repair the named repository condition, or return to `vinea:orient` after diagnostics pass. Do not modify task files to hide a diagnostic.
-
-When doctor reports a pending rework, keep the task files intact and run the named task command (for example `task show <task-id>`) to resume its recorded recovery sequence before new work. If it reports invalid rework history, run `validate --json` and repair the exact reported record rather than writing a replacement snapshot.
-
-Lock diagnostics, including `.runtime/learning-promotion.lock`, are inventory only: do not infer liveness or delete them automatically. Inspect the reported owner and path, confirm no Vinea process is active, then remove only the exact reported lock directory if manual recovery is necessary.
+Explain the concrete blocker and the smallest recovery requiring user action. A binding can be recreated by explicit continue without removing ownership. A missing snapshot blob is unavailable content, not permission to substitute current files. Legacy inspection is read-only; import is separate, explicitly confirmed and grants no execution permission.

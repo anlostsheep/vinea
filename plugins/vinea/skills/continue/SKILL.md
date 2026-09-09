@@ -1,22 +1,20 @@
 ---
 name: continue
-description: Use when the user has selected a Vinea task and wants to attach the current Codex or Claude Code session before work resumes.
+description: Use when the user explicitly asks Vinea to resume or join a selected task, hand work to another agent, or recover interrupted execution.
 ---
 
 # Vinea Continue
 
-Public skill: `vinea:continue`.
+Public entry: `vinea:continue`.
 
-## Bundled CLI contract
+Resolve `<plugin-root>` by removing `/skills/continue/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` from the target worktree. Read the identity and transfer sections of [CLI.md](../../CLI.md).
 
-Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the target Git repository. In Codex, derive `<plugin-root>` from the absolute path of this current `SKILL.md` by removing `/skills/<current-skill>/SKILL.md`, then run `node <plugin-root>/bin/vinea.mjs`. In Claude Code, run `node ${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs`.
+Select the requested task, not the newest task by assumption. Resolve and reuse the echoed Actor instance ID across CLI processes. Include a host session ID only when actually supplied by that host; never invent one. A missing runtime Binding does not erase durable ownership. Load `continue`'s compact view; fetch individual evidence, contributions or snapshots by ID as needed.
 
-## Resume deliberately
+On the first join by this genuinely new executor, `session resolve` with your actual host and `newInstance:true` allocates a local execution ID without writing state or claiming work. This is not a fabricated host session ID; omit `hostSessionId` if unavailable. If identity resolution is denied or fails, report **unbound** and stop. Another actor's Binding is never your identity, and a raw Claim is never a substitute for your own `continue` response's `writeToken`.
 
-After the user confirms the selected task, its quality mode, and its execution mode, run `continue <task-id> --host codex|claude --confirmed`. In Codex, append `--session-id "$CODEX_THREAD_ID"` only when the host actually provides a nonempty `CODEX_THREAD_ID`; otherwise omit it and do not invent a value. Claude Code uses no Vinea session-ID environment variable in this release. Add `--start --reason <reason>` only when moving a ready task into implementation is also confirmed.
+Joining is read-only unless the caller already holds a current write token. Do not claim simply because the user said "join" or because another agent appears idle. The owner and writer are distinct: agreeing to inspect a task is not accepting delivery responsibility. Confirm actual transfer intent when it is ambiguous.
 
-Load only the task brief, plan, compact journal, check file, and paths named by the context manifest. Do not replay chat history or load unrelated repository material. For a finished or archived task, report the lifecycle boundary and ask the user to select an active task or create a new one.
+For a normal handoff, the current holder releases or hands off, and the recipient verifies the new epoch. For takeover, copy a public `occupiedWrites[].ref` from the latest view, record the stop basis and explicit user decision. Without proof the old writer stopped, recover a complete snapshot in an authorized isolated worktree. The old directory remains an `unknown-writer-hold`; never free it or reuse an old token just because the global epoch advanced. A recovery conflict must preserve target files and report the blocker.
 
-## Revision-aware resumption
-
-When continuing a reworked task, use the current verification revision shown by `task show` or `orient`. Historical checks and evidence are audit material only: regenerate fresh evidence for this revision, and for TDD record a new red result followed by a new green result before returning to `checking`. Do not reuse old evidence IDs or old passing check rows to satisfy the new cycle.
+After transfer, refresh the contract and validate the restored inputs before business writes. Contributors submit bounded results; only the responsible owner integrates them. Host dispatch, waiting and cancellation require real callable facilities and authorization, not Vinea status fields. Fall back openly to explicit relay when those facilities are absent.

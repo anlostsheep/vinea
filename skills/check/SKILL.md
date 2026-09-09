@@ -1,24 +1,16 @@
 ---
 name: check
-description: Use when a Vinea task needs requirement-to-change regression evidence before it can be finished.
+description: Use when the user explicitly requests Vinea to assess a task against acceptance criteria, without authorizing fixes to business code.
 ---
 
 # Vinea Check
 
-Public skill: `vinea:check`.
+Public entry: `vinea:check`.
 
-## Bundled CLI contract
+Resolve `<plugin-root>` by removing `/skills/check/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` from the target worktree. Read [CLI.md](../../CLI.md) for evidence and check payloads.
 
-Use the public plugin's `bin/vinea.mjs`, never a global binary. Work from the target Git repository. In Codex, derive `<plugin-root>` from the absolute path of this current `SKILL.md` by removing `/skills/<current-skill>/SKILL.md`, then run `node <plugin-root>/bin/vinea.mjs`. In Claude Code, run `node ${CLAUDE_PLUGIN_ROOT}/bin/vinea.mjs`.
+Check the current contract against selected, recoverable inputs. Use project-native verification where appropriate; Vinea's optional runner is not mandatory. Declare evidence as command-runner, agent-report or user-observation truthfully. Existing passing evidence can support a conclusion only when contract version, snapshot, actual command and relevant environment still match.
 
-## Evidence-first review
+Report each acceptance criterion as pass, fail, unverified or an explicitly user-accepted gap. A gap is never a pass. If recording an independent check, use this assessor's own evidence, not relabeled implementation evidence. Independence is an explicit intent, not a mandatory second agent.
 
-Record real command or manual evidence with `evidence record`; include the actual command, result, and a concise outcome. For TDD tasks, record both the expected failing red test and passing green test.
-
-Fill every requirement row with a plan item, affected paths, linked evidence IDs, result, and summary using `check`. Inspect `check show` before completion. Stop on missing, failed, or uncovered evidence; report the gap and next safe action rather than claiming the task is complete. Do not treat a task checkbox or an agent assertion as evidence.
-
-## Explicit rework loop
-
-If a current checking-cycle row is `fail` or `uncovered` because implementation must resume, record that row first, explain the defect, then run `task rework <task-id> --reason <text>`. This archives the completed current matrix and opens the next verification revision in `in_progress`; it is not a raw lifecycle transition and does not require another confirmation.
-
-The checker must not edit business code. After rework, hand off to `vinea:continue` for implementation and fresh proof. Use `check history <task-id>` to inspect prior-cycle summaries, or `check history <task-id> --revision <n>` for the full archived matrix.
+Do not edit business code or silently transition into repair. Verification commands may write caches or fixtures: inspect their side effects and obtain appropriate authority before executing them. `persist=false` permits no Vinea writes and no invocation of Vinea's runner. Return failures and evidence boundaries; a later explicit debug request may authorize a repair. Internal self-checking during an already authorized run can repair within its existing scope.

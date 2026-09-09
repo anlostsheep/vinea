@@ -2,14 +2,17 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Vinea 是一个面向 AI 编程团队的轻量级、文件优先工作流。任务状态保存在
-目标 Git 仓库中，因此 Codex 与 Claude Code 可以在新会话中明确地恢复并
-继续同一项工作。
+Vinea 是面向 AI 编程的轻量协作内核：用户确定目标、约束和交付标准，agent
+选择执行路径。任务状态只保存在 Git 共同目录中，在本机多个 worktree 和
+agent 间共享，不进入 Git 跟踪、提交或推送。
 
 仓库中提交的公开插件位于 [`plugins/vinea`](plugins/vinea)。它包含一个已经
-打包的 Node CLI，以及八个带宿主前缀的技能：`vinea:orient`、
-`vinea:propose`、`vinea:brainstorm`、`vinea:plan`、`vinea:continue`、
-`vinea:check`、`vinea:finish` 和 `vinea:doctor`。
+打包的 Node CLI，以及九个带宿主前缀的技能：`vinea:run`、
+`vinea:brainstorm`、`vinea:plan`、`vinea:continue`、`vinea:check`、
+`vinea:debug`、`vinea:finish`、`vinea:orient` 和 `vinea:doctor`。
+
+`v1.0.0` 引入本内核重写，与 `v0.3.x` 的阶段命令和任务存储不兼容。
+升级不会自动迁移旧 `.vinea`；旧数据保持只读，显式导入也不会继承执行权限。
 
 ## 通过 Git marketplace 安装
 
@@ -27,7 +30,7 @@ codex plugin add vinea@vinea
 marketplace：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -41,7 +44,7 @@ claude plugin install vinea@vinea --scope user
 固定到精确版本：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v0.3.1
+claude plugin marketplace add anlostsheep/vinea@v1.0.0
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -147,7 +150,7 @@ marketplace 都携带生成后的版本。Claude marketplace 的插件条目会�
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 0.3.1
+npm run release -- 1.0.1
 ```
 
 该命令会运行完整检查，只暂存发布产物，创建 release commit 和带注释的
@@ -156,48 +159,58 @@ npm run release -- 0.3.1
 
 ## 工作流
 
-每次开始新会话或对上下文不确定时，先使用 `vinea:orient`。首次发布的恢复
-流程刻意保持显式：没有 hook 会在后台自动绑定任务。只有当 Codex 确实提供
-非空 `CODEX_THREAD_ID` 时，技能才会将其作为 `--session-id` 传入并创建
-会话绑定。没有这个值时，Codex 与 Claude Code 一样，都会显示候选任务并
-要求用户明确确认。此版本中 Claude 没有 Vinea 会话 ID 的环境变量回退。
+明确调用 `vinea:run`，或直接说“使用 Vinea 完成这个目标”进入流程。普通
+编程请求不自动创建 Vinea 任务。可以直接选择 brainstorm、plan、check 或
+debug；这些入口不是必须按顺序经过的阶段。裸 `/vinea` 只是设计中的逻辑
+称呼，本包没有注册这一别名。
 
-一个精简的中风险生命周期如下：
+- `brainstorm` 先查事实，再挑战关键假设；独立决策集中问，有依赖的决策根据
+  反馈追问。没有实质决策阻塞就停止，不机械穷尽问题。
+- `plan` 交付适量的实现与验证计划。认可方案不等于授权实现。
+- `run` 在授权范围内实现、内部调试和验证。TDD、独立 reviewer、分工都按需。
+- `continue` 读取当前契约、职责和必要证据。加入不等于接管，更不自动取得
+  写权。实例 ID 由 CLI 回显并跨进程复用，不伪造宿主 session ID。
+- `check` 独立核验时不修改业务代码；明确委托修复后再用 `debug`。开发中的
+  内部自检失败可在原授权内继续修复。
+- `debug` 支持只定位或定位并修复。交付后的缺陷建立关联修复任务，不改写
+  原交付记录。事实、假设和未验证结论分别保存。
+- `finish` 按当前快照、契约和验收证据交付。未提交改动可以交付；提交、部署、
+  用户接受与归档是独立操作，学习沉淀不是门禁。
 
-1. 使用 `vinea:propose`，审阅风险和执行模式选项，只有在用户确认后才创建
-   任务。
-2. 只在确实存在重要设计选择时使用 `vinea:brainstorm`。它把当前所有阻塞
-   决策放在同一轮，每项给出 2–3 个选项、推荐和取舍，批准后再写 brief/plan。
-   使用 `vinea:plan` 记录实现和质量选择；未定的 TDD 与执行模式也并进一轮。
-3. 对用户确认采用 TDD 的任务，先记录一次真实失败的 `tdd-red`，实现后再
-   记录通过的 `tdd-green`。TDD 是可选项，不是默认要求。
-4. 使用 `vinea:check`，以观察到的证据覆盖每项需求。在执行
-   `vinea:finish` 和 `vinea:archive` 前，先按仓库自身工作流提交或妥善处理
-   业务 Git 改动。
-5. `vinea:finish` 可以提出学习候选，但不会自行推广。可复用学习必须由用户
-   明确接受，否则随任务归档。
-
-委派同样是可选项。它需要用户确认，并要求宿主确实能够提供所需角色：研究和
-检查 agent 保持只读，只由一个实现者写业务文件。如果宿主无法支持，Vinea
-会请求改用单 agent 或其他宿主，不会静默替换执行模式。
+同一物理 worktree 只允许一个业务写入者，多个 worktree 可承担独立分工。
+真实派发、等待和取消由宿主完成，Vinea 记录分工、贡献和负责人整合。宿主
+能力缺失时明确说明并使用接力，不把状态记录当成已派发 agent。不能确认
+旧写入者停止时，仅在授权的隔离 worktree 恢复，旧目录保留 hold。
 
 ## 仓库状态与验证
 
-Vinea 只写入目标仓库的 `.vinea/` 目录。工作区、任务记录、产物和运行时指针
-都带有明确的 schema 版本；遇到尚不支持的新版本时会报告错误，不会静默改写。
-活动任务位于 `.vinea/tasks/active/<task-id>/`，完成后的任务记录会移动到
-`.vinea/tasks/archive/<task-id>/`。只有用户明确接受后，可复用规则才会写入
-`.vinea/specs/`。
+运行 `git rev-parse --git-common-dir` 可定位共同目录，状态存储在其中的
+`vinea/`。普通仓库通常是 `.git/vinea/`；关联 worktree 的 `.git` 是指向
+同一共同目录的文件。本地 Binding 可重建，但删除它不会释放职责。Git
+clone 不携带这些状态，不提供跨机器同步。
 
-如果要在 CI 中检查 Vinea 状态，请使用与宿主无关的校验器：
+快照保存所选输入的真实内容，包括新增、删除和未提交文件，排除敏感路径。
+证据区分工具采集、agent 报告和用户观察。仅快照相同不能证明命令或环境
+相同；旧契约、旧 epoch、缺失 blob 或核验条件不匹配都会拒绝相关操作。
+
+旧 `.vinea` 只经 `legacy inspect` 读取，显式 `legacy import` 导入历史引用；
+不修改来源，不继承执行权限或通过结论。历史原始材料仍需保留在来源目录。
+
+检查本机共享状态：
 
 ```sh
 node plugins/vinea/bin/vinea.mjs validate --json
 ```
 
-`validate` 只读取版本化的 Vinea 状态和本地会话指针，不写入文件，也不依赖
-AI 宿主。它不能替代使用方项目自己的单元测试、集成测试、lint、构建或部署
-检查；这些检查需要单独配置。
+`validate` 只读检查内核状态，缺失、损坏、未完成初始化或占锁时退出非零。
+它不替代业务测试，也不把 CI 新 clone 中缺失本地状态当成自动初始化信号。
+协议约束合作的 agent，不是阻止任意本地进程写文件的安全沙箱。
+
+完整命令载荷见 [CLI 参考](hosts/public-plugin/CLI.md)，验证边界见
+[执行证据](docs/verification/vinea-vnext-execution.md) 与
+[真实宿主验收](docs/verification/vinea-vnext-host-acceptance.md)。
+宿主拒绝访问共享状态目录时，参见 [最小权限接入说明](hosts/public-plugin/HOSTS.md)；
+不要关闭沙箱或另建权威状态。单题实测见 [token/耗时对照](docs/verification/vinea-vnext-benchmark-2026-09-08.md)，当前没有普遍节省 token 的结论。
 
 Vinea 刻意不提供 MCP server、daemon、hook、app 或云服务。
 
