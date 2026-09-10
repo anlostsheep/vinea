@@ -30,7 +30,7 @@ codex plugin add vinea@vinea
 marketplace：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -44,7 +44,7 @@ claude plugin install vinea@vinea --scope user
 固定到精确版本：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.0
+claude plugin marketplace add anlostsheep/vinea@v1.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -150,7 +150,7 @@ marketplace 都携带生成后的版本。Claude marketplace 的插件条目会�
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 1.0.1
+npm run release -- 1.0.2
 ```
 
 该命令会运行完整检查，只暂存发布产物，创建 release commit 和带注释的

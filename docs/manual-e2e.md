@@ -30,6 +30,22 @@ the rewritten kernel.
    constraints, acceptance and effective grant. The agent should not repeat
    a classification/approval ceremony for already settled decisions.
 
+## Workflow Selection With Other Skills
+
+Use an already approved disposable host profile where another workflow's skills
+are available. Do not install or enable a framework in the user's normal host
+just for this check. Record actual skill invocations, not mere mentions or
+files read as review material. These cases are procedures, not passing evidence.
+
+1. Explicitly select `vinea:brainstorm`, then approve a design without requesting
+   implementation. Confirm no automatic external planning workflow or code edit.
+2. Request `vinea:plan`. Confirm the plan does not import another framework's
+   required-sub-skill header, including from historical project plans.
+3. Request task-specific tool or domain-skill assistance within the agreed scope.
+   Confirm workflow ownership does not disable that assistance.
+4. Explicitly choose another workflow framework. Confirm the choice is honored
+   without widening the existing write or execution authorization.
+
 ## Cross-Host Continuation
 
 1. Have host A resolve a real Actor, create and claim the task, and make a

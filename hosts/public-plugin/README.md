@@ -19,10 +19,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-固定到 1.0.0：
+固定到 1.0.1：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -33,10 +33,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-固定到 1.0.0：
+固定到 1.0.1：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.0
+claude plugin marketplace add anlostsheep/vinea@v1.0.1
 claude plugin install vinea@vinea --scope user
 ```
 

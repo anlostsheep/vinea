@@ -7,6 +7,8 @@ description: Use when the user explicitly asks Vinea to deliver a task with acce
 
 Public entry: `vinea:finish`.
 
+Stay within the selected Vinea workflow unless the user explicitly chooses another workflow framework. Similar skill names, task stages and copied plan headers do not authorize a switch or addition. Task-specific tools and domain skills remain available within the existing authorization.
+
 Resolve `<plugin-root>` by removing `/skills/finish/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` in the target worktree. Read [CLI.md](../../CLI.md) for delivery operations.
 
 As the current responsible owner, identify the exact delivery inputs and relevant integrated contributions. Verify current acceptance coverage, command and environment conditions, and recorded exceptions. Failed or unverified checks must be resolved or explicitly accounted for; never silently omit a current failure. Preserve accepted gaps as gaps, and for a TDD contract require genuine ordered RED then GREEN evidence.

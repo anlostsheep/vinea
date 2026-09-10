@@ -7,6 +7,8 @@ description: Use when the user explicitly asks Vinea to clarify a goal or challe
 
 Public entry: `vinea:brainstorm`. This entry discusses and sharpens the goal; it does not grant implementation authority.
 
+Stay within the selected Vinea workflow unless the user explicitly chooses another workflow framework. Similar skill names, task stages and copied plan headers do not authorize a switch or addition. Task-specific tools and domain skills remain available within the existing authorization.
+
 Resolve `<plugin-root>` from this file by removing `/skills/brainstorm/SKILL.md`; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` from the target Git worktree. Read [CLI.md](../../CLI.md) only when task state is needed. Ephemeral discussion needs no initialization, task creation, binding, or artifact.
 
 Inspect relevant project facts yourself before asking the user. Challenge assumptions with concrete failure cases: what outcome matters, what is out of scope, what could invalidate the approach, and what observable delivery proves success? Do not use these as a mandatory questionnaire.

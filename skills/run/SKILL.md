@@ -7,6 +7,8 @@ description: Use when the user explicitly requests Vinea to carry a goal through
 
 Public entry: `vinea:run`. Ordinary coding requests do not activate Vinea or create task state.
 
+Stay within the selected Vinea workflow unless the user explicitly chooses another workflow framework. Similar skill names, task stages and copied plan headers do not authorize a switch or addition. Task-specific tools and domain skills remain available within the existing authorization.
+
 Resolve `<plugin-root>` from this file by removing `/skills/run/SKILL.md`; in Claude Code use `${CLAUDE_PLUGIN_ROOT}` when provided. Run `node <plugin-root>/bin/vinea.mjs` from the target Git worktree. Read the relevant parts of [CLI.md](../../CLI.md) for command envelopes and payloads; never guess IDs or call a global binary.
 
 Work toward the user's outcome within their constraints. Confirm only material choices that remain open; batch independent choices with options, tradeoffs and a recommendation. Approval of a design does not authorize implementation. Once execution is authorized, choose the method and proceed without mandatory brainstorming, planning, TDD, separate reviewers, or repeated approvals.

@@ -1,6 +1,6 @@
 # Vinea Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical implementation plan, retained for traceability only.** Its steps and implementation choices are not workflow or skill-loading instructions for new tasks. Use the currently selected Vinea entry and current user authorization; reading this document does not authorize execution.
 
 **Goal:** Deliver an installable Vinea plugin for Codex and Claude Code, backed by one file-first Node CLI that lets a small team create, resume, check, finish, and archive shared AI-coding tasks across new sessions.
 

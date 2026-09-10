@@ -7,6 +7,8 @@ description: Use when the user explicitly requests Vinea to assess a task agains
 
 Public entry: `vinea:check`.
 
+Stay within the selected Vinea workflow unless the user explicitly chooses another workflow framework. Similar skill names, task stages and copied plan headers do not authorize a switch or addition. Task-specific tools and domain skills remain available within the existing authorization.
+
 Resolve `<plugin-root>` by removing `/skills/check/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Use `node <plugin-root>/bin/vinea.mjs` from the target worktree. Read [CLI.md](../../CLI.md) for evidence and check payloads.
 
 Check the current contract against selected, recoverable inputs. Use project-native verification where appropriate; Vinea's optional runner is not mandatory. Declare evidence as command-runner, agent-report or user-observation truthfully. Existing passing evidence can support a conclusion only when contract version, snapshot, actual command and relevant environment still match.

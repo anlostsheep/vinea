@@ -5,6 +5,16 @@ host manifests and marketplaces are generated from it by the release checks.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-10
+
+### Changed
+
+- Clarify that an explicitly selected Vinea workflow does not authorize adding
+  another workflow framework through similar names, stages or copied plan headers.
+  Task-specific tools and domain skills remain available within existing authority.
+- Mark historical implementation plans as reference-only and remove mandatory
+  external workflow sub-skill headers. Add manual coexistence acceptance cases.
+
 ## [1.0.0] - 2026-09-09
 
 ### Changed

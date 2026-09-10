@@ -1,7 +1,7 @@
 # Vinea vNext Kernel Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-> **本项目执行约束优先：** 上述技能不自动授权委派、创建 worktree、提交或推送。默认由当前执行者推进；仅在用户授权协作后使用子 Agent，不恢复逐阶段审批和固定角色流水线。
+> **Historical implementation plan, retained for traceability only.** Its steps and implementation choices are not workflow or skill-loading instructions for new tasks. Use the currently selected Vinea entry and current user authorization; reading this document does not authorize execution.
+> **历史执行约束：** 当时未默认授权委派、创建 worktree、提交或推送；也未采用逐阶段审批和固定角色流水线。这些记录不替代新任务的授权决定。
 > **状态：** 2026-09-08 任务 1-13 已落地；用户随后授权了任务 14 的真实验收与对照。本轮已实际执行并记录成功、首轮失败、修正和宿主阻塞，不宣称通用成功率或 token 优势。
 > **修订：** Grok 提出的六项计划缺口已进入实现和回归。具体执行顺序、测试合并与证据边界见下方执行状态；不倒填未按原样执行的 RED 示例。
 

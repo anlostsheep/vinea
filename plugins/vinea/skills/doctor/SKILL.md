@@ -7,6 +7,8 @@ description: Use when Vinea reports unavailable Git context, invalid local state
 
 Public entry: `vinea:doctor`.
 
+Stay within the selected Vinea workflow unless the user explicitly chooses another workflow framework. Similar skill names, task stages and copied plan headers do not authorize a switch or addition. Task-specific tools and domain skills remain available within the existing authorization.
+
 Resolve `<plugin-root>` by removing `/skills/doctor/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Run `node <plugin-root>/bin/vinea.mjs doctor --json` or `validate --json` from the affected Git worktree. See [CLI.md](../../CLI.md) for targeted reads.
 
 Distinguish missing initialization, malformed or future schema, active lock, stale identity, unavailable snapshot and unresolved writer hold. Inspect only facts that determine the next safe action. Do not repair state by deleting it, steal a lock on timeout, clear a hold without stop evidence, rewrite history or initialize Git in a non-Git directory.

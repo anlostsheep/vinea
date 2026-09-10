@@ -21,10 +21,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-To pin release 1.0.0:
+To pin release 1.0.1:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -35,10 +35,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-To pin release 1.0.0:
+To pin release 1.0.1:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.0
+claude plugin marketplace add anlostsheep/vinea@v1.0.1
 claude plugin install vinea@vinea --scope user
 ```
 

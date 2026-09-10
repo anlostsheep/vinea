@@ -34,7 +34,7 @@ To pin an exact release instead of following `main`, register the marketplace
 at an annotated tag:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -48,7 +48,7 @@ claude plugin install vinea@vinea --scope user
 To pin an exact release:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.0
+claude plugin marketplace add anlostsheep/vinea@v1.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -164,7 +164,7 @@ create a local release with:
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 1.0.1
+npm run release -- 1.0.2
 ```
 
 The command runs the full checks, stages only release artifacts, creates a
