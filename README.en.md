@@ -55,7 +55,7 @@ To pin an exact release instead of following `main`, register the marketplace
 at an annotated tag:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -69,7 +69,7 @@ claude plugin install vinea@vinea --scope user
 To pin an exact release:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v2.0.0
+claude plugin marketplace add anlostsheep/vinea@v2.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -98,7 +98,6 @@ Codex has no separate plugin-upgrade command. For a marketplace that follows
 
 ```sh
 codex plugin marketplace upgrade vinea
-codex plugin remove vinea@vinea
 codex plugin add vinea@vinea
 ```
 
@@ -122,7 +121,7 @@ claude plugin update vinea@vinea --scope user
 Grok Build refreshes its selected source and plugin:
 
 ```sh
-grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin marketplace update vinea
 grok plugin update vinea
 grok plugin list
 ```
@@ -208,7 +207,7 @@ create a local release with:
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 2.0.0
+npm run release -- 2.0.1
 ```
 
 The command runs the full checks, stages only release artifacts, creates a
@@ -219,7 +218,7 @@ Publication remains a separate, explicitly approved action. See
 After validation, publish `main` and the version tag together:
 
 ```sh
-git push --atomic origin main refs/tags/v2.0.0
+git push --atomic origin main refs/tags/v2.0.1
 ```
 
 ## Workflow

@@ -5,6 +5,14 @@ host manifests and marketplaces are generated from it by the release checks.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-20
+
+### Fixed
+
+- Correct Grok marketplace refresh examples to use the configured source name,
+  verified against the installed CLI. Document non-destructive Codex refresh and
+  reinstall without requiring an uninstall first. No kernel behavior changes.
+
 ## [2.0.0] - 2026-09-20
 
 ### Changed

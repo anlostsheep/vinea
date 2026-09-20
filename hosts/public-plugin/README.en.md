@@ -28,10 +28,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-To pin release 2.0.0:
+To pin release 2.0.1:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -42,10 +42,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-To pin release 2.0.0:
+To pin release 2.0.1:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v2.0.0
+claude plugin marketplace add anlostsheep/vinea@v2.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -65,7 +65,6 @@ For a Codex marketplace that follows `main`, refresh and reinstall:
 
 ```sh
 codex plugin marketplace upgrade vinea
-codex plugin remove vinea@vinea
 codex plugin add vinea@vinea
 ```
 
@@ -89,7 +88,7 @@ claude plugin update vinea@vinea --scope user
 For Grok Build, update only the selected source and plugin:
 
 ```sh
-grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin marketplace update vinea
 grok plugin update vinea
 grok plugin list
 ```

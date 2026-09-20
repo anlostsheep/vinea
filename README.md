@@ -48,7 +48,7 @@ codex plugin add vinea@vinea
 marketplace：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -62,7 +62,7 @@ claude plugin install vinea@vinea --scope user
 固定到精确版本：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v2.0.0
+claude plugin marketplace add anlostsheep/vinea@v2.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -90,7 +90,6 @@ Codex 没有单独的插件升级命令。对于跟随 `main` 的 marketplace，
 
 ```sh
 codex plugin marketplace upgrade vinea
-codex plugin remove vinea@vinea
 codex plugin add vinea@vinea
 ```
 
@@ -114,7 +113,7 @@ claude plugin update vinea@vinea --scope user
 Grok Build 刷新对应源和已安装插件：
 
 ```sh
-grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin marketplace update vinea
 grok plugin update vinea
 grok plugin list
 ```
@@ -191,7 +190,7 @@ marketplace 都携带生成后的版本。Claude marketplace 的插件条目会�
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 2.0.0
+npm run release -- 2.0.1
 ```
 
 该命令会运行完整检查，只暂存发布产物，创建 release commit 和带注释的
@@ -201,7 +200,7 @@ npm run release -- 2.0.0
 验证完成后，将 `main` 与版本 tag 一起发布到 Git marketplace：
 
 ```sh
-git push --atomic origin main refs/tags/v2.0.0
+git push --atomic origin main refs/tags/v2.0.1
 ```
 
 ## 工作流

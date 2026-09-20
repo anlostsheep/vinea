@@ -23,10 +23,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-固定到 2.0.0：
+固定到 2.0.1：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -37,10 +37,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-固定到 2.0.0：
+固定到 2.0.1：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v2.0.0
+claude plugin marketplace add anlostsheep/vinea@v2.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -59,7 +59,6 @@ grok plugin install vinea --trust
 
 ```sh
 codex plugin marketplace upgrade vinea
-codex plugin remove vinea@vinea
 codex plugin add vinea@vinea
 ```
 
@@ -83,7 +82,7 @@ claude plugin update vinea@vinea --scope user
 Grok Build 更新对应源与插件：
 
 ```sh
-grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin marketplace update vinea
 grok plugin update vinea
 grok plugin list
 ```
