@@ -16,3 +16,5 @@ As the current responsible owner, identify the exact delivery inputs and relevan
 Capture recoverable selected inputs even if business changes are uncommitted. Do not require an unrelated clean-worktree gate or automatically commit, push, deploy or archive. Submitted contributions are not integrated until the owner records that decision. Task delivery and user acceptance are separate records; only an actual user acceptance may be recorded as such.
 
 Deliver the result, verification and limitations. A defect found by this standalone entry does not expand its authority into repair; use already authorized development or an explicit debug request. Post-delivery repair opens a related task and leaves original evidence unchanged. Reusable learning, additional reviewers and archive are optional, not completion gates.
+
+Keep the selected plugin root and protocol pinned. Distinguish delivery, execution authorization and current writer occupancy; an old `planning` record is not a stop receipt. Report planning/artifact or authorization gaps rather than changing entries, recreating a task or downgrading the CLI to complete delivery.

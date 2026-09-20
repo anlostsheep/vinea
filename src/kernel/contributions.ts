@@ -12,15 +12,16 @@ export async function submitContribution(ctx: RepositoryContext, meta: Meta, inp
   const c = input.contribution;
   if (c.kind === "change") {
     requireThat(c.snapshotId && c.writeToken, "CONTRIBUTION_INVALID", "Changes require a snapshot and write token");
+    await assertWriteToken(ctx, await readState(ctx), meta, c.writeToken!);
     const snapshot = await loadSnapshot(ctx, c.snapshotId);
     requireThat(snapshot.workspaceId === ctx.workspaceId && (await compareSnapshot(ctx, snapshot)).matches,
       "SNAPSHOT_CHANGED", "Contribution must describe this workspace's current inputs");
   }
-  const receipt = await mutateState(ctx, meta, { command: "contribution.submit", input }, state => {
+  const receipt = await mutateState(ctx, meta, { command: "contribution.submit", input }, async state => {
     const task = getTask(state, input.taskId); assertEntry(meta, task, "state-write"); assertContract(task, c.contractVersion);
     if (c.kind === "change") {
       requireThat(c.writeToken && c.writeToken.taskId === task.id && c.writeToken.assignmentId === c.assignmentId, "CONTRIBUTION_INVALID", "Contribution and token refer to different work");
-      assertWriteToken(ctx, state, meta, c.writeToken);
+      await assertWriteToken(ctx, state, meta, c.writeToken);
     }
     requireThat(c.evidenceIds.every(e => !!task.evidence[e]), "EVIDENCE_NOT_FOUND", "Contribution evidence is absent");
     const contribution = { ...structuredClone(c), id: randomUUID(), submittedBy: meta.actor.instanceId, integrated: null };

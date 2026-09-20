@@ -74,6 +74,18 @@ function assertRepositoryState(value) {
     task2.contracts.forEach((c, i) => {
       if (c.version !== i + 1 || !c.acceptance.length || new Set(c.acceptance.map((a) => a.id)).size !== c.acceptance.length) invalid(key, "invalid contract history");
     });
+    if (task2.workflow) {
+      const { documents, authorizations } = task2.workflow;
+      if (new Set(documents.map((d) => d.id)).size !== documents.length || new Set(authorizations.map((a) => a.id)).size !== authorizations.length || new Set(authorizations.map((a) => a.request.reference)).size !== authorizations.length) invalid(key, "duplicate workflow IDs or approval references");
+      for (const d of documents) {
+        if (d.contractVersion < 1 || d.contractVersion > task2.contracts.length || d.path !== `tasks/${task2.id}/planning/v${d.contractVersion}/${d.kind}-${d.sha256}.md`) invalid(key, "invalid planning artifact");
+      }
+      for (const a of authorizations) {
+        if (a.contractVersion < 1 || a.contractVersion > task2.contracts.length || !["implementation-request", "implementation-confirmation"].includes(a.request.kind) || a.request.kind === "implementation-confirmation" && !a.request.action || new Set(a.documentIds).size !== a.documentIds.length || a.documentIds.some((id2) => !documents.some((d) => d.id === id2 && d.contractVersion === a.contractVersion))) invalid(key, "invalid execution authorization");
+        const selected = documents.filter((d) => a.documentIds.includes(d.id));
+        if (new Set(selected.map((d) => d.kind)).size !== selected.length || task2.workflow.planningRequired && !a.revoked && a.contractVersion === task2.contracts.at(-1).version && selected.length !== 2) invalid(key, "authorization has incomplete planning");
+      }
+    }
     const visit = (key2, stack) => {
       if (stack.has(key2) || !task2.assignments[key2]) invalid(key2, "invalid assignment dependency");
       const next = new Set(stack).add(key2);
@@ -101,7 +113,7 @@ function assertRepositoryState(value) {
   }
   for (const [key, receipt] of Object.entries(state.operations)) if (key !== receipt.operationId || receipt.revision < 1 || receipt.revision > state.revision) invalid(key, "invalid operation receipt");
 }
-var text, id, integer, bool, one, nullable, array, object, map, pathRule, hash, actorRule, decisionRule, invocationRule, metaRule, grantRule, criterionRule, draftFields, contractDraftRule, contractRule, ownerRule, tokenFields, tokenRule, recoveryRule, claimRule, environmentRule, entryRule, snapshotRule, evidenceRule, checkRowRule, verificationRule, checkRule, contributionRule, diagnosticRule, assignmentRule, deliveryRule, taskRule, stateRule;
+var text, id, integer, bool, one, nullable, array, object, map, pathRule, hash, actorRule, decisionRule, executionRequestRule, planningArtifactRule, authorizationRule, workflowRule, invocationRule, metaRule, grantRule, criterionRule, draftFields, contractDraftRule, contractRule, ownerRule, tokenFields, tokenRule, recoveryRule, claimRule, environmentRule, entryRule, snapshotRule, evidenceRule, checkRowRule, verificationRule, checkRule, contributionRule, diagnosticRule, assignmentRule, deliveryRule, taskRule, stateRule;
 var init_schema = __esm({
   "src/kernel/schema.ts"() {
     "use strict";
@@ -149,6 +161,10 @@ var init_schema = __esm({
     };
     actorRule = object({ instanceId: id, host: text }, { hostSessionId: text });
     decisionRule = object({ summary: text, reference: nullable(text) });
+    executionRequestRule = object({ kind: one("implementation-request", "implementation-confirmation", "continuation", "plan-approval"), userMessage: text, reference: text, action: nullable(text) });
+    planningArtifactRule = object({ id, kind: one("brief", "plan"), contractVersion: integer, path: pathRule, sha256: hash });
+    authorizationRule = object({ id, contractVersion: integer, documentIds: array(id), request: executionRequestRule, actor: actorRule, recordedAt: text, revoked: nullable(decisionRule) });
+    workflowRule = object({ protocol: one("planning-authorization-v1"), planningRequired: bool, documents: array(planningArtifactRule), authorizations: array(authorizationRule) });
     invocationRule = object({ entry: one("run", "brainstorm", "plan", "continue", "check", "debug", "finish", "orient", "doctor"), activation: one("named-entry", "named-request", "bound-followup", "none"), analysisOnly: bool, persist: bool });
     metaRule = object({ operationId: id, actor: actorRule, invocation: invocationRule });
     grantRule = object({ businessWrite: bool, delegate: bool, commit: bool, deploy: bool, allowedPaths: array(pathRule) });
@@ -172,7 +188,7 @@ var init_schema = __esm({
     diagnosticRule = object({ id, kind: one("fact", "hypothesis", "ruled-out", "change", "validation-gap"), text, evidenceIds: array(id), actor: actorRule, createdAt: text });
     assignmentRule = object({ id, outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool, status: one("open", "closed", "cancelled") });
     deliveryRule = object({ id, contractVersion: integer, snapshotId: id, checkSetIds: array(id), contributionIds: array(id), exclusions: array(text), owner: ownerRule, acceptedGaps: array(object({ acceptanceId: id, decision: decisionRule })), createdAt: text });
-    taskRule = object({ id, title: text, status: one("active", "delivered", "archived"), contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) });
+    taskRule = object({ id, title: text, status: one("active", "delivered", "archived"), contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) }, { workflow: workflowRule });
     stateRule = object({ kernelSchemaVersion: one(1), repositoryId: id, revision: integer, tasks: map(taskRule), claims: map(claimRule), epochs: map(integer, text), snapshots: map(snapshotRule), operations: map(object({ operationId: id, requestHash: hash, revision: integer, resourceIds: array(id) })) });
   }
 });
@@ -297,6 +313,43 @@ var init_io = __esm({
   }
 });
 
+// src/kernel/workflow-policy.ts
+function taskWorkflow(task2) {
+  requireThat(
+    task2.workflow?.protocol === TASK_PROTOCOL,
+    "TASK_PROTOCOL_REQUIRED",
+    "This task predates the execution protocol; inspect it without migrating or switching CLI versions"
+  );
+  return task2.workflow;
+}
+function currentDocuments(task2) {
+  const version2 = task2.contracts.at(-1).version;
+  return ["brief", "plan"].flatMap((kind) => {
+    const document = taskWorkflow(task2).documents.filter((d) => d.kind === kind && d.contractVersion === version2).at(-1);
+    return document ? [document] : [];
+  });
+}
+function assertExecution(task2) {
+  const workflow = taskWorkflow(task2), authorization = workflow.authorizations.at(-1);
+  requireThat(
+    authorization && !authorization.revoked && authorization.contractVersion === task2.contracts.at(-1).version,
+    "EXECUTION_NOT_AUTHORIZED",
+    "Record an explicit implementation request for the current contract before acquiring business writes"
+  );
+  const documents = currentDocuments(task2);
+  requireThat(!workflow.planningRequired || documents.length === 2, "PLANNING_INCOMPLETE", "Current brief and plan are required");
+  requireThat(documents.length === authorization.documentIds.length && documents.every((d) => authorization.documentIds.includes(d.id)), "PLANNING_CHANGED", "Planning changed since authorization");
+  return authorization;
+}
+var TASK_PROTOCOL;
+var init_workflow_policy = __esm({
+  "src/kernel/workflow-policy.ts"() {
+    "use strict";
+    init_errors();
+    TASK_PROTOCOL = "planning-authorization-v1";
+  }
+});
+
 // src/kernel/policy.ts
 function getTask(state, taskId, mutable = true) {
   id(taskId);
@@ -332,6 +385,7 @@ function assertEntry(meta, task2, capability) {
     requireThat(grant.businessWrite && grant.allowedPaths.length > 0, "BUSINESS_WRITE_NOT_GRANTED", "No business paths are writable");
   }
   if (task2 && capability === "delegate") requireThat(currentContract(task2).grant.delegate, "DELEGATION_NOT_GRANTED", "Delegation is not authorized");
+  if (task2 && capability !== "state-write") assertExecution(task2);
 }
 function assertWritablePath(task2, path) {
   const grant = currentContract(task2).grant;
@@ -347,18 +401,162 @@ var init_policy = __esm({
     init_errors();
     init_io();
     init_schema();
+    init_workflow_policy();
+  }
+});
+
+// src/kernel/workflow.ts
+var workflow_exports = {};
+__export(workflow_exports, {
+  authorizeExecution: () => authorizeExecution,
+  recordPlanningDocument: () => recordPlanningDocument,
+  suspendExecution: () => suspendExecution,
+  validatePlanningArtifacts: () => validatePlanningArtifacts
+});
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+async function validatePlanningArtifacts(ctx, task2) {
+  for (const document of currentDocuments(task2)) {
+    try {
+      const content = await readManaged(ctx, document.path);
+      requireThat(
+        createHash2("sha256").update(content).digest("hex") === document.sha256,
+        "PLANNING_ARTIFACT_INVALID",
+        "Planning artifact content changed"
+      );
+    } catch (error) {
+      if (error instanceof KernelError && error.code === "UNSAFE_PATH") throw error;
+      throw new KernelError("PLANNING_ARTIFACT_INVALID", "A current planning artifact is missing or changed", { path: document.path });
+    }
+  }
+}
+async function recordPlanningDocument(ctx, meta, input) {
+  text(input.content);
+  one("brief", "plan")(input.kind);
+  const receipt = await mutateState(ctx, meta, { command: "task.document", input }, async (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    assertOwner(task2, meta, input.ownerEpoch);
+    assertContract(task2, input.contractVersion);
+    const workflow = taskWorkflow(task2), authorization = workflow.authorizations.at(-1);
+    requireThat(
+      !authorization || authorization.revoked || authorization.contractVersion !== input.contractVersion,
+      "PLANNING_LOCKED",
+      "Suspend execution before changing authorized planning documents"
+    );
+    workflow.planningRequired = true;
+    const sha256 = createHash2("sha256").update(input.content).digest("hex");
+    const path = `tasks/${task2.id}/planning/v${input.contractVersion}/${input.kind}-${sha256}.md`;
+    await writeManaged(ctx, meta, path, input.content, true);
+    const document = { id: randomUUID3(), kind: input.kind, contractVersion: input.contractVersion, path, sha256 };
+    workflow.documents.push(document);
+    return [document.id];
+  });
+  return taskWorkflow((await readState(ctx)).tasks[input.taskId]).documents.find((d) => d.id === receipt.resourceIds[0]);
+}
+async function authorizeExecution(ctx, meta, input) {
+  executionRequestRule(input.request);
+  requireThat(
+    ["implementation-request", "implementation-confirmation"].includes(input.request.kind),
+    "EXECUTION_REQUEST_REQUIRED",
+    "Continuation and plan approval cannot authorize implementation"
+  );
+  requireThat(
+    input.request.kind !== "implementation-confirmation" || input.request.action,
+    "EXECUTION_ACTION_REQUIRED",
+    "Confirmation must identify the concrete implementation action shown to the user"
+  );
+  requireThat(
+    meta.invocation.activation !== "bound-followup",
+    "EXECUTION_REQUEST_REQUIRED",
+    "A follow-up or continuation cannot mint new execution authority"
+  );
+  assertEntry(meta, null, "business-write");
+  requireThat(["run", "debug"].includes(meta.invocation.entry), "EXECUTION_REQUEST_REQUIRED", "Use an explicit execution request, not continuation");
+  const receipt = await mutateState(ctx, meta, { command: "task.authorize", input }, async (state) => {
+    const task3 = getTask(state, input.taskId);
+    assertOwner(task3, meta, input.ownerEpoch);
+    assertContract(task3, input.contractVersion);
+    const workflow = taskWorkflow(task3), documents = currentDocuments(task3);
+    requireThat(!workflow.planningRequired || documents.length === 2, "PLANNING_INCOMPLETE", "Persist the current brief and plan before authorization");
+    await validatePlanningArtifacts(ctx, task3);
+    const previous = workflow.authorizations.at(-1);
+    requireThat(
+      !previous || previous.revoked || previous.contractVersion !== input.contractVersion,
+      "EXECUTION_ALREADY_AUTHORIZED",
+      "Reuse the current authorization instead of replacing its provenance"
+    );
+    requireThat(
+      !workflow.authorizations.some((a) => a.request.reference === input.request.reference),
+      "AUTHORIZATION_REFERENCE_REUSED",
+      "A revoked or superseded approval cannot authorize a new execution attempt"
+    );
+    const authorization2 = {
+      id: randomUUID3(),
+      contractVersion: input.contractVersion,
+      documentIds: documents.map((d) => d.id),
+      request: structuredClone(input.request),
+      actor: meta.actor,
+      recordedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      revoked: null
+    };
+    workflow.authorizations.push(authorization2);
+    assertExecution(task3);
+    return [authorization2.id];
+  });
+  const task2 = getTask(await readState(ctx), input.taskId);
+  assertOwner(task2, meta, input.ownerEpoch);
+  assertContract(task2, input.contractVersion);
+  const authorization = assertExecution(task2);
+  requireThat(authorization.id === receipt.resourceIds[0], "EXECUTION_NOT_AUTHORIZED", "The replayed authorization is no longer current");
+  await validatePlanningArtifacts(ctx, task2);
+  return authorization;
+}
+async function suspendExecution(ctx, meta, input) {
+  decisionRule(input.decision);
+  await mutateState(ctx, meta, { command: "task.suspend", input }, (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "state-write");
+    assertOwner(task2, meta, input.ownerEpoch);
+    assertContract(task2, input.contractVersion);
+    const workflow = taskWorkflow(task2);
+    for (const authorization of workflow.authorizations) if (!authorization.revoked) authorization.revoked = structuredClone(input.decision);
+    for (const claim of Object.values(state.claims).filter((c) => c.taskId === task2.id && ["writer", "restore-target"].includes(c.state))) {
+      const key = JSON.stringify([claim.taskId, claim.assignmentId]);
+      state.epochs[key] = (state.epochs[key] ?? claim.epoch) + 1;
+      state.claims[claim.workspaceId] = claim.instanceId === meta.actor.instanceId && claim.workspaceId === ctx.workspaceId ? { ...claim, state: "released", recovery: null } : { ...claim, state: "unknown-writer-hold" };
+    }
+    task2.diagnostics.push({
+      id: randomUUID3(),
+      kind: "change",
+      text: `Execution suspended: ${input.decision.summary}; inspect business changes separately`,
+      evidenceIds: [],
+      actor: meta.actor,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    return [task2.id];
+  });
+}
+var init_workflow = __esm({
+  "src/kernel/workflow.ts"() {
+    "use strict";
+    init_policy();
+    init_workflow_policy();
+    init_store();
+    init_io();
+    init_schema();
+    init_errors();
   }
 });
 
 // src/kernel/ownership.ts
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID4 } from "node:crypto";
 function executionKey(taskId, assignmentId) {
   return JSON.stringify([taskId, assignmentId]);
 }
 function assertWorkspaceClaimable(state, workspaceId) {
   requireThat(!state.claims[workspaceId] || state.claims[workspaceId].state === "released", "WORKSPACE_OCCUPIED", "Workspace is written, restoring, or held by an unknown writer");
 }
-function assertCurrentToken(ctx, state, meta, token) {
+async function assertCurrentToken(ctx, state, meta, token) {
   tokenRule(token);
   const claim = state.claims[ctx.workspaceId], task2 = getTask(state, token.taskId);
   requireThat(
@@ -368,27 +566,31 @@ function assertCurrentToken(ctx, state, meta, token) {
   );
   assertContract(task2, token.contractVersion);
   assertContract(task2, claim.contractVersion);
+  assertExecution(task2);
+  await validatePlanningArtifacts(ctx, task2);
 }
-function assertWriteToken(ctx, state, meta, token) {
-  assertCurrentToken(ctx, state, meta, token);
+async function assertWriteToken(ctx, state, meta, token) {
+  await assertCurrentToken(ctx, state, meta, token);
   assertEntry(meta, getTask(state, token.taskId), "business-write");
 }
 async function addAssignment(ctx, meta, input) {
-  const result = await mutateState(ctx, meta, { command: "assignment.add", input }, (state) => {
+  const result = await mutateState(ctx, meta, { command: "assignment.add", input }, async (state) => {
     const task2 = getTask(state, input.taskId);
     assertEntry(meta, task2, "delegate");
     assertOwner(task2, meta, input.ownerEpoch);
-    const assignment2 = { ...structuredClone(input.assignment), id: randomUUID3(), status: "open" };
+    await validatePlanningArtifacts(ctx, task2);
+    const assignment2 = { ...structuredClone(input.assignment), id: randomUUID4(), status: "open" };
     task2.assignments[assignment2.id] = assignment2;
     return [assignment2.id];
   });
   return (await readState(ctx)).tasks[input.taskId].assignments[result.resourceIds[0]];
 }
 async function claimWork(ctx, meta, input) {
-  const receipt = await mutateState(ctx, meta, { command: "work.claim", input, workspaceId: ctx.workspaceId }, (state) => {
+  const receipt = await mutateState(ctx, meta, { command: "work.claim", input, workspaceId: ctx.workspaceId }, async (state) => {
     const task2 = getTask(state, input.taskId);
     assertEntry(meta, task2, "business-write");
     assertContract(task2, input.contractVersion);
+    await validatePlanningArtifacts(ctx, task2);
     const assignment2 = input.assignmentId === null ? null : task2.assignments[input.assignmentId];
     const previous = state.claims[ctx.workspaceId];
     const key = executionKey(input.taskId, input.assignmentId);
@@ -404,7 +606,7 @@ async function claimWork(ctx, meta, input) {
     return [ctx.workspaceId, String(epoch)];
   });
   const token = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch: Number(receipt.resourceIds[1]) };
-  assertWriteToken(ctx, await readState(ctx), meta, token);
+  await assertWriteToken(ctx, await readState(ctx), meta, token);
   return token;
 }
 function toWriteToken(claim) {
@@ -432,6 +634,8 @@ var init_ownership = __esm({
     init_store();
     init_policy();
     init_schema();
+    init_workflow_policy();
+    init_workflow();
   }
 });
 
@@ -445,7 +649,7 @@ __export(snapshots_exports, {
   restoreSnapshot: () => restoreSnapshot,
   validateSnapshotContents: () => validateSnapshotContents
 });
-import { createHash as createHash2, randomUUID as randomUUID4 } from "node:crypto";
+import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
 import { lstat as lstat2, readFile as readFile2, mkdir as mkdir2, unlink as unlink2, chmod, open as open2, rename as rename2 } from "node:fs/promises";
 import { dirname as dirname2, join as join3 } from "node:path";
 function fingerprintSnapshot(baseCommit, scope, entries) {
@@ -497,7 +701,7 @@ async function captureSnapshot(ctx, meta, input) {
   assertPersistence(meta);
   const state = await readState(ctx), task2 = getTask(state, input.taskId);
   assertEntry(meta, task2, "state-write");
-  if (input.token) assertWriteToken(ctx, state, meta, input.token);
+  if (input.token) await assertWriteToken(ctx, state, meta, input.token);
   requireThat(Array.isArray(input.paths) && input.paths.length > 0, "SNAPSHOT_SCOPE_REQUIRED", "Explicit snapshot scope is required");
   const request = { command: "snapshot.capture", input, workspaceId: ctx.workspaceId };
   const previous = await lookupOperation(ctx, meta, request);
@@ -508,7 +712,7 @@ async function captureSnapshot(ctx, meta, input) {
   const first = await collect(ctx, scope, limits), second = await collect(ctx, scope, limits);
   requireThat(first.fingerprint === second.fingerprint, "SNAPSHOT_CHANGED", "Inputs changed during capture");
   const snapshot2 = {
-    id: randomUUID4(),
+    id: randomUUID5(),
     fingerprint: first.fingerprint,
     baseCommit: first.baseCommit,
     scope,
@@ -519,9 +723,9 @@ async function captureSnapshot(ctx, meta, input) {
   };
   for (const [sha, bytes] of first.blobs) await writeManaged(ctx, meta, `blobs/${sha}`, bytes, true);
   await writeJson(ctx, meta, `snapshots/${snapshot2.id}.json`, snapshot2, true);
-  const receipt = await mutateState(ctx, meta, request, (current) => {
+  const receipt = await mutateState(ctx, meta, request, async (current) => {
     assertEntry(meta, getTask(current, input.taskId), "state-write");
-    if (input.token) assertWriteToken(ctx, current, meta, input.token);
+    if (input.token) await assertWriteToken(ctx, current, meta, input.token);
     current.snapshots[snapshot2.id] = snapshot2;
     return [snapshot2.id];
   });
@@ -565,69 +769,65 @@ async function validateSnapshotContents(ctx, snapshot2) {
 }
 async function restoreSnapshot(ctx, meta, input) {
   assertPersistence(meta);
-  const snapshot2 = await loadSnapshot(ctx, input.snapshotId), state = await readState(ctx), task2 = getTask(state, input.taskId);
-  assertEntry(meta, task2, "business-write");
-  assertContract(task2, input.token.contractVersion);
-  const claim = state.claims[ctx.workspaceId];
-  requireThat(claim?.state === "restore-target" && claim.recovery.snapshotId === snapshot2.id && claim.instanceId === meta.actor.instanceId && input.token.instanceId === claim.instanceId && claim.taskId === input.taskId && claim.epoch === input.token.epoch && claim.workspaceId === input.token.workspaceId && state.epochs[executionKey(claim.taskId, claim.assignmentId)] === claim.epoch, "STALE_WRITE_TOKEN", "Restore reservation is stale");
-  requireThat(snapshot2.baseCommit === input.expectedTargetBase && await head(ctx) === input.expectedTargetBase, "SNAPSHOT_UNAVAILABLE", "Restore baseline is unavailable or changed");
-  const contents = /* @__PURE__ */ new Map();
-  for (const entry of snapshot2.entries) {
-    safeInput(entry.path);
-    assertWritablePath(task2, entry.path);
-    await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, entry.path));
-    if (entry.sha256) {
-      const bytes = await readManaged(ctx, `blobs/${entry.sha256}`);
-      requireThat(hash2(bytes) === entry.sha256, "SNAPSHOT_UNAVAILABLE", "Snapshot content is missing or corrupt");
-      contents.set(entry.path, bytes);
-    }
-  }
-  const status = (await gitOutput(ctx.worktreeRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).split("\0").filter(Boolean);
-  for (const line of status) {
-    requireThat(line.length > 3 && !/[RC]/.test(line.slice(0, 2)), "RECOVERY_CONFLICT", "Unconfirmed rename or dirty target");
-    const path = line.slice(3), expected = snapshot2.entries.find((e) => e.path === path);
-    requireThat(expected, "RECOVERY_CONFLICT", "Unconfirmed target changes are preserved");
-    const bytes = await readFile2(await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, path))).catch((error) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    requireThat(expected.kind === "deleted" ? bytes === null : bytes !== null && hash2(bytes) === expected.sha256, "RECOVERY_CONFLICT", "Target differs from baseline and recovery contents");
-  }
-  for (const entry of snapshot2.entries) {
-    const file = await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, entry.path));
-    if (entry.kind === "deleted") await unlink2(file).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-    });
-    else {
-      await mkdir2(dirname2(file), { recursive: true });
-      const tmp = `${file}.${randomUUID4()}.vinea-restore`;
-      try {
-        const handle = await open2(tmp, "wx", entry.mode === "100755" ? 493 : 420);
-        try {
-          await handle.writeFile(contents.get(entry.path));
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
-        await rename2(tmp, file);
-        await chmod(file, entry.mode === "100755" ? 493 : 420);
-      } finally {
-        await unlink2(tmp).catch((error) => {
-          if (error.code !== "ENOENT") throw error;
-        });
+  const snapshot2 = await loadSnapshot(ctx, input.snapshotId), reservation = (await readState(ctx)).claims[ctx.workspaceId];
+  requireThat(reservation?.state === "restore-target", "STALE_WRITE_TOKEN", "Restore reservation is absent");
+  const operationId = `restore-${hash2(reservation.recovery.operationId)}`;
+  await mutateState(ctx, { ...meta, operationId }, { command: "restore.publish", input }, async (current) => {
+    const task2 = getTask(current, input.taskId), claim = current.claims[ctx.workspaceId];
+    assertEntry(meta, task2, "business-write");
+    assertContract(task2, input.token.contractVersion);
+    await validatePlanningArtifacts(ctx, task2);
+    requireThat(claim?.state === "restore-target" && claim.recovery.snapshotId === snapshot2.id && claim.recovery.operationId === reservation.recovery.operationId && claim.instanceId === meta.actor.instanceId && input.token.instanceId === claim.instanceId && claim.taskId === input.taskId && input.token.taskId === claim.taskId && input.token.assignmentId === claim.assignmentId && input.token.contractVersion === claim.contractVersion && claim.epoch === input.token.epoch && claim.workspaceId === input.token.workspaceId && current.epochs[executionKey(claim.taskId, claim.assignmentId)] === claim.epoch, "STALE_WRITE_TOKEN", "Restore reservation is stale");
+    requireThat(snapshot2.baseCommit === input.expectedTargetBase && await head(ctx) === input.expectedTargetBase, "SNAPSHOT_UNAVAILABLE", "Restore baseline is unavailable or changed");
+    const contents = /* @__PURE__ */ new Map();
+    for (const entry of snapshot2.entries) {
+      safeInput(entry.path);
+      assertWritablePath(task2, entry.path);
+      await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, entry.path));
+      if (entry.sha256) {
+        const bytes = await readManaged(ctx, `blobs/${entry.sha256}`);
+        requireThat(hash2(bytes) === entry.sha256, "SNAPSHOT_UNAVAILABLE", "Snapshot content is missing or corrupt");
+        contents.set(entry.path, bytes);
       }
     }
-  }
-  requireThat((await compareSnapshot(ctx, snapshot2)).matches, "RECOVERY_CONFLICT", "Restored inputs do not match snapshot");
-  await mutateState(ctx, { ...meta, operationId: `restore-${hash2(claim.recovery.operationId)}` }, { command: "restore.publish", input }, (current) => {
-    const held = current.claims[ctx.workspaceId];
-    requireThat(
-      held?.state === "restore-target" && held.epoch === claim.epoch && held.instanceId === meta.actor.instanceId,
-      "STALE_WRITE_TOKEN",
-      "Restore ownership changed before publication"
-    );
-    assertContract(getTask(current, input.taskId), claim.contractVersion);
-    current.claims[ctx.workspaceId] = { ...held, state: "writer", recovery: null };
+    const status = (await gitOutput(ctx.worktreeRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).split("\0").filter(Boolean);
+    for (const line of status) {
+      requireThat(line.length > 3 && !/[RC]/.test(line.slice(0, 2)), "RECOVERY_CONFLICT", "Unconfirmed rename or dirty target");
+      const path = line.slice(3), expected = snapshot2.entries.find((e) => e.path === path);
+      requireThat(expected, "RECOVERY_CONFLICT", "Unconfirmed target changes are preserved");
+      const bytes = await readFile2(await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, path))).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      requireThat(expected.kind === "deleted" ? bytes === null : bytes !== null && hash2(bytes) === expected.sha256, "RECOVERY_CONFLICT", "Target differs from baseline and recovery contents");
+    }
+    for (const entry of snapshot2.entries) {
+      const file = await safePath(ctx.worktreeRoot, join3(ctx.worktreeRoot, entry.path));
+      if (entry.kind === "deleted") await unlink2(file).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      else {
+        await mkdir2(dirname2(file), { recursive: true });
+        const tmp = `${file}.${randomUUID5()}.vinea-restore`;
+        try {
+          const handle = await open2(tmp, "wx", entry.mode === "100755" ? 493 : 420);
+          try {
+            await handle.writeFile(contents.get(entry.path));
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          await rename2(tmp, file);
+          await chmod(file, entry.mode === "100755" ? 493 : 420);
+        } finally {
+          await unlink2(tmp).catch((error) => {
+            if (error.code !== "ENOENT") throw error;
+          });
+        }
+      }
+    }
+    requireThat((await compareSnapshot(ctx, snapshot2)).matches, "RECOVERY_CONFLICT", "Restored inputs do not match snapshot");
+    current.claims[ctx.workspaceId] = { ...claim, state: "writer", recovery: null };
     return [ctx.workspaceId];
   });
 }
@@ -642,15 +842,16 @@ var init_snapshots = __esm({
     init_store();
     init_repository();
     init_schema();
+    init_workflow();
     defaults = { maxFiles: 2e3, maxTotalBytes: 64 * 1024 * 1024, maxFileBytes: 8 * 1024 * 1024 };
-    hash2 = (bytes) => createHash2("sha256").update(bytes).digest("hex");
+    hash2 = (bytes) => createHash3("sha256").update(bytes).digest("hex");
   }
 });
 
 // src/kernel/store.ts
 import { mkdir as mkdir3, lstat as lstat3, rmdir, unlink as unlink3, readdir } from "node:fs/promises";
 import { join as join4 } from "node:path";
-import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 async function initializeStore(ctx, meta, decision) {
   metaRule(meta);
@@ -668,7 +869,7 @@ async function initializeStore(ctx, meta, decision) {
   }
   const state = {
     kernelSchemaVersion: 1,
-    repositoryId: randomUUID5(),
+    repositoryId: randomUUID6(),
     revision: 0,
     tasks: {},
     claims: {},
@@ -713,7 +914,7 @@ async function withLock(ctx, meta, operation) {
     }
   }
   try {
-    await writeJson(ctx, meta, "runtime/store.lock/owner.json", { pid: process.pid, token: randomUUID5(), createdAt: (/* @__PURE__ */ new Date()).toISOString() });
+    await writeJson(ctx, meta, "runtime/store.lock/owner.json", { pid: process.pid, token: randomUUID6(), createdAt: (/* @__PURE__ */ new Date()).toISOString() });
     return await operation();
   } finally {
     await unlink3(join4(path, "owner.json")).catch((error) => {
@@ -727,7 +928,7 @@ async function mutateState(ctx, meta, request, change) {
   assertPersistence(meta);
   if (meta.invocation.activation === "none") throw new KernelError("ACTIVATION_REQUIRED", "Explicit Vinea activation is required before any write");
   await readState(ctx);
-  const requestHash = createHash3("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex");
+  const requestHash = createHash4("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex");
   return withLock(ctx, meta, async () => {
     const before = await readState(ctx), previous = before.operations[meta.operationId];
     if (previous) {
@@ -735,7 +936,7 @@ async function mutateState(ctx, meta, request, change) {
       return previous;
     }
     const state = structuredClone(before);
-    const resourceIds = change(state);
+    const resourceIds = await change(state);
     state.revision = before.revision + 1;
     const receipt = { operationId: meta.operationId, requestHash, revision: state.revision, resourceIds };
     state.operations[meta.operationId] = receipt;
@@ -748,10 +949,29 @@ async function lookupOperation(ctx, meta, request) {
   metaRule(meta);
   assertPersistence(meta);
   const previous = (await readState(ctx)).operations[meta.operationId];
-  if (previous && previous.requestHash !== createHash3("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex")) {
+  if (previous && previous.requestHash !== createHash4("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex")) {
     throw new KernelError("OPERATION_ID_REUSED", "Operation payload or actor differs");
   }
   return previous;
+}
+async function inspectLegacyCoexistence(ctx) {
+  const root = await safePath(ctx.worktreeRoot, join4(ctx.worktreeRoot, ".vinea/tasks/active"));
+  try {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new KernelError("UNSAFE_PATH", "Legacy task directory is a symbolic link");
+      if (!entry.isDirectory()) continue;
+      const path = await safePath(ctx.worktreeRoot, join4(root, entry.name, "task.json"));
+      try {
+        if ((await lstat3(path)).isFile()) return true;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+    return false;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 async function inspectStore(ctx) {
   const issues = [];
@@ -765,6 +985,39 @@ async function inspectStore(ctx) {
     issues.push({ code: e.code, path: ctx.storeRoot, message: e.message });
   }
   if (status !== "ready") return { status, issues };
+  try {
+    if (await inspectLegacyCoexistence(ctx)) {
+      status = "conflicted";
+      issues.push({
+        code: "LEGACY_ACTIVE_STATE_PRESENT",
+        path: join4(ctx.worktreeRoot, ".vinea/tasks/active"),
+        message: "Legacy active tasks coexist with the kernel store. Their planning status does not release kernel writers; do not switch CLI versions or migrate automatically"
+      });
+    }
+  } catch {
+    status = "invalid";
+    issues.push({ code: "LEGACY_STATE_UNSAFE", path: ".vinea/tasks/active", message: "Legacy state cannot be inspected safely" });
+  }
+  const { validatePlanningArtifacts: validatePlanningArtifacts2 } = await Promise.resolve().then(() => (init_workflow(), workflow_exports));
+  for (const task2 of Object.values(state.tasks)) {
+    if (!task2.workflow) {
+      if (task2.status === "active") {
+        if (status === "ready") status = "blocked";
+        issues.push({
+          code: "TASK_PROTOCOL_REQUIRED",
+          path: `tasks/${task2.id}`,
+          message: "Pre-protocol task remains readable; no execution authorization was inferred or migrated"
+        });
+      }
+      continue;
+    }
+    try {
+      await validatePlanningArtifacts2(ctx, task2);
+    } catch (error) {
+      status = "invalid";
+      issues.push({ code: "PLANNING_ARTIFACT_INVALID", path: `tasks/${task2.id}/planning`, message: error.message });
+    }
+  }
   const { validateSnapshotContents: validateSnapshotContents2 } = await Promise.resolve().then(() => (init_snapshots(), snapshots_exports));
   for (const snapshot2 of Object.values(state.snapshots)) {
     try {
@@ -818,7 +1071,7 @@ __export(sessions_exports, {
   readBindings: () => readBindings,
   resolveActor: () => resolveActor
 });
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { readdir as readdir2 } from "node:fs/promises";
 async function readBindings(ctx) {
   let names;
@@ -873,7 +1126,7 @@ async function bindSession(ctx, meta, input) {
   bindingRule(binding);
   if (meta.invocation.persist) {
     assertEntry(meta, task2, "state-write");
-    const hash3 = createHash4("sha256").update(JSON.stringify([meta.actor.instanceId, ctx.workspaceId])).digest("hex");
+    const hash3 = createHash5("sha256").update(JSON.stringify([meta.actor.instanceId, ctx.workspaceId])).digest("hex");
     await writeJson(ctx, meta, `runtime/bindings/${hash3}.json`, binding);
   }
   return binding;
@@ -911,7 +1164,7 @@ init_io();
 init_schema();
 import { readdir as readdir3, readFile as readFile3, lstat as lstat4 } from "node:fs/promises";
 import { join as join5, resolve as resolve3, relative as relative2 } from "node:path";
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 function issueCode(error) {
   const code = error?.code;
   if (typeof code === "string" && /^[A-Z_]+$/.test(code)) return code;
@@ -961,7 +1214,7 @@ async function inspectLegacy(sourceRoot) {
           if (pending.size) throw new Error("LEGACY_PENDING_MUTATION");
           records.push({
             path: directory,
-            fingerprint: createHash5("sha256").update(bytes).digest("hex"),
+            fingerprint: createHash6("sha256").update(bytes).digest("hex"),
             originalId: task2.id,
             originalStatus: task2.status,
             title: task2.title,
@@ -994,8 +1247,8 @@ async function inspectLegacy(sourceRoot) {
   } catch (error) {
     issues.push({ path: root, code: issueCode(error) });
   }
-  const fingerprints = [...files].sort(([a], [b]) => a.localeCompare(b)).map(([path, bytes]) => [path, createHash5("sha256").update(bytes).digest("hex")]);
-  return { records, fingerprint: createHash5("sha256").update(canonicalJson(fingerprints)).digest("hex"), issues };
+  const fingerprints = [...files].sort(([a], [b]) => a.localeCompare(b)).map(([path, bytes]) => [path, createHash6("sha256").update(bytes).digest("hex")]);
+  return { records, fingerprint: createHash6("sha256").update(canonicalJson(fingerprints)).digest("hex"), issues };
 }
 
 // src/application.ts
@@ -1009,10 +1262,11 @@ init_policy();
 init_schema();
 init_store();
 init_errors();
-import { randomUUID as randomUUID6 } from "node:crypto";
+init_workflow_policy();
+import { randomUUID as randomUUID7 } from "node:crypto";
 function makeTask(title, draft, decision, meta) {
   return {
-    id: randomUUID6(),
+    id: randomUUID7(),
     title,
     status: "active",
     contracts: [{ ...structuredClone(draft), version: 1, decision }],
@@ -1025,17 +1279,20 @@ function makeTask(title, draft, decision, meta) {
     deliveries: {},
     userAcceptances: [],
     relatedTo: null,
-    legacySource: null
+    legacySource: null,
+    workflow: { protocol: TASK_PROTOCOL, planningRequired: ["brainstorm", "plan"].includes(meta.invocation.entry), documents: [], authorizations: [] }
   };
 }
 async function createGoal(ctx, meta, input) {
-  assertEntry(meta, null, "business-write");
+  assertEntry(meta, null, "state-write");
   contractDraftRule(input.contract);
   decisionRule(input.decision);
   text(input.title);
+  requireThat(["brainstorm", "plan", "run", "continue", "debug"].includes(meta.invocation.entry), "ENTRY_SCOPE_DENIED", "This entry cannot create tasks");
   requireThat(input.contract.acceptance.length > 0, "ACCEPTANCE_REQUIRED", "At least one acceptance criterion is required");
   const receipt = await mutateState(ctx, meta, { command: "task.create", input }, (state) => {
     const task2 = makeTask(input.title, input.contract, input.decision, meta);
+    if (input.planningRequired) taskWorkflow(task2).planningRequired = true;
     state.tasks[task2.id] = task2;
     return [task2.id];
   });
@@ -1050,6 +1307,12 @@ async function reviseContract(ctx, meta, input) {
     assertEntry(meta, task2, "state-write");
     assertOwner(task2, meta, input.ownerEpoch);
     assertContract(task2, input.expectedVersion);
+    taskWorkflow(task2);
+    requireThat(
+      !Object.values(state.claims).some((c) => c.taskId === task2.id && c.state === "restore-target"),
+      "RESTORE_IN_PROGRESS",
+      "Complete the reserved recovery or explicitly suspend it before revising the contract"
+    );
     const previous = currentContract(task2);
     const widensPaths = input.contract.grant.allowedPaths.some((path) => !previous.grant.allowedPaths.some((root) => path === root || path.startsWith(`${root}/`)));
     if (widensPaths || ["businessWrite", "delegate", "commit", "deploy"].some((key) => !previous.grant[key] && input.contract.grant[key])) {
@@ -1073,6 +1336,8 @@ init_ownership();
 init_sessions();
 init_snapshots();
 init_repository();
+init_workflow_policy();
+init_workflow();
 function occupancyRef(claim) {
   const { taskId, assignmentId, workspaceId, instanceId, epoch } = claim;
   return { taskId, assignmentId, workspaceId, instanceId, epoch };
@@ -1091,7 +1356,7 @@ async function continueGoal(ctx, meta, input) {
   const mine = state.claims[ctx.workspaceId];
   if (mine?.instanceId === meta.actor.instanceId && mine.taskId === input.taskId && mine.assignmentId === input.assignmentId) {
     try {
-      assertWriteToken(ctx, state, meta, toWriteToken(mine));
+      await assertWriteToken(ctx, state, meta, toWriteToken(mine));
       writeToken = toWriteToken(mine);
     } catch (error) {
       missing.push(error.code);
@@ -1099,12 +1364,20 @@ async function continueGoal(ctx, meta, input) {
   }
   const occupiedWrites = Object.values(state.claims).filter((c) => c.state !== "released" && (c.taskId === task2.id || c.workspaceId === ctx.workspaceId)).map((c) => ({ ref: occupancyRef(c), state: c.state, contractVersion: c.contractVersion }));
   if (occupiedWrites.some((c) => c.state === "unknown-writer-hold")) missing.push("UNKNOWN_WRITER_HOLD");
+  if (await inspectLegacyCoexistence(ctx)) missing.push("LEGACY_ACTIVE_STATE_PRESENT");
+  try {
+    assertExecution(task2);
+    await validatePlanningArtifacts(ctx, task2);
+  } catch (error) {
+    if (!missing.includes(error.code)) missing.push(error.code);
+  }
   return {
     taskId: task2.id,
     contract: currentContract(task2),
     owner: task2.owner,
     binding,
     writeToken,
+    workflow: task2.workflow ?? null,
     assignment: input.assignmentId ? task2.assignments[input.assignmentId] : null,
     occupiedWrites,
     diagnostics: task2.diagnostics.slice(-20),
@@ -1135,8 +1408,9 @@ function transferAuthority(state, meta, input) {
 }
 async function handoffWork(ctx, meta, input) {
   requireThat(ctx.workspaceId === input.from.workspaceId, "ISOLATED_RECOVERY_REQUIRED", "Cross-workspace transfers use snapshot recovery");
-  const receipt = await mutateState(ctx, meta, { command: "work.handoff", input }, (state) => {
+  const receipt = await mutateState(ctx, meta, { command: "work.handoff", input }, async (state) => {
     const task2 = transferAuthority(state, meta, input), old = sourceClaim(state, input.from);
+    await validatePlanningArtifacts(ctx, task2);
     requireThat(["writer", "released"].includes(old.state), "OCCUPANCY_CHANGED", "A held or restoring workspace cannot be directly handed off");
     requireThat(old.state === "released" || old.instanceId === meta.actor.instanceId, "HOLDER_RELEASE_REQUIRED", "An active writer must hand off itself; other actors use the controlled takeover path");
     const key = executionKey(old.taskId, old.assignmentId);
@@ -1149,7 +1423,7 @@ async function handoffWork(ctx, meta, input) {
     return [ctx.workspaceId, String(epoch)];
   });
   const token = { ...input.from, instanceId: input.to.instanceId, epoch: Number(receipt.resourceIds[1]), contractVersion: input.contractVersion };
-  assertWriteToken(ctx, await readState(ctx), { ...meta, actor: input.to }, token);
+  await assertWriteToken(ctx, await readState(ctx), { ...meta, actor: input.to }, token);
   return token;
 }
 async function takeoverWork(ctx, meta, input) {
@@ -1171,8 +1445,9 @@ async function takeoverWork(ctx, meta, input) {
       const base = await gitOutput(ctx.worktreeRoot, ["rev-parse", "--verify", "HEAD"]).then((s) => s.trim(), () => null);
       requireThat(base === snapshot2.baseCommit, "SNAPSHOT_UNAVAILABLE", "Target baseline differs");
     }
-    await mutateState(ctx, meta, request, (state2) => {
+    await mutateState(ctx, meta, request, async (state2) => {
       const task2 = transferAuthority(state2, meta, input), old = sourceClaim(state2, input.from);
+      await validatePlanningArtifacts(ctx, task2);
       requireThat(["writer", "restore-target", "released"].includes(old.state), "OCCUPANCY_CHANGED", "Only the current executor can be replaced");
       const key = executionKey(old.taskId, old.assignmentId);
       requireThat(old.epoch === state2.epochs[key], "OCCUPANCY_CHANGED", "Executor changed before takeover");
@@ -1190,13 +1465,18 @@ async function takeoverWork(ctx, meta, input) {
   }
   const state = await readState(ctx), claim = state.claims[ctx.workspaceId];
   const receipt = state.operations[meta.operationId];
+  requireThat(
+    !(claim?.instanceId === meta.actor.instanceId && claim.epoch === Number(receipt.resourceIds[1]) && ["released", "unknown-writer-hold"].includes(claim.state)),
+    "RECOVERY_ABORTED",
+    "This reservation was revoked or released; inspect partial files and holds before an explicitly authorized recovery"
+  );
   requireThat(claim && claim.instanceId === meta.actor.instanceId && claim.epoch === Number(receipt.resourceIds[1]) && ["writer", "restore-target"].includes(claim.state), "OCCUPANCY_CHANGED", "Recovery target changed");
   if (claim.state === "restore-target") {
     const snapshot2 = await loadSnapshot(ctx, claim.recovery.snapshotId);
     await restoreSnapshot(ctx, meta, { taskId: claim.taskId, snapshotId: snapshot2.id, token: toWriteToken(claim), expectedTargetBase: snapshot2.baseCommit });
   }
   const token = toWriteToken(claim);
-  assertWriteToken(ctx, await readState(ctx), meta, token);
+  await assertWriteToken(ctx, await readState(ctx), meta, token);
   return token;
 }
 async function clearWorkspaceHold(ctx, meta, input) {
@@ -1228,7 +1508,7 @@ init_policy();
 init_schema();
 init_store();
 init_io();
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID8 } from "node:crypto";
 async function appendEvidence(ctx, meta, input, source, artifactId) {
   assertPersistence(meta);
   environmentRule(input.environment);
@@ -1246,7 +1526,7 @@ async function appendEvidence(ctx, meta, input, source, artifactId) {
     assertContract(task2, input.contractVersion);
     requireThat(state.snapshots[input.snapshotId], "SNAPSHOT_UNAVAILABLE", "Evidence snapshot does not exist");
     const { taskId: _, ...fields } = input;
-    const e = { ...fields, id: randomUUID7(), actor: meta.actor, source, artifactId, cwd: ctx.worktreeRoot, sequence: state.revision + 1 };
+    const e = { ...fields, id: randomUUID8(), actor: meta.actor, source, artifactId, cwd: ctx.worktreeRoot, sequence: state.revision + 1 };
     task2.evidence[e.id] = e;
     return [e.id];
   });
@@ -1277,7 +1557,7 @@ init_policy();
 init_store();
 init_snapshots();
 import { spawn } from "node:child_process";
-import { randomUUID as randomUUID8, createHash as createHash6 } from "node:crypto";
+import { randomUUID as randomUUID9, createHash as createHash7 } from "node:crypto";
 init_errors();
 async function runVerification(ctx, meta, input) {
   assertPersistence(meta);
@@ -1309,7 +1589,7 @@ async function runVerification(ctx, meta, input) {
     assertEntry(meta, current, "state-write");
     assertContract(current, input.contractVersion);
     reserved = true;
-    return [randomUUID8()];
+    return [randomUUID9()];
   });
   requireThat(reserved, "VERIFICATION_INCOMPLETE", "Another invocation owns this verification; the command was not repeated");
   const artifactId = reservation.resourceIds[0];
@@ -1358,7 +1638,7 @@ async function runVerification(ctx, meta, input) {
     environment: input.environment,
     rawOutputStored: false
   }, true);
-  return appendEvidence(ctx, { ...meta, operationId: `evidence-${createHash6("sha256").update(meta.operationId).digest("hex")}` }, {
+  return appendEvidence(ctx, { ...meta, operationId: `evidence-${createHash7("sha256").update(meta.operationId).digest("hex")}` }, {
     taskId: input.taskId,
     contractVersion: input.contractVersion,
     snapshotId: snapshot2.id,
@@ -1377,11 +1657,12 @@ init_store();
 init_policy();
 init_ownership();
 init_snapshots();
-import { randomUUID as randomUUID9 } from "node:crypto";
+import { randomUUID as randomUUID10 } from "node:crypto";
 async function submitContribution(ctx, meta, input) {
   const c = input.contribution;
   if (c.kind === "change") {
     requireThat(c.snapshotId && c.writeToken, "CONTRIBUTION_INVALID", "Changes require a snapshot and write token");
+    await assertWriteToken(ctx, await readState(ctx), meta, c.writeToken);
     const snapshot2 = await loadSnapshot(ctx, c.snapshotId);
     requireThat(
       snapshot2.workspaceId === ctx.workspaceId && (await compareSnapshot(ctx, snapshot2)).matches,
@@ -1389,16 +1670,16 @@ async function submitContribution(ctx, meta, input) {
       "Contribution must describe this workspace's current inputs"
     );
   }
-  const receipt = await mutateState(ctx, meta, { command: "contribution.submit", input }, (state) => {
+  const receipt = await mutateState(ctx, meta, { command: "contribution.submit", input }, async (state) => {
     const task2 = getTask(state, input.taskId);
     assertEntry(meta, task2, "state-write");
     assertContract(task2, c.contractVersion);
     if (c.kind === "change") {
       requireThat(c.writeToken && c.writeToken.taskId === task2.id && c.writeToken.assignmentId === c.assignmentId, "CONTRIBUTION_INVALID", "Contribution and token refer to different work");
-      assertWriteToken(ctx, state, meta, c.writeToken);
+      await assertWriteToken(ctx, state, meta, c.writeToken);
     }
     requireThat(c.evidenceIds.every((e) => !!task2.evidence[e]), "EVIDENCE_NOT_FOUND", "Contribution evidence is absent");
-    const contribution2 = { ...structuredClone(c), id: randomUUID9(), submittedBy: meta.actor.instanceId, integrated: null };
+    const contribution2 = { ...structuredClone(c), id: randomUUID10(), submittedBy: meta.actor.instanceId, integrated: null };
     task2.contributions[contribution2.id] = contribution2;
     return [contribution2.id];
   });
@@ -1429,7 +1710,8 @@ init_io();
 init_schema();
 init_snapshots();
 init_ownership();
-import { randomUUID as randomUUID10 } from "node:crypto";
+init_workflow();
+import { randomUUID as randomUUID11 } from "node:crypto";
 function verifyRows(task2, version2, snapshotId, rows, verification) {
   assertContract(task2, version2);
   array(checkRowRule)(rows);
@@ -1470,7 +1752,7 @@ async function recordCheckSet(ctx, meta, input) {
       requireThat(input.rows.every((r) => r.evidenceIds.every((e) => task2.evidence[e].actor.instanceId === meta.actor.instanceId)), "CHECK_INVALID", "Do not relabel another assessor's evidence as your own check");
     }
     const { taskId: _, ...fields } = input;
-    const checks = { ...structuredClone(fields), id: randomUUID10(), assessor: meta.actor };
+    const checks = { ...structuredClone(fields), id: randomUUID11(), assessor: meta.actor };
     task2.checks[checks.id] = checks;
     return [checks.id];
   });
@@ -1481,11 +1763,12 @@ async function finishGoal(ctx, meta, input) {
   requireThat(["run", "continue", "debug", "finish"].includes(meta.invocation.entry) && !meta.invocation.analysisOnly, "ENTRY_SCOPE_DENIED", "This entry cannot finalize delivery");
   const snapshot2 = await loadSnapshot(ctx, input.snapshotId);
   requireThat((await compareSnapshot(ctx, snapshot2)).matches, "SNAPSHOT_CHANGED", "Delivery inputs changed");
-  const receipt = await mutateState(ctx, meta, { command: "finish", input }, (state) => {
+  const receipt = await mutateState(ctx, meta, { command: "finish", input }, async (state) => {
     const task2 = getTask(state, input.taskId);
     assertEntry(meta, task2, "state-write");
     assertOwner(task2, meta, input.ownerEpoch);
     assertContract(task2, input.contractVersion);
+    await validatePlanningArtifacts(ctx, task2);
     const rows = [];
     for (const id2 of input.checkSetIds) {
       const checks = task2.checks[id2];
@@ -1506,7 +1789,7 @@ async function finishGoal(ctx, meta, input) {
     requireThat(!Object.values(state.claims).some((c) => c.taskId === task2.id && c.workspaceId !== ctx.workspaceId && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "Another executor is still active for this task");
     const claim = state.claims[ctx.workspaceId];
     if (claim && claim.state !== "released") {
-      assertCurrentToken(ctx, state, meta, toWriteToken(claim));
+      await assertCurrentToken(ctx, state, meta, toWriteToken(claim));
       requireThat(claim.taskId === task2.id, "WORKSPACE_OCCUPIED", "Another task still owns this workspace");
       state.claims[ctx.workspaceId] = { ...claim, state: "released", recovery: null };
     }
@@ -1516,7 +1799,7 @@ async function finishGoal(ctx, meta, input) {
       requireThat(red && evidence2.some((e) => e.phase === "green" && e.result === "pass" && e.exitCode === 0 && e.sequence > red.sequence && e.snapshotId === snapshot2.id), "TDD_EVIDENCE_REQUIRED", "Current TDD evidence needs RED before GREEN");
     }
     const delivery = {
-      id: randomUUID10(),
+      id: randomUUID11(),
       contractVersion: input.contractVersion,
       snapshotId: snapshot2.id,
       checkSetIds: input.checkSetIds,
@@ -1558,7 +1841,7 @@ async function archiveGoal(ctx, meta, input) {
 init_store();
 init_policy();
 init_schema();
-import { randomUUID as randomUUID11 } from "node:crypto";
+import { randomUUID as randomUUID12 } from "node:crypto";
 init_errors();
 async function recordDiagnostic(ctx, meta, input) {
   text(input.text);
@@ -1568,7 +1851,7 @@ async function recordDiagnostic(ctx, meta, input) {
     const task2 = getTask(state, input.taskId);
     assertEntry(meta, task2, "state-write");
     requireThat(input.evidenceIds.every((e) => !!task2.evidence[e]), "EVIDENCE_NOT_FOUND", "Diagnostic evidence is absent");
-    const record2 = { id: randomUUID11(), kind: input.kind, text: input.text, evidenceIds: input.evidenceIds, actor: meta.actor, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+    const record2 = { id: randomUUID12(), kind: input.kind, text: input.text, evidenceIds: input.evidenceIds, actor: meta.actor, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
     task2.diagnostics.push(record2);
     return [record2.id];
   });
@@ -1599,7 +1882,7 @@ async function openRepair(ctx, meta, input) {
       state.tasks[task2.id] = task2;
     }
     task2.diagnostics.push({
-      id: randomUUID11(),
+      id: randomUUID12(),
       kind: "fact",
       text: `Expected: ${input.expected}
 Reported actual: ${input.actual}`,
@@ -1652,6 +1935,7 @@ async function importLegacy(ctx, meta, input) {
 }
 
 // src/cli/commands.ts
+init_workflow();
 init_schema();
 var route = (handler, check) => ({ handler, check });
 var task = { taskId: id };
@@ -1672,7 +1956,10 @@ var contribution = object({
 });
 var commands = {
   "init": route(initializeStore, decisionRule),
-  "task create": route(createGoal, object({ title: text, contract: contractDraftRule, decision: decisionRule })),
+  "task create": route(createGoal, object({ title: text, contract: contractDraftRule, decision: decisionRule }, { planningRequired: bool })),
+  "task document": route(recordPlanningDocument, object({ ...version, ownerEpoch: integer, kind: one("brief", "plan"), content: text })),
+  "task authorize": route(authorizeExecution, object({ ...version, ownerEpoch: integer, request: executionRequestRule })),
+  "task suspend": route(suspendExecution, object({ ...version, ownerEpoch: integer, decision: decisionRule })),
   "task revise": route(reviseContract, object({ ...task, expectedVersion: integer, ownerEpoch: integer, contract: contractDraftRule, decision: decisionRule })),
   "assignment add": route(addAssignment, object({ ...task, ownerEpoch: integer, assignment })),
   "continue": route(continueGoal, object({ ...task, assignmentId: nullable(id) }, { afterRevision: integer })),
@@ -1724,6 +2011,7 @@ function taskSummary(task2) {
     userAcceptances: task2.userAcceptances,
     relatedTo: task2.relatedTo,
     legacySource: task2.legacySource,
+    workflow: task2.workflow ?? null,
     diagnostics: task2.diagnostics.slice(-20)
   };
 }
@@ -1815,6 +2103,7 @@ async function executeReadCommand(ctx, command, input) {
           id: t.id,
           title: t.title,
           status: t.status,
+          protocol: t.workflow?.protocol ?? null,
           goal: currentContract(t).goal,
           contractVersion: currentContract(t).version,
           owner: t.owner,
@@ -1845,7 +2134,7 @@ async function main(argv, io = { stdin: process.stdin, stdout: process.stdout, s
       io.stdout.write(help);
       return 0;
     }
-    if (legacy.some((c) => argv.slice(0, c.split(" ").length).join(" ") === c)) throw new KernelError("LEGACY_COMMAND_REMOVED", "Legacy stage commands are read-only history; use legacy inspect/import explicitly");
+    if (legacy.some((c) => argv.slice(0, c.split(" ").length).join(" ") === c)) throw new KernelError("LEGACY_COMMAND_REMOVED", "Do not switch CLI versions or create a second store. Use task document for current planning; legacy inspect/import handles history only");
     const parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {
       input: { type: "string" },
       json: { type: "boolean" },

@@ -7,6 +7,7 @@ import { canonicalJson, array, checkRowRule, verificationRule, decisionRule } fr
 import { loadSnapshot, compareSnapshot } from "./snapshots.js";
 import { assertCurrentToken, toWriteToken } from "./ownership.js";
 import type { RepositoryContext, Meta, Id, Task, CheckRow, VerificationRequirement, CheckSet, Delivery, Decision } from "./types.js";
+import { validatePlanningArtifacts } from "./workflow.js";
 
 function verifyRows(task: Task, version: number, snapshotId: Id, rows: CheckRow[], verification: VerificationRequirement[]): void {
   assertContract(task, version); array(checkRowRule)(rows); array(verificationRule)(verification);
@@ -56,8 +57,9 @@ export async function finishGoal(ctx: RepositoryContext, meta: Meta, input: {
   requireThat(["run", "continue", "debug", "finish"].includes(meta.invocation.entry) && !meta.invocation.analysisOnly, "ENTRY_SCOPE_DENIED", "This entry cannot finalize delivery");
   const snapshot = await loadSnapshot(ctx, input.snapshotId);
   requireThat((await compareSnapshot(ctx, snapshot)).matches, "SNAPSHOT_CHANGED", "Delivery inputs changed");
-  const receipt = await mutateState(ctx, meta, { command: "finish", input }, state => {
+  const receipt = await mutateState(ctx, meta, { command: "finish", input }, async state => {
     const task = getTask(state, input.taskId); assertEntry(meta, task, "state-write"); assertOwner(task, meta, input.ownerEpoch); assertContract(task, input.contractVersion);
+    await validatePlanningArtifacts(ctx, task);
     const rows: CheckRow[] = [];
     for (const id of input.checkSetIds) {
       const checks = task.checks[id]; requireThat(checks && checks.snapshotId === input.snapshotId, "CHECK_INVALID", "A selected check describes different inputs");
@@ -75,7 +77,7 @@ export async function finishGoal(ctx: RepositoryContext, meta: Meta, input: {
       && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "Another executor is still active for this task");
     const claim = state.claims[ctx.workspaceId];
     if (claim && claim.state !== "released") {
-      assertCurrentToken(ctx, state, meta, toWriteToken(claim));
+      await assertCurrentToken(ctx, state, meta, toWriteToken(claim));
       requireThat(claim.taskId === task.id, "WORKSPACE_OCCUPIED", "Another task still owns this workspace");
       state.claims[ctx.workspaceId] = { ...claim, state: "released", recovery: null };
     }

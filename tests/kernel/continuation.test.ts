@@ -23,7 +23,7 @@ test("unknown takeover retains old workspace hold and only the new epoch may sub
   const state = await readState(target);
   expect(state.claims[f.context.workspaceId]?.state).toBe("unknown-writer-hold");
   expect(next.epoch).toBe(old.epoch + 1);
-  expect(() => assertWriteToken(f.context, state, f.meta, old)).toThrow();
+  await expect(assertWriteToken(f.context, state, f.meta, old)).rejects.toThrow();
   await expect(claimWork(f.context, f.meta, { taskId: f.task.id, assignmentId: null, contractVersion: 1 })).rejects.toMatchObject({ code: "WORKSPACE_OCCUPIED" });
   await clearWorkspaceHold(target, f.meta, { from, stopBasis: "holder-release", stopReference: null, decision: null });
   expect((await readState(target)).claims[f.context.workspaceId]?.state).toBe("released");

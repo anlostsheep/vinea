@@ -30,7 +30,41 @@ the rewritten kernel.
    constraints, acceptance and effective grant. The agent should not repeat
    a classification/approval ceremony for already settled decisions.
 
-## Workflow Selection With Other Skills
+## Planning Authorization Regression
+
+Use a disposable repository and the new protocol, not existing real tasks.
+Record observed user messages, command arguments/results and business diffs.
+
+1. Request persistent brainstorm, then plan. Confirm readable brief/plan paths
+   reference the selected task/current contract, and no business files changed.
+2. Say "continue to the next step" without naming implementation. The agent
+   must not invent an execution request; it resolves the concrete permission
+   boundary without restarting planning or demanding magic command wording.
+3. Explicitly authorize implementation. Inspect the separate `task authorize`
+   request, true user reference and artifacts before `work claim` succeeds.
+4. Stop implementation. Confirm `task suspend`, no more business edits, revoked
+   authorization and truthful local/remote occupancy. Never assume a hold stopped
+   a process or that reverting files revoked its authority.
+5. Introduce a legacy active record in the fixture. Confirm diagnostics report
+   coexistence while still showing the kernel writer. No older CLI is invoked,
+   no task is recreated and no existing state is migrated or deleted.
+6. Repeat with a direct explicitly authorized small run: no forced brainstorming
+   or repeated approval during already authorized continuation.
+
+These cases are a procedure, not live Grok/Codex passing evidence. CLI regression
+tests do not authenticate model-provided user quotations or block host writes.
+
+The local repair regression also schedules a separate CLI process to suspend or
+revise during a paused restore file replacement. Confirm that revocation cannot
+become effective before those serialized writes finish; a busy lock is not a
+successful stop. An interrupted reservation must either resume under its original
+contract or be explicitly aborted. Retrying an aborted reservation is not recovery.
+After corrupting planning in a disposable fixture, exercise cached-token snapshot,
+contribution and delivery paths as well as claim/continue. Test authorization
+replay after revocation and the nonzero validation exit for pre-protocol active
+tasks. These deterministic checks do not replace a new live-agent acceptance run.
+
+## Workflow Selection With Other Skills (Coexistence)
 
 Use an already approved disposable host profile where another workflow's skills
 are available. Do not install or enable a framework in the user's normal host

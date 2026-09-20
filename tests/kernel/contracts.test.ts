@@ -31,11 +31,13 @@ test("none activation and persist false leave the whole shared store unchanged",
   expect(await fingerprintFixtureTree(f.context.storeRoot)).toBe(before);
 });
 
-test("discussion does not create an execution task even with a zero-grant payload", async () => {
+test("persistent discussion creates a planning task without execution authorization", async () => {
   const f = await makeGoalFixture(), { version: _, decision, ...contract } = f.task.contracts[0]!;
   const meta = f.meta; meta.invocation.entry = "brainstorm";
-  await expect(createGoal(f.context, meta, { title: "discuss", decision, contract: { ...contract,
-    grant: { businessWrite: false, delegate: false, commit: false, deploy: false, allowedPaths: [] } } })).rejects.toMatchObject({ code: "ENTRY_SCOPE_DENIED" });
+  const task = await createGoal(f.context, meta, { title: "discuss", decision, contract: { ...contract,
+    grant: { businessWrite: false, delegate: false, commit: false, deploy: false, allowedPaths: [] } } });
+  expect(task.workflow).toMatchObject({ planningRequired: true, authorizations: [] });
+  expect(() => assertEntry(f.meta, task, "business-write")).toThrow();
 });
 
 test("planning cannot widen writable paths and no revision can erase acceptance", async () => {

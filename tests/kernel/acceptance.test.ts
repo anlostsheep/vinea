@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { makeGoalFixture, testEnvironment, fingerprintFixtureTree } from "../helpers/kernel-fixture.js";
+import { makeGoalFixture, testEnvironment, fingerprintFixtureTree, authorizeFixtureTask } from "../helpers/kernel-fixture.js";
 import { claimWork, assertWriteToken } from "../../src/kernel/ownership.js";
 import { captureSnapshot } from "../../src/kernel/snapshots.js";
 import { reviseContract } from "../../src/kernel/contracts.js";
@@ -18,10 +18,12 @@ test("contract revision fences old write tokens and old passing evidence", async
   const { version: _, decision, ...contract } = f.task.contracts[0]!;
   await reviseContract(f.context, f.meta, { taskId: f.task.id, expectedVersion: 1, ownerEpoch: 1, contract, decision });
   const state = await readState(f.context);
-  expect(() => assertWriteToken(f.context, state, f.meta, token)).toThrowError(/contract/i);
+  await expect(assertWriteToken(f.context, state, f.meta, token)).rejects.toThrowError(/contract/i);
   await expect(recordCheckSet(f.context, f.meta, { taskId: f.task.id, contractVersion: 2, snapshotId: snapshot.id, independent: false,
     rows: [{ acceptanceId: "A1", result: "pass", evidenceIds: [evidence.id], summary: "old", gapDecision: null }],
     verification: [{ evidenceId: evidence.id, argv, environment }] })).rejects.toMatchObject({ code: "EVIDENCE_VERSION_MISMATCH" });
+  await expect(claimWork(f.context, f.meta, { taskId: f.task.id, assignmentId: null, contractVersion: 2 })).rejects.toMatchObject({ code: "EXECUTION_NOT_AUTHORIZED" });
+  await authorizeFixtureTask(f.context, f.actorA, f.task.id, 2);
   expect((await claimWork(f.context, f.meta, { taskId: f.task.id, assignmentId: null, contractVersion: 2 })).epoch).toBeGreaterThan(token.epoch);
 });
 

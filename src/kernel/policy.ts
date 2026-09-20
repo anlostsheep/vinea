@@ -2,6 +2,7 @@ import { KernelError, requireThat } from "./errors.js";
 import { assertPersistence } from "./io.js";
 import { metaRule, id } from "./schema.js";
 import type { Meta, Task, RepositoryState, Contract } from "./types.js";
+import { assertExecution } from "./workflow-policy.js";
 
 export function getTask(state: RepositoryState, taskId: string, mutable = true): Task {
   id(taskId);
@@ -31,6 +32,7 @@ export function assertEntry(meta: Meta, task: Task | null, capability: "state-wr
     requireThat(grant.businessWrite && grant.allowedPaths.length > 0, "BUSINESS_WRITE_NOT_GRANTED", "No business paths are writable");
   }
   if (task && capability === "delegate") requireThat(currentContract(task).grant.delegate, "DELEGATION_NOT_GRANTED", "Delegation is not authorized");
+  if (task && capability !== "state-write") assertExecution(task);
 }
 export function assertWritablePath(task: Task, path: string): void {
   const grant = currentContract(task).grant;

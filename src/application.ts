@@ -20,7 +20,7 @@ export function taskSummary(task: Task) {
     assignments: Object.values(task.assignments), contributionIds: Object.keys(task.contributions),
     evidenceIds: Object.values(task.evidence).sort((a, b) => a.sequence - b.sequence).slice(-20).map(e => e.id),
     checkSetIds: Object.keys(task.checks), deliveryIds: Object.keys(task.deliveries), userAcceptances: task.userAcceptances,
-    relatedTo: task.relatedTo, legacySource: task.legacySource, diagnostics: task.diagnostics.slice(-20) };
+    relatedTo: task.relatedTo, legacySource: task.legacySource, workflow: task.workflow ?? null, diagnostics: task.diagnostics.slice(-20) };
 }
 export async function executeCommand(ctx: RepositoryContext, command: string, envelope: CommandEnvelope): Promise<CommandResponse> {
   envelopeRule(envelope);
@@ -86,6 +86,7 @@ export async function executeReadCommand(ctx: RepositoryContext, command: string
       const tasks = Object.values(state.tasks).filter(t => !input.after || t.id > input.after).sort((a, b) => a.id < b.id ? -1 : 1);
       const page = tasks.slice(0, limit);
       data = { revision: state.revision, tasks: page.map(t => ({ id: t.id, title: t.title, status: t.status,
+        protocol: t.workflow?.protocol ?? null,
         goal: currentContract(t).goal, contractVersion: currentContract(t).version, owner: t.owner, relatedTo: t.relatedTo })),
         nextAfter: tasks.length > limit ? page.at(-1)!.id : null };
     }

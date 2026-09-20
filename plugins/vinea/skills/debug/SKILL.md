@@ -18,3 +18,9 @@ Honor the requested mode: locating or explaining only does not authorize busines
 During active development, keep the repair in the same task. For delivered or archived work, `debug open` creates a related repair with fresh evidence and current authority; it never rewrites the original delivery or treats old passing results as repair proof. Broader requirements or relaxed constraints require a new user decision and contract version.
 
 Finish with the cause supported by evidence, changes made, validation results and remaining uncertainty. Do not force a fresh brainstorm/plan cycle for a local defect. No persistent artifacts or binding are allowed when the user requested an ephemeral investigation.
+
+For a new repair, `task authorize` records the concrete user implementation request and real reference before claim; merely selecting `debug` or opening a repair does not activate its grant. Honor required current brief/plan artifacts on an existing planning task. Keep the task protocol and plugin root pinned; neither a missing command nor an old installed directory authorizes downgrading or rebuilding task state elsewhere.
+
+When correcting premature implementation, stop writes and revoke the owner's execution authority with `task suspend` (or release only your own claim and report to the owner). Refresh `continue`/`doctor`, including other worktrees, and inspect business changes. Do not equate code rollback or a legacy `planning` status with revoked write ownership. Preserve uncertain remote holds and obtain separate authority for destructive recovery or migration.
+
+An in-flight restore serializes suspension until file writes and publication finish; `STORE_LOCKED` is not successful revocation. Partial recovery retains its contract until completed or explicitly suspended. After `RECOVERY_ABORTED`, inspect partial files and holds instead of retrying an old reservation or assuming new authorization revives it.

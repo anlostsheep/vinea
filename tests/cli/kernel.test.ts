@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { access, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { test, expect } from "vitest";
-import { makeRepoFixture } from "../helpers/kernel-fixture.js";
+import { makeRepoFixture, makeGoalFixture } from "../helpers/kernel-fixture.js";
 
 const cli = join(process.cwd(), "dist/vinea.mjs");
 function run(cwd: string, args: string[], input?: unknown): Promise<{ code: number | null; output: any }> {
@@ -18,6 +18,11 @@ function run(cwd: string, args: string[], input?: unknown): Promise<{ code: numb
 const invocation = { entry: "run", activation: "named-entry", analysisOnly: false, persist: true };
 function envelope(actor: unknown, payload: unknown, entry = "run") {
   return { meta: { operationId: randomUUID(), actor, invocation: { ...invocation, entry } }, payload };
+}
+const executionRequest = { kind: "implementation-request", userMessage: "Implement the fixture", reference: "fixture:user:implementation", action: null };
+async function authorize(cwd: string, actor: unknown, taskId: string) {
+  const result = await run(cwd, ["task", "authorize", "--input", "-", "--json"], envelope(actor, { taskId, contractVersion: 1, ownerEpoch: 1, request: executionRequest }));
+  expect(result.code, JSON.stringify(result.output)).toBe(0);
 }
 test("public CLI resolves an instance and reuses it across separate processes", async () => {
   const f = await makeRepoFixture();
@@ -35,6 +40,7 @@ test("public CLI resolves an instance and reuses it across separate processes", 
   }));
   expect(created.code).toBe(0);
   const taskId = created.output.data.id;
+  await authorize(f.root, actor, taskId);
   const claimed = await run(f.root, ["work", "claim", "--input", "-", "--json"], envelope(actor, { taskId, assignmentId: null, contractVersion: 1 }));
   expect(claimed.code).toBe(0);
   const resumed = await run(f.root, ["continue", "--input", "-", "--json"], envelope(actor, { taskId, assignmentId: null }, "continue"));
@@ -59,6 +65,17 @@ test("validate returns a failing exit status for missing state without initializ
   await expect(access(join(f.root, ".git/vinea"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
+test("validate exits nonzero for pre-protocol active tasks without migrating them", async () => {
+  const f = await makeGoalFixture(), path = join(f.root, ".git/vinea/tasks/state.json");
+  const state = JSON.parse(await readFile(path, "utf8")); delete state.tasks[f.task.id].workflow;
+  const before = JSON.stringify(state); await writeFile(path, before);
+  const result = await run(f.root, ["validate", "--json"]);
+  expect(result.code).toBe(1);
+  expect(result.output.data.status).toBe("blocked");
+  expect(result.output.data.issues.map((issue: { code: string }) => issue.code)).toContain("TASK_PROTOCOL_REQUIRED");
+  expect(await readFile(path, "utf8")).toBe(before);
+});
+
 test("two worktrees recover through public occupancy references across CLI processes", async () => {
   const f = await makeRepoFixture();
   async function call(root: string, command: string, actor: unknown, payload: unknown, entry = "run") {
@@ -70,6 +87,7 @@ test("two worktrees recover through public occupancy references across CLI proce
   const task = (await call(f.root, "task create", a, { title: "recovery", decision: { summary: "implement", reference: null },
     contract: { goal: "recover uncommitted work", scope: ["src"], constraints: [], acceptance: [{ id: "A1", text: "restored" }], quality: "standard",
       grant: { businessWrite: true, delegate: true, commit: false, deploy: false, allowedPaths: ["src"] } } })).output.data;
+  await authorize(f.root, a, task.id);
   const token = (await call(f.root, "work claim", a, { taskId: task.id, assignmentId: null, contractVersion: 1 })).output.data;
   await writeFile(join(f.root, "src/app.ts"), "export const value = 9;\n");
   await writeFile(join(f.root, "src/new.ts"), "export const pending = true;\n");
@@ -89,6 +107,7 @@ test("two worktrees recover through public occupancy references across CLI proce
   expect(late.output.error.code).toBe("STALE_WRITE_TOKEN");
   const { version: _, decision: __, ...contract } = task.contract;
   const otherTask = (await call(f.root, "task create", a, { title: "different task", decision: { summary: "separate goal", reference: null }, contract })).output.data;
+  await authorize(f.root, a, otherTask.id);
   expect((await call(f.root, "work claim", a, { taskId: otherTask.id, assignmentId: null, contractVersion: 1 })).output.error.code).toBe("WORKSPACE_OCCUPIED");
   await rm(join(f.root, ".git/vinea/runtime/bindings"), { recursive: true, force: true });
   const resumed = await call(f.linkedRoot, "continue", b, { taskId: task.id, assignmentId: null }, "continue");
@@ -111,6 +130,7 @@ test("public CLI delivers observed uncommitted work and opens a linked repair", 
   const task = await call("task create", { title: "delivery", decision: { summary: "implement fixture", reference: null }, contract: {
     goal: "value is 2", scope: ["src"], constraints: [], acceptance: [{ id: "A1", text: "value is 2" }], quality: "standard",
     grant: { businessWrite: true, delegate: false, commit: false, deploy: false, allowedPaths: ["src"] } } });
+  await authorize(f.root, owner, task.id);
   const token = await call("work claim", { taskId: task.id, assignmentId: null, contractVersion: 1 });
   await writeFile(join(f.root, "src/app.ts"), "export const value = 2;\n");
   const snapshot = await call("snapshot capture", { taskId: task.id, paths: ["src"], token });
@@ -147,3 +167,36 @@ test("resolved command errors preserve caller identity and reject provenance spo
   expect(result.output.actor).toEqual(actor);
   expect(result.output.operationId).toBe(request.meta.operationId);
 });
+
+test("public CLI keeps planning, execution authorization and suspension distinct", async () => {
+  const f = await makeRepoFixture();
+  const actor = (await run(f.root, ["session", "resolve", "--input", "-", "--json"], envelope({ host: "planning-fixture", newInstance: true }, {}, "plan"))).output.actor;
+  const call = (command: string, payload: unknown, entry = "plan") =>
+    run(f.root, [...command.split(" "), "--input", "-", "--json"], envelope(actor, payload, entry));
+  expect((await call("init", { summary: "Persist this planning task", reference: "fixture:user:plan" })).code).toBe(0);
+  const created = await call("task create", { title: "Planning boundary", decision: { summary: "Plan only", reference: "fixture:user:plan" }, contract: {
+    goal: "Bounded change", scope: ["src"], constraints: ["No commit"], acceptance: [{ id: "A1", text: "Behavior works" }], quality: "standard",
+    grant: { businessWrite: true, delegate: false, commit: false, deploy: false, allowedPaths: ["src"] } } });
+  expect(created.code, JSON.stringify(created.output)).toBe(0);
+  expect(created.output.data.workflow).toMatchObject({ planningRequired: true, authorizations: [] });
+  const taskId = created.output.data.id, version = { taskId, contractVersion: 1, ownerEpoch: 1 };
+  const claim = { taskId, contractVersion: 1, assignmentId: null };
+  expect((await call("work claim", claim, "run")).output.error.code).toBe("EXECUTION_NOT_AUTHORIZED");
+  const brief = await call("task document", { ...version, kind: "brief", content: "# Brief\nGoal, scope, constraints and non-goals." });
+  expect(brief.code).toBe(0);
+  expect((await call("task authorize", { ...version, request: executionRequest }, "run")).output.error.code).toBe("PLANNING_INCOMPLETE");
+  const plan = await call("task document", { ...version, kind: "plan", content: "# Plan\nImplement and verify the change." });
+  expect(plan.code).toBe(0);
+  expect(await readFile(join(f.root, ".git/vinea", plan.output.data.path), "utf8")).toContain("# Plan");
+  const vague = { ...executionRequest, kind: "continuation", userMessage: "Continue to the next step" };
+  expect((await call("task authorize", { ...version, request: vague }, "run")).output.error.code).toBe("EXECUTION_REQUEST_REQUIRED");
+  expect((await call("task authorize", { ...version, request: executionRequest }, "plan")).output.error.code).toBe("ENTRY_SCOPE_DENIED");
+  expect((await call("task authorize", { ...version, request: executionRequest }, "run")).code).toBe(0);
+  const claimed = await call("work claim", claim, "run"); expect(claimed.code).toBe(0);
+  expect((await call("task suspend", { ...version, decision: { summary: "Stop implementation", reference: "fixture:user:stop" } })).code).toBe(0);
+  const resumed = await call("continue", { taskId, assignmentId: null }, "continue");
+  expect(resumed.output.data.writeToken).toBeNull(); expect(resumed.output.data.missing).toContain("EXECUTION_NOT_AUTHORIZED");
+  expect((await call("work claim", claim, "run")).output.error.code).toBe("EXECUTION_NOT_AUTHORIZED");
+  expect(await readFile(join(f.root, "src/app.ts"), "utf8")).toBe("export const value = 1;\n");
+  await expect(access(join(f.root, ".vinea"))).rejects.toMatchObject({ code: "ENOENT" });
+}, 15000);

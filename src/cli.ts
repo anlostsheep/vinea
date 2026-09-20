@@ -14,7 +14,7 @@ const help = `Vinea: explicit local task collaboration\n\nvinea <command> --inpu
 export async function main(argv: string[], io = { stdin: process.stdin as NodeJS.ReadableStream, stdout: process.stdout as NodeJS.WritableStream, stderr: process.stderr as NodeJS.WritableStream }): Promise<number> {
   try {
     if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) { io.stdout.write(help); return 0; }
-    if (legacy.some(c => argv.slice(0, c.split(" ").length).join(" ") === c)) throw new KernelError("LEGACY_COMMAND_REMOVED", "Legacy stage commands are read-only history; use legacy inspect/import explicitly");
+    if (legacy.some(c => argv.slice(0, c.split(" ").length).join(" ") === c)) throw new KernelError("LEGACY_COMMAND_REMOVED", "Do not switch CLI versions or create a second store. Use task document for current planning; legacy inspect/import handles history only");
     const parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {
       input: { type: "string" }, json: { type: "boolean" }, task: { type: "string" }, source: { type: "string" }, id: { type: "string" },
       limit: { type: "string" }, after: { type: "string" },

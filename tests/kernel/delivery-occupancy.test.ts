@@ -10,6 +10,7 @@ import { captureSnapshot } from "../../src/kernel/snapshots.js";
 import { readState } from "../../src/kernel/store.js";
 import type { Actor, RepositoryContext } from "../../src/kernel/types.js";
 import { runVerification } from "../../src/kernel/verification.js";
+import { authorizeFixtureTask } from "../helpers/kernel-fixture.js";
 import { git, makeGoalFixture, testEnvironment, testMeta } from "../helpers/kernel-fixture.js";
 
 const fault = vi.hoisted(() => ({ enabled: false }));
@@ -91,6 +92,7 @@ test("finish leaves another task's remote writer untouched", async () => {
   const f = await makeGoalFixture(), peer = await discoverRepository(f.linkedRoot);
   const { version: _, decision, ...contract } = f.task.contracts[0]!;
   const other = await createGoal(peer, testMeta(f.actorB), { title: "unrelated task", contract, decision });
+  await authorizeFixtureTask(peer, f.actorB, other.id);
   await claimWork(peer, testMeta(f.actorB), { taskId: other.id, assignmentId: null, contractVersion: 1 });
   const peerClaim = (await readState(f.context)).claims[peer.workspaceId];
   const input = await deliveryInput(f.context, f.actorA, f.task.id);

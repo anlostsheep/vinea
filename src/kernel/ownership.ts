@@ -4,12 +4,14 @@ import { readState, mutateState } from "./store.js";
 import { getTask, currentContract, assertContract, assertEntry, assertOwner } from "./policy.js";
 import { tokenRule } from "./schema.js";
 import type { RepositoryContext, RepositoryState, Meta, Id, WriteToken, Assignment } from "./types.js";
+import { assertExecution } from "./workflow-policy.js";
+import { validatePlanningArtifacts } from "./workflow.js";
 
 export function executionKey(taskId: Id, assignmentId: Id | null): string { return JSON.stringify([taskId, assignmentId]); }
 export function assertWorkspaceClaimable(state: RepositoryState, workspaceId: Id): void {
   requireThat(!state.claims[workspaceId] || state.claims[workspaceId]!.state === "released", "WORKSPACE_OCCUPIED", "Workspace is written, restoring, or held by an unknown writer");
 }
-export function assertCurrentToken(ctx: RepositoryContext, state: RepositoryState, meta: Meta, token: WriteToken): void {
+export async function assertCurrentToken(ctx: RepositoryContext, state: RepositoryState, meta: Meta, token: WriteToken): Promise<void> {
   tokenRule(token);
   const claim = state.claims[ctx.workspaceId], task = getTask(state, token.taskId);
   requireThat(claim?.state === "writer" && token.workspaceId === ctx.workspaceId && claim.instanceId === meta.actor.instanceId
@@ -17,17 +19,20 @@ export function assertCurrentToken(ctx: RepositoryContext, state: RepositoryStat
     && token.assignmentId === claim.assignmentId && token.epoch === state.epochs[executionKey(token.taskId, token.assignmentId)],
     "STALE_WRITE_TOKEN", "Write ownership is absent, stale, held, or restoring");
   assertContract(task, token.contractVersion); assertContract(task, claim.contractVersion);
+  assertExecution(task);
+  await validatePlanningArtifacts(ctx, task);
 }
-export function assertWriteToken(ctx: RepositoryContext, state: RepositoryState, meta: Meta, token: WriteToken): void {
-  assertCurrentToken(ctx, state, meta, token);
+export async function assertWriteToken(ctx: RepositoryContext, state: RepositoryState, meta: Meta, token: WriteToken): Promise<void> {
+  await assertCurrentToken(ctx, state, meta, token);
   assertEntry(meta, getTask(state, token.taskId), "business-write");
 }
 export async function addAssignment(ctx: RepositoryContext, meta: Meta, input: {
   taskId: Id; ownerEpoch: number; assignment: Omit<Assignment, "id" | "status">;
 }): Promise<Assignment> {
-  const result = await mutateState(ctx, meta, { command: "assignment.add", input }, state => {
+  const result = await mutateState(ctx, meta, { command: "assignment.add", input }, async state => {
     const task = getTask(state, input.taskId);
     assertEntry(meta, task, "delegate"); assertOwner(task, meta, input.ownerEpoch);
+    await validatePlanningArtifacts(ctx, task);
     const assignment = { ...structuredClone(input.assignment), id: randomUUID(), status: "open" as const };
     task.assignments[assignment.id] = assignment;
     return [assignment.id];
@@ -35,9 +40,10 @@ export async function addAssignment(ctx: RepositoryContext, meta: Meta, input: {
   return (await readState(ctx)).tasks[input.taskId]!.assignments[result.resourceIds[0]!]!;
 }
 export async function claimWork(ctx: RepositoryContext, meta: Meta, input: { taskId: Id; assignmentId: Id | null; contractVersion: number }): Promise<WriteToken> {
-  const receipt = await mutateState(ctx, meta, { command: "work.claim", input, workspaceId: ctx.workspaceId }, state => {
+  const receipt = await mutateState(ctx, meta, { command: "work.claim", input, workspaceId: ctx.workspaceId }, async state => {
     const task = getTask(state, input.taskId);
     assertEntry(meta, task, "business-write"); assertContract(task, input.contractVersion);
+    await validatePlanningArtifacts(ctx, task);
     const assignment = input.assignmentId === null ? null : task.assignments[input.assignmentId];
     const previous = state.claims[ctx.workspaceId];
     const key = executionKey(input.taskId, input.assignmentId);
@@ -56,7 +62,7 @@ export async function claimWork(ctx: RepositoryContext, meta: Meta, input: { tas
     return [ctx.workspaceId, String(epoch)];
   });
   const token = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch: Number(receipt.resourceIds[1]) };
-  assertWriteToken(ctx, await readState(ctx), meta, token);
+  await assertWriteToken(ctx, await readState(ctx), meta, token);
   return token;
 }
 export function toWriteToken(claim: WriteToken): WriteToken {

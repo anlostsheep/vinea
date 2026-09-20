@@ -5,6 +5,29 @@ host manifests and marketplaces are generated from it by the release checks.
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking execution protocol: new tasks pin `planning-authorization-v1`.
+  Creating a task or selecting `run` no longer activates business-write grants.
+  `task authorize` records a separate, sourced implementation request; ordinary
+  continuation and plan approval do not mint execution authority.
+- Persistent brainstorm/plan tasks require readable, immutable brief/plan
+  artifacts for the current contract through `task document`. Claims, resumed
+  tokens and recovery validate artifact integrity. Direct authorized small runs
+  need no mandatory planning phase.
+- `task suspend` revokes authorization, fences old tokens, releases the owner's
+  own local claim and retains uncertain remote writers as holds. Diagnostics
+  expose legacy active-state coexistence; skills prohibit silent CLI downgrade.
+- Existing tasks are readable without automatic migration, but the new CLI
+  does not infer execution authorization for pre-protocol tasks. Caller-supplied
+  request provenance is auditable, not host-authenticated or a filesystem gate.
+- Serialize snapshot restoration writes and publication against suspension and
+  contract revision. Preserve partial-recovery reservations, reject incompatible
+  revisions, and report explicitly aborted recovery instead of suggesting retry.
+- Revalidate planning file hashes on cached-token contributions, snapshots and
+  delivery. Reject revoked authorization replays and report pre-protocol active
+  tasks as blocked, including a nonzero validation exit status.
+
 ## [1.0.1] - 2026-09-10
 
 ### Changed

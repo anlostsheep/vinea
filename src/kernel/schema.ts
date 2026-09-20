@@ -42,6 +42,10 @@ export const pathRule: Rule = (v, p = "path") => {
 const hash: Rule = (v, p = "hash") => { if (typeof v !== "string" || !/^[a-f0-9]{64}$/.test(v)) invalid(p, "invalid SHA256"); };
 export const actorRule = object({ instanceId: id, host: text }, { hostSessionId: text });
 export const decisionRule = object({ summary: text, reference: nullable(text) });
+export const executionRequestRule = object({ kind: one("implementation-request", "implementation-confirmation", "continuation", "plan-approval"), userMessage: text, reference: text, action: nullable(text) });
+const planningArtifactRule = object({ id, kind: one("brief", "plan"), contractVersion: integer, path: pathRule, sha256: hash });
+const authorizationRule = object({ id, contractVersion: integer, documentIds: array(id), request: executionRequestRule, actor: actorRule, recordedAt: text, revoked: nullable(decisionRule) });
+const workflowRule = object({ protocol: one("planning-authorization-v1"), planningRequired: bool, documents: array(planningArtifactRule), authorizations: array(authorizationRule) });
 export const invocationRule = object({ entry: one("run", "brainstorm", "plan", "continue", "check", "debug", "finish", "orient", "doctor"), activation: one("named-entry", "named-request", "bound-followup", "none"), analysisOnly: bool, persist: bool });
 export const metaRule = object({ operationId: id, actor: actorRule, invocation: invocationRule });
 const grantRule = object({ businessWrite: bool, delegate: bool, commit: bool, deploy: bool, allowedPaths: array(pathRule) });
@@ -65,7 +69,7 @@ const contributionRule = object({ id, kind: one("analysis", "change"), assignmen
 const diagnosticRule = object({ id, kind: one("fact", "hypothesis", "ruled-out", "change", "validation-gap"), text, evidenceIds: array(id), actor: actorRule, createdAt: text });
 const assignmentRule = object({ id, outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool, status: one("open", "closed", "cancelled") });
 const deliveryRule = object({ id, contractVersion: integer, snapshotId: id, checkSetIds: array(id), contributionIds: array(id), exclusions: array(text), owner: ownerRule, acceptedGaps: array(object({ acceptanceId: id, decision: decisionRule })), createdAt: text });
-const taskRule = object({ id, title: text, status: one("active", "delivered", "archived"), contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) });
+const taskRule = object({ id, title: text, status: one("active", "delivered", "archived"), contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) }, { workflow: workflowRule });
 const stateRule = object({ kernelSchemaVersion: one(1), repositoryId: id, revision: integer, tasks: map(taskRule), claims: map(claimRule), epochs: map(integer, text), snapshots: map(snapshotRule), operations: map(object({ operationId: id, requestHash: hash, revision: integer, resourceIds: array(id) })) });
 
 export function canonicalJson(value: unknown): string {
@@ -105,6 +109,27 @@ export function assertRepositoryState(value: unknown): asserts value is Reposito
     task.contracts.forEach((c, i) => {
       if (c.version !== i + 1 || !c.acceptance.length || new Set(c.acceptance.map(a => a.id)).size !== c.acceptance.length) invalid(key, "invalid contract history");
     });
+    if (task.workflow) {
+      const { documents, authorizations } = task.workflow;
+      if (new Set(documents.map(d => d.id)).size !== documents.length
+        || new Set(authorizations.map(a => a.id)).size !== authorizations.length
+        || new Set(authorizations.map(a => a.request.reference)).size !== authorizations.length) invalid(key, "duplicate workflow IDs or approval references");
+      for (const d of documents) {
+        if (d.contractVersion < 1 || d.contractVersion > task.contracts.length
+          || d.path !== `tasks/${task.id}/planning/v${d.contractVersion}/${d.kind}-${d.sha256}.md`) invalid(key, "invalid planning artifact");
+      }
+      for (const a of authorizations) {
+        if (a.contractVersion < 1 || a.contractVersion > task.contracts.length
+          || !["implementation-request", "implementation-confirmation"].includes(a.request.kind)
+          || (a.request.kind === "implementation-confirmation" && !a.request.action)
+          || new Set(a.documentIds).size !== a.documentIds.length
+          || a.documentIds.some(id => !documents.some(d => d.id === id && d.contractVersion === a.contractVersion))) invalid(key, "invalid execution authorization");
+        const selected = documents.filter(d => a.documentIds.includes(d.id));
+        if (new Set(selected.map(d => d.kind)).size !== selected.length
+          || (task.workflow.planningRequired && !a.revoked && a.contractVersion === task.contracts.at(-1)!.version
+            && selected.length !== 2)) invalid(key, "authorization has incomplete planning");
+      }
+    }
     const visit = (key: string, stack: Set<string>) => {
       if (stack.has(key) || !task.assignments[key]) invalid(key, "invalid assignment dependency");
       const next = new Set(stack).add(key);

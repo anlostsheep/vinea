@@ -22,7 +22,7 @@ test("binding removal does not release the writer and explicit identities surviv
   const next = await claimWork(f.context, f.meta, { taskId: f.task.id, assignmentId: null, contractVersion: 1 });
   expect(next.epoch).toBe(token.epoch + 1);
   const state = await readState(f.context);
-  expect(() => assertWriteToken(f.context, state, f.meta, token)).toThrow();
+  await expect(assertWriteToken(f.context, state, f.meta, token)).rejects.toThrow();
 });
 test("unknown holds block new work even when the task has a newer writer elsewhere", async () => {
   const f = await makeGoalFixture();

@@ -6,6 +6,22 @@ export interface ActorSelector {
   host: string; instanceId?: Id; hostSessionId?: string; newInstance?: boolean;
 }
 export interface Decision { summary: string; reference: string | null }
+export interface ExecutionRequest {
+  kind: "implementation-request" | "implementation-confirmation" | "continuation" | "plan-approval";
+  userMessage: string; reference: string; action: string | null;
+}
+export interface PlanningArtifact {
+  id: Id; kind: "brief" | "plan"; contractVersion: number;
+  path: string; sha256: string;
+}
+export interface ExecutionAuthorization {
+  id: Id; contractVersion: number; documentIds: Id[];
+  request: ExecutionRequest; actor: Actor; recordedAt: string; revoked: Decision | null;
+}
+export interface TaskWorkflow {
+  protocol: "planning-authorization-v1"; planningRequired: boolean;
+  documents: PlanningArtifact[]; authorizations: ExecutionAuthorization[];
+}
 export interface Invocation {
   entry: Entry;
   activation: "named-entry" | "named-request" | "bound-followup" | "none";
@@ -105,6 +121,7 @@ export interface Task {
   userAcceptances: Array<{ deliveryId: Id; decision: Decision; actor: Actor; recordedAt: string }>;
   relatedTo: { taskId: Id; deliveryId: Id } | null;
   legacySource: { path: string; fingerprint: string; originalStatus: string } | null;
+  workflow?: TaskWorkflow;
 }
 export interface MutationReceipt {
   operationId: Id; requestHash: string; revision: number; resourceIds: Id[];
@@ -119,6 +136,7 @@ export interface ContinuationView {
   taskId: Id; contract: Contract; owner: Owner; binding: Binding;
   writeToken: WriteToken | null; assignment: Assignment | null;
   occupiedWrites: OccupancySummary[];
+  workflow: TaskWorkflow | null;
   diagnostics: Diagnostic[]; pendingContributionIds: Id[];
   evidenceIds: Id[]; missing: string[]; nextCursor: number; unchanged: boolean;
 }

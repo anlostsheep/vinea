@@ -205,6 +205,27 @@ authorized isolated recovery target and retains a hold on the original directory
 
 ## Repository state and validation
 
+The unreleased `planning-authorization-v1` protocol separates contract ceilings
+from execution authority. Persistent brainstorm/plan tasks store current brief
+and plan Markdown with `task document`. `task authorize` separately records the
+actual user implementation request, quotation and real reference. An entry label
+or `businessWrite` field alone cannot obtain write ownership. Valid authorization
+supports continuation; directly authorized small work needs no planning ceremony.
+
+`task suspend` revokes authorization and fences tokens, releasing only the caller's
+own local claim while retaining uncertain remote writers as holds. Inspect code
+changes separately. Older tasks stay readable without automatic migration or
+inferred authorization; do not downgrade the CLI to bypass the boundary. Diagnostics
+report old/new active-state coexistence. Provenance remains caller-reported, not
+host-authenticated consent or a filesystem sandbox.
+
+Kernel restoration writes share the store lock with suspension and contract
+revision. Revocation is effective only after a successful response, not a lock
+timeout. Partial restoration retains its original contract until completed or
+explicitly aborted. Cached-token contributions, snapshots and delivery still
+validate planning content. Pre-protocol active tasks cause nonzero validation;
+readability is not execution readiness.
+
 Use `git rev-parse --git-common-dir` to locate the common directory. State lives
 in its `vinea/` subdirectory, normally `.git/vinea/` in the primary checkout.
 Linked worktrees resolve to that same local store. Runtime bindings can be

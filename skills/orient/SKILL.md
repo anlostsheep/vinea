@@ -12,3 +12,5 @@ Stay within the selected Vinea workflow unless the user explicitly chooses anoth
 Resolve `<plugin-root>` by removing `/skills/orient/SKILL.md` from this file; Claude Code may use `${CLAUDE_PLUGIN_ROOT}`. Run `node <plugin-root>/bin/vinea.mjs orient --json` in the target Git worktree. See [CLI.md](../../CLI.md) for optional targeted reads.
 
 Show relevant goal, contract, ownership, evidence gaps and delivery state. Do not select the newest task, initialize storage, attach, claim work or import legacy records automatically. If there is no shared store, explain that it has not been initialized. If the user already selected a task and requested continuation, use its explicit continuation path rather than reclassifying the request.
+
+Show the pinned protocol and distinguish active task status from execution authorization. Missing brief/plan or authorization is not a request to fill in approval. Keep this plugin root; use read-only doctor for legacy/new-store coexistence instead of switching versions.

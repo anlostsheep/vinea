@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { makeGoalFixture, testEnvironment, testMeta, fingerprintFixtureTree } from "../helpers/kernel-fixture.js";
+import { makeGoalFixture, testEnvironment, testMeta, fingerprintFixtureTree, authorizeFixtureTask } from "../helpers/kernel-fixture.js";
 import { claimWork, addAssignment } from "../../src/kernel/ownership.js";
 import { handoffWork, continueGoal } from "../../src/kernel/continuation.js";
 import { captureSnapshot } from "../../src/kernel/snapshots.js";
@@ -46,6 +46,7 @@ test("a handed-off writer can refresh its token after an owner-approved contract
   const transferred = await handoffWork(f.context, f.meta, { from, to: f.actorB, contractVersion: 1, transferOwner: false, ownerEpoch: null, decision: null });
   const { version: __, decision, ...contract } = f.task.contracts[0]!;
   await reviseContract(f.context, f.meta, { taskId: f.task.id, expectedVersion: 1, ownerEpoch: 1, contract, decision });
+  await authorizeFixtureTask(f.context, f.actorA, f.task.id, 2);
   const next = await claimWork(f.context, testMeta(f.actorB), { taskId: f.task.id, assignmentId: null, contractVersion: 2 });
   expect(next.epoch).toBeGreaterThan(transferred.epoch);
   expect(next.instanceId).toBe(f.actorB.instanceId);

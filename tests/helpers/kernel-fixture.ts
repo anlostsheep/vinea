@@ -48,7 +48,15 @@ export async function makeGoalFixture() {
       acceptance: [{ id: "A1", text: "Expected behavior works" }], quality: "standard",
       grant: { businessWrite: true, delegate: true, commit: false, deploy: false, allowedPaths: ["src"] } },
   });
+  await authorizeFixtureTask(context, actorA, task.id);
+  const { readState } = await import("../../src/kernel/store.js");
+  Object.assign(task, (await readState(context)).tasks[task.id]);
   return { ...f, context, actorA, actorB, task, get meta() { return testMeta(actorA); } };
+}
+export async function authorizeFixtureTask(context: import("../../src/kernel/types.js").RepositoryContext, actor: Actor, taskId: string, contractVersion = 1, ownerEpoch = 1) {
+  const { authorizeExecution } = await import("../../src/kernel/workflow.js");
+  return authorizeExecution(context, testMeta(actor), { taskId, contractVersion, ownerEpoch,
+    request: { kind: "implementation-request", userMessage: "Implement the fixture change", reference: `fixture:execution:${contractVersion}:${randomUUID()}`, action: null } });
 }
 export function testEnvironment(): VerificationEnvironment {
   return { runtime: process.version, platform: process.platform, labels: {} };

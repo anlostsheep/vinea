@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { KernelError } from "./errors.js";
 import { assertRepositoryState, canonicalJson, metaRule, decisionRule } from "./schema.js";
-import { assertPersistence, storagePath, readManaged, writeJson } from "./io.js";
+import { assertPersistence, storagePath, readManaged, writeJson, safePath } from "./io.js";
 import type { RepositoryContext, RepositoryState, Meta, Decision, Id, MutationReceipt } from "./types.js";
 export { assertPersistence } from "./io.js";
 
@@ -59,7 +59,7 @@ async function withLock<T>(ctx: RepositoryContext, meta: Meta, operation: () => 
   }
 }
 export async function mutateState(ctx: RepositoryContext, meta: Meta, request: unknown,
-  change: (draft: RepositoryState) => Id[]): Promise<MutationReceipt> {
+  change: (draft: RepositoryState) => Id[] | Promise<Id[]>): Promise<MutationReceipt> {
   metaRule(meta); assertPersistence(meta);
   if (meta.invocation.activation === "none") throw new KernelError("ACTIVATION_REQUIRED", "Explicit Vinea activation is required before any write");
   await readState(ctx);
@@ -71,7 +71,7 @@ export async function mutateState(ctx: RepositoryContext, meta: Meta, request: u
       return previous;
     }
     const state = structuredClone(before);
-    const resourceIds = change(state);
+    const resourceIds = await change(state);
     state.revision = before.revision + 1;
     const receipt = { operationId: meta.operationId, requestHash, revision: state.revision, resourceIds };
     state.operations[meta.operationId] = receipt;
@@ -88,9 +88,22 @@ export async function lookupOperation(ctx: RepositoryContext, meta: Meta, reques
   }
   return previous;
 }
+export async function inspectLegacyCoexistence(ctx: RepositoryContext): Promise<boolean> {
+  const root = await safePath(ctx.worktreeRoot, join(ctx.worktreeRoot, ".vinea/tasks/active"));
+  try {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new KernelError("UNSAFE_PATH", "Legacy task directory is a symbolic link");
+      if (!entry.isDirectory()) continue;
+      const path = await safePath(ctx.worktreeRoot, join(root, entry.name, "task.json"));
+      try { if ((await lstat(path)).isFile()) return true; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
+    return false;
+  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+}
 export async function inspectStore(ctx: RepositoryContext) {
   const issues: Array<{ code: string; path: string; message: string }> = [];
-  let status: "missing" | "ready" | "incomplete" | "invalid" | "locked" = "ready";
+  let status: "missing" | "ready" | "incomplete" | "invalid" | "locked" | "conflicted" | "blocked" = "ready";
   let state: RepositoryState | undefined;
   try { state = await readState(ctx); } catch (error) {
     const e = error as KernelError;
@@ -98,6 +111,28 @@ export async function inspectStore(ctx: RepositoryContext) {
     issues.push({ code: e.code, path: ctx.storeRoot, message: e.message });
   }
   if (status !== "ready") return { status, issues };
+  try {
+    if (await inspectLegacyCoexistence(ctx)) {
+      status = "conflicted";
+      issues.push({ code: "LEGACY_ACTIVE_STATE_PRESENT", path: join(ctx.worktreeRoot, ".vinea/tasks/active"),
+        message: "Legacy active tasks coexist with the kernel store. Their planning status does not release kernel writers; do not switch CLI versions or migrate automatically" });
+    }
+  } catch {
+    status = "invalid"; issues.push({ code: "LEGACY_STATE_UNSAFE", path: ".vinea/tasks/active", message: "Legacy state cannot be inspected safely" });
+  }
+  const { validatePlanningArtifacts } = await import("./workflow.js");
+  for (const task of Object.values(state!.tasks)) {
+    if (!task.workflow) {
+      if (task.status === "active") {
+        if (status === "ready") status = "blocked";
+        issues.push({ code: "TASK_PROTOCOL_REQUIRED", path: `tasks/${task.id}`,
+          message: "Pre-protocol task remains readable; no execution authorization was inferred or migrated" });
+      }
+      continue;
+    }
+    try { await validatePlanningArtifacts(ctx, task); }
+    catch (error) { status = "invalid"; issues.push({ code: "PLANNING_ARTIFACT_INVALID", path: `tasks/${task.id}/planning`, message: (error as Error).message }); }
+  }
   const { validateSnapshotContents } = await import("./snapshots.js");
   for (const snapshot of Object.values(state!.snapshots)) {
     try { await validateSnapshotContents(ctx, snapshot); }

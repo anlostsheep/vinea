@@ -9,8 +9,9 @@ import { submitContribution, integrateContribution } from "../kernel/contributio
 import { recordCheckSet, finishGoal, acceptDelivery, archiveGoal } from "../kernel/delivery.js";
 import { openRepair, recordDiagnostic } from "../kernel/debug.js";
 import { importLegacy } from "../legacy/import.js";
+import { recordPlanningDocument, authorizeExecution, suspendExecution } from "../kernel/workflow.js";
 import { object, id, text, bool, integer, nullable, array, one, actorRule, decisionRule, contractDraftRule,
-  tokenRule, environmentRule, checkRowRule, verificationRule, type Rule } from "../kernel/schema.js";
+  tokenRule, environmentRule, checkRowRule, verificationRule, executionRequestRule, type Rule } from "../kernel/schema.js";
 import type { RepositoryContext, Meta } from "../kernel/types.js";
 
 type Handler = (ctx: RepositoryContext, meta: Meta, payload: never) => unknown;
@@ -24,7 +25,10 @@ const contribution = object({ kind: one("analysis", "change"), assignmentId: nul
   snapshotId: nullable(id), evidenceIds: array(id), summary: text, writeToken: nullable(tokenRule) });
 export const commands: Record<string, { handler: Handler; check: Rule }> = {
   "init": route(initializeStore, decisionRule),
-  "task create": route(createGoal, object({ title: text, contract: contractDraftRule, decision: decisionRule })),
+  "task create": route(createGoal, object({ title: text, contract: contractDraftRule, decision: decisionRule }, { planningRequired: bool })),
+  "task document": route(recordPlanningDocument, object({ ...version, ownerEpoch: integer, kind: one("brief", "plan"), content: text })),
+  "task authorize": route(authorizeExecution, object({ ...version, ownerEpoch: integer, request: executionRequestRule })),
+  "task suspend": route(suspendExecution, object({ ...version, ownerEpoch: integer, decision: decisionRule })),
   "task revise": route(reviseContract, object({ ...task, expectedVersion: integer, ownerEpoch: integer, contract: contractDraftRule, decision: decisionRule })),
   "assignment add": route(addAssignment, object({ ...task, ownerEpoch: integer, assignment })),
   "continue": route(continueGoal, object({ ...task, assignmentId: nullable(id) }, { afterRevision: integer })),

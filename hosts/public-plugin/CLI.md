@@ -45,14 +45,85 @@ Every mutation has a unique `operationId`. Reuse it only for a retry of the iden
 | Command | Exact payload |
 |---|---|
 | `init` | Decision; explicit local initialization only |
-| `task create` | `{title, contract: ContractDraft, decision: Decision}` |
+| `task create` | `{title, contract: ContractDraft, decision: Decision, planningRequired?: boolean}` |
+| `task document` | `{taskId, contractVersion, ownerEpoch, kind: "brief" or "plan", content: "readable Markdown"}` |
+| `task authorize` | `{taskId, contractVersion, ownerEpoch, request: ExecutionRequest}` |
+| `task suspend` | `{taskId, contractVersion, ownerEpoch, decision: Decision}` |
 | `task revise` | `{taskId, expectedVersion, ownerEpoch, contract: ContractDraft, decision: Decision}` |
 | `assignment add` | `{taskId, ownerEpoch, assignment: {outcome, dependsOn: [], assignee: null, businessWrite: false}}` |
 | `continue` | `{taskId, assignmentId: null}`; optional `afterRevision` cursor |
 | `work claim` | `{taskId, assignmentId: null, contractVersion}` |
 | `work release` | WriteToken itself |
 
-Read `owner.epoch` and the current contract version rather than assuming `1`. Creating an execution task requires explicit execution intent; standalone planning/brainstorming needs no new task, and confirming a plan does not grant business writes. Existing task conclusions may be recorded within their authority. Legacy import and analysis-only post-delivery debug have explicit zero-grant paths. Revisions append history and fence older write tokens and evidence. Assignment creation records collaboration only, not a real dispatch. Host facilities perform actual spawning, waiting and cancellation when authorized. Simultaneous business writers need distinct physical worktrees.
+Read `owner.epoch` and the current contract version rather than assuming `1`. Persistent brainstorm/plan can create a task without execution authority; ephemeral discussion creates nothing. Creation stores a proposed contract ceiling, not permission to implement. `task authorize` is separate from both creation and claim. Revisions append history and require fresh authorization and, where required, current planning documents. Assignment creation records collaboration only, not a real dispatch. Host facilities perform actual spawning, waiting and cancellation when authorized. Simultaneous business writers need distinct physical worktrees.
+
+## Planning and Execution Authorization
+
+New tasks pin `workflow.protocol = "planning-authorization-v1"`. Keep the selected
+plugin root and protocol throughout the task. Missing/removed commands are not
+permission to use an older CLI or create a parallel legacy task. Pre-protocol
+tasks remain readable, but business operations return `TASK_PROTOCOL_REQUIRED`;
+there is no automatic migration. Older CLIs may reject stores containing the new
+task fields. Do not overwrite or downgrade such stores.
+
+Persistent explicit brainstorm/plan tasks always require both a brief and plan.
+`planningRequired: true` also requests this for direct execution; `false` cannot
+disable it for a planning entry. Recording a planning document also makes both
+documents required on a previously direct task. `task document` writes immutable Markdown under
+`<store>/tasks/<taskId>/planning/v<contractVersion>/<kind>-<sha256>.md` and records
+the path/hash in the same task. Brief: goal, scope, constraints, non-goals and
+acceptance. Plan: actionable steps, dependencies and verification. Nonempty text
+and hash integrity are checked; meaningful content still requires agent/user
+review. Chat prose, a todo list and contract JSON do not substitute for artifacts.
+
+An `ExecutionRequest` has this shape:
+
+```json
+{
+  "kind": "implementation-confirmation",
+  "userMessage": "Yes, begin implementation",
+  "reference": "actual-session:actual-user-message",
+  "action": "Implement the selected plan within the stated paths; no commit or deployment"
+}
+```
+
+Use `implementation-request` for a direct request (`action: null`), or
+`implementation-confirmation` with the concrete action actually shown before
+the user's confirmation. `continuation` and `plan-approval` are rejected. Quote
+the user's actual words and a real retrievable reference; a dated transcript
+location is acceptable when the host exposes no message ID. Do not invent IDs
+or rephrase "next step" into implementation consent. If the requested action is
+unclear, ask one concrete permission question. No special slash-command wording
+is required from the user.
+
+Only the owner using an explicit `run` or `debug` invocation with an actual
+implementation request can record new authorization, not a bound follow-up.
+The kernel validates these recorded fields, not whether the natural-language
+request describes a repair. Authorization pins the current contract and selected
+document IDs; each immutable artifact record carries its path and SHA-256.
+Token checks re-read those files, including cached-token contribution and snapshot
+operations. Delivery checks planning integrity even after the writer released.
+A valid authorization supports continuation without repeated approval. A direct
+authorized small run need not fabricate planning documents. `task document`
+cannot replace authorized documents until execution is suspended or the contract
+is revised; old versions remain available.
+
+On a user stop, cease business edits and use `task suspend` as owner. It revokes
+authorization, advances execution epochs and releases only the caller's own
+local claim. Other writers/restorations become `unknown-writer-hold`, not proof
+of stopped processes. Contributors may release their own claim and notify the
+owner. Inspect `continue`, `doctor` and the business diff separately; suspension
+does not undo files. Resuming requires a fresh explicit request with a new source
+reference; reusing a revoked or superseded approval is rejected. Do not silently
+roll back code, clear foreign holds or recreate a legacy `planning` task.
+An idempotent `task authorize` retry also checks current validity: revoked,
+superseded or changed planning cannot be returned as a successful authorization.
+
+These are protocol checks, not host authentication. Request kind, quotation and
+reference are caller-reported; the kernel cannot authenticate them or infer
+natural-language intent. It cannot intercept arbitrary host editor/shell writes.
+`entry=run`, an allowed grant or a successful claim is never independent proof
+of user consent.
 
 ## Transfers and Snapshots
 
@@ -66,7 +137,16 @@ Use the current holder's worktree. Active holders hand off themselves; others ne
 
 `snapshot capture` takes `{taskId, paths: ["src"], token: null}`. Supply the current token when capturing your business contribution. The returned ID identifies immutable contents including tracked, new, deleted files and executable bits; it is not a hash-only promise. Capture all inputs needed for verification/recovery, including tests and relevant nonsecret configuration. It deliberately excludes ignored files, sensitive paths and private-key contents. Symlinks, nonregular files and unsafe paths fail. Defaults: 2,000 files, 8 MiB per file, 64 MiB total; optional `limits:{maxFiles,maxFileBytes,maxTotalBytes}` may only lower these caps.
 
-`snapshot restore` takes `{taskId, snapshotId, token: WriteToken, expectedTargetBase}` and only runs under a current `restore-target` reservation created by takeover. It cannot overwrite arbitrary local changes. Missing blobs, baseline mismatch or conflicts are reported without substituting current content. A partially restored target remains reserved; retry the identical takeover after inspecting the blocker. Never reset unrelated target files to make recovery pass.
+`snapshot restore` takes `{taskId, snapshotId, token: WriteToken, expectedTargetBase}` and only runs under a current `restore-target` reservation created by takeover. It cannot overwrite arbitrary local changes. Missing blobs, baseline mismatch or conflicts are reported without substituting current content. All restore file writes and reservation publication share the store lock with suspension and contract revision. A suspension is effective only after its successful response; a busy/timeout response is not a stop receipt. A slow restore may make a concurrent command return `STORE_LOCKED`; never steal the lock or claim revocation succeeded.
+
+A failed partial restore retains its reservation and original contract. Retry the
+identical takeover only while that reservation and authorization remain valid.
+Contract revision refuses `RESTORE_IN_PROGRESS` until recovery completes or the
+owner explicitly suspends it. Suspension aborts the old reservation: retries
+return `RECOVERY_ABORTED`, even after fresh authorization. Inspect partial files,
+holds and actual process-stop evidence before deciding how to recover; do not
+reset unrelated target files or silently clear a hold. Individual writes are not
+rolled back on failure, and a process crash can still require lock-owner recovery.
 
 ## Evidence and Delivery
 
@@ -94,7 +174,7 @@ Use the current holder's worktree. Active holders hand off themselves; others ne
 
 ## Read-Only Queries and Recovery Limits
 
-Use `task list`, `task show --task <id>`, `orient`, `doctor`, and `validate`, all with `--json`. Use `snapshot show --id <id>` for a complete manifest with verified blobs. `evidence show`, `check show`, `contribution show`, `delivery show` require `--task <id> --id <id>`. These commands never initialize storage or acquire work. `validate` exits nonzero for missing, invalid, incomplete or locked state; it validates kernel state, not the user's business tests.
+Use `task list`, `task show --task <id>`, `orient`, `doctor`, and `validate`, all with `--json`. Use `snapshot show --id <id>` for a complete manifest with verified blobs. `evidence show`, `check show`, `contribution show`, `delivery show` require `--task <id> --id <id>`. These commands never initialize storage or acquire work. `validate` exits nonzero for missing, invalid, incomplete, locked, conflicted or blocked state; it validates kernel state, not the user's business tests. Active pre-protocol tasks produce `TASK_PROTOCOL_REQUIRED` and are not ready; historical delivered/archived tasks alone do not block readiness. Legacy active directories alongside the shared store produce `LEGACY_ACTIVE_STATE_PRESENT`; inspect all `issues` even when corruption makes the overall status `invalid`. Do not treat old status as current ownership or delete/migrate either source.
 
 `task list` and `orient` return up to 20 short summaries, not full histories. Use `--limit 1..100` and the returned `nextAfter` as `--after` for another page. `task show` and `continue` return the latest 20 evidence IDs by recorded sequence; use targeted reads for a selected record.
 

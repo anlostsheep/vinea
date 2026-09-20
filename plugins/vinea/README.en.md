@@ -135,6 +135,13 @@ delivery records. Finish permits uncommitted inputs, requires current evidence
 conditions, and preserves accepted gaps as gaps. Commit, deployment, user
 acceptance and archive remain distinct operations.
 
+New tasks pin their execution protocol. Persistent planning uses `task document`
+for brief/plan; `task authorize` separately records an explicit implementation
+request and real source before claim. Generic continuation and plan approval do
+not activate writes. Use `task suspend` on a stop, then inspect code and all
+writers. Old `planning` records do not prove recovery. No automatic migration or
+older-CLI fallback is provided. Provenance is not host authentication or a sandbox.
+
 The skills use this bundled CLI. From this plugin root, its direct form is:
 
 ```sh

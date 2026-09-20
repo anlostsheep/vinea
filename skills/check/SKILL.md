@@ -16,3 +16,5 @@ Check the current contract against selected, recoverable inputs. Use project-nat
 Report each acceptance criterion as pass, fail, unverified or an explicitly user-accepted gap. A gap is never a pass. If recording an independent check, use this assessor's own evidence, not relabeled implementation evidence. Independence is an explicit intent, not a mandatory second agent.
 
 Do not edit business code or silently transition into repair. Verification commands may write caches or fixtures: inspect their side effects and obtain appropriate authority before executing them. `persist=false` permits no Vinea writes and no invocation of Vinea's runner. Return failures and evidence boundaries; a later explicit debug request may authorize a repair. Internal self-checking during an already authorized run can repair within its existing scope.
+
+Keep the selected plugin root and task protocol pinned. Where planning was required, inspect the versioned brief/plan and the distinct execution request; do not treat a grant, claim, chat plan or caller-written approval summary as authenticated consent. Report stopped or conflicting ownership without repairing it from this entry.

@@ -9,6 +9,7 @@ import { readState, mutateState, lookupOperation } from "./store.js";
 import { gitOutput } from "./repository.js";
 import { canonicalJson, pathRule, snapshotRule, id } from "./schema.js";
 import type { Meta, RepositoryContext, Snapshot, SnapshotEntry, WriteToken } from "./types.js";
+import { validatePlanningArtifacts } from "./workflow.js";
 
 export interface SnapshotLimits { maxFiles: number; maxTotalBytes: number; maxFileBytes: number }
 const defaults: SnapshotLimits = { maxFiles: 2000, maxTotalBytes: 64 * 1024 * 1024, maxFileBytes: 8 * 1024 * 1024 };
@@ -61,7 +62,7 @@ export async function captureSnapshot(ctx: RepositoryContext, meta: Meta, input:
   assertPersistence(meta);
   const state = await readState(ctx), task = getTask(state, input.taskId);
   assertEntry(meta, task, "state-write");
-  if (input.token) assertWriteToken(ctx, state, meta, input.token);
+  if (input.token) await assertWriteToken(ctx, state, meta, input.token);
   requireThat(Array.isArray(input.paths) && input.paths.length > 0, "SNAPSHOT_SCOPE_REQUIRED", "Explicit snapshot scope is required");
   const request = { command: "snapshot.capture", input, workspaceId: ctx.workspaceId };
   const previous = await lookupOperation(ctx, meta, request);
@@ -75,9 +76,9 @@ export async function captureSnapshot(ctx: RepositoryContext, meta: Meta, input:
     scope, entries: first.entries, workspaceId: ctx.workspaceId, createdBy: meta.actor.instanceId, capturedAt: new Date().toISOString() };
   for (const [sha, bytes] of first.blobs) await writeManaged(ctx, meta, `blobs/${sha}`, bytes, true);
   await writeJson(ctx, meta, `snapshots/${snapshot.id}.json`, snapshot, true);
-  const receipt = await mutateState(ctx, meta, request, current => {
+  const receipt = await mutateState(ctx, meta, request, async current => {
     assertEntry(meta, getTask(current, input.taskId), "state-write");
-    if (input.token) assertWriteToken(ctx, current, meta, input.token);
+    if (input.token) await assertWriteToken(ctx, current, meta, input.token);
     current.snapshots[snapshot.id] = snapshot; return [snapshot.id];
   });
   return (await readState(ctx)).snapshots[receipt.resourceIds[0]!]!;
@@ -114,52 +115,56 @@ export async function restoreSnapshot(ctx: RepositoryContext, meta: Meta, input:
   taskId: string; snapshotId: string; token: WriteToken; expectedTargetBase: string | null;
 }): Promise<void> {
   assertPersistence(meta);
-  const snapshot = await loadSnapshot(ctx, input.snapshotId), state = await readState(ctx), task = getTask(state, input.taskId);
-  assertEntry(meta, task, "business-write"); assertContract(task, input.token.contractVersion);
-  const claim = state.claims[ctx.workspaceId];
-  requireThat(claim?.state === "restore-target" && claim.recovery.snapshotId === snapshot.id
-    && claim.instanceId === meta.actor.instanceId && input.token.instanceId === claim.instanceId && claim.taskId === input.taskId
-    && claim.epoch === input.token.epoch && claim.workspaceId === input.token.workspaceId
-    && state.epochs[executionKey(claim.taskId, claim.assignmentId)] === claim.epoch, "STALE_WRITE_TOKEN", "Restore reservation is stale");
-  requireThat(snapshot.baseCommit === input.expectedTargetBase && await head(ctx) === input.expectedTargetBase, "SNAPSHOT_UNAVAILABLE", "Restore baseline is unavailable or changed");
-  const contents = new Map<string, Buffer>();
-  for (const entry of snapshot.entries) {
-    safeInput(entry.path); assertWritablePath(task, entry.path);
-    await safePath(ctx.worktreeRoot, join(ctx.worktreeRoot, entry.path));
-    if (entry.sha256) {
-      const bytes = await readManaged(ctx, `blobs/${entry.sha256}`);
-      requireThat(hash(bytes) === entry.sha256, "SNAPSHOT_UNAVAILABLE", "Snapshot content is missing or corrupt");
-      contents.set(entry.path, bytes);
+  const snapshot = await loadSnapshot(ctx, input.snapshotId), reservation = (await readState(ctx)).claims[ctx.workspaceId];
+  requireThat(reservation?.state === "restore-target", "STALE_WRITE_TOKEN", "Restore reservation is absent");
+  const operationId = `restore-${hash(reservation.recovery.operationId)}`;
+  // Serialize all restore writes with revocation and publication. A failed write
+  // leaves the durable reservation intact; the filesystem itself is not rolled back.
+  await mutateState(ctx, { ...meta, operationId }, { command: "restore.publish", input }, async current => {
+    const task = getTask(current, input.taskId), claim = current.claims[ctx.workspaceId];
+    assertEntry(meta, task, "business-write"); assertContract(task, input.token.contractVersion);
+    await validatePlanningArtifacts(ctx, task);
+    requireThat(claim?.state === "restore-target" && claim.recovery.snapshotId === snapshot.id
+      && claim.recovery.operationId === reservation.recovery!.operationId
+      && claim.instanceId === meta.actor.instanceId && input.token.instanceId === claim.instanceId && claim.taskId === input.taskId
+      && input.token.taskId === claim.taskId && input.token.assignmentId === claim.assignmentId
+      && input.token.contractVersion === claim.contractVersion
+      && claim.epoch === input.token.epoch && claim.workspaceId === input.token.workspaceId
+      && current.epochs[executionKey(claim.taskId, claim.assignmentId)] === claim.epoch, "STALE_WRITE_TOKEN", "Restore reservation is stale");
+    requireThat(snapshot.baseCommit === input.expectedTargetBase && await head(ctx) === input.expectedTargetBase, "SNAPSHOT_UNAVAILABLE", "Restore baseline is unavailable or changed");
+    const contents = new Map<string, Buffer>();
+    for (const entry of snapshot.entries) {
+      safeInput(entry.path); assertWritablePath(task, entry.path);
+      await safePath(ctx.worktreeRoot, join(ctx.worktreeRoot, entry.path));
+      if (entry.sha256) {
+        const bytes = await readManaged(ctx, `blobs/${entry.sha256}`);
+        requireThat(hash(bytes) === entry.sha256, "SNAPSHOT_UNAVAILABLE", "Snapshot content is missing or corrupt");
+        contents.set(entry.path, bytes);
+      }
     }
-  }
-  // Only unchanged baseline files or this recovery's target contents can be overwritten.
-  const status = (await gitOutput(ctx.worktreeRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).split("\0").filter(Boolean);
-  for (const line of status) {
-    requireThat(line.length > 3 && !/[RC]/.test(line.slice(0, 2)), "RECOVERY_CONFLICT", "Unconfirmed rename or dirty target");
-    const path = line.slice(3), expected = snapshot.entries.find(e => e.path === path);
-    requireThat(expected, "RECOVERY_CONFLICT", "Unconfirmed target changes are preserved");
-    const bytes = await readFile(await safePath(ctx.worktreeRoot, join(ctx.worktreeRoot, path))).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-    requireThat(expected.kind === "deleted" ? bytes === null : bytes !== null && hash(bytes) === expected.sha256, "RECOVERY_CONFLICT", "Target differs from baseline and recovery contents");
-  }
-  for (const entry of snapshot.entries) {
-    const file = await safePath(ctx.worktreeRoot, join(ctx.worktreeRoot, entry.path));
-    if (entry.kind === "deleted") await unlink(file).catch(error => { if (error.code !== "ENOENT") throw error; });
-    else {
-      await mkdir(dirname(file), { recursive: true });
-      const tmp = `${file}.${randomUUID()}.vinea-restore`;
-      try {
-        const handle = await open(tmp, "wx", entry.mode === "100755" ? 0o755 : 0o644);
-        try { await handle.writeFile(contents.get(entry.path)!); await handle.sync(); } finally { await handle.close(); }
-        await rename(tmp, file); await chmod(file, entry.mode === "100755" ? 0o755 : 0o644);
-      } finally { await unlink(tmp).catch(error => { if (error.code !== "ENOENT") throw error; }); }
+    // Only unchanged baseline files or this recovery's target contents can be overwritten.
+    const status = (await gitOutput(ctx.worktreeRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).split("\0").filter(Boolean);
+    for (const line of status) {
+      requireThat(line.length > 3 && !/[RC]/.test(line.slice(0, 2)), "RECOVERY_CONFLICT", "Unconfirmed rename or dirty target");
+      const path = line.slice(3), expected = snapshot.entries.find(e => e.path === path);
+      requireThat(expected, "RECOVERY_CONFLICT", "Unconfirmed target changes are preserved");
+      const bytes = await readFile(await safePath(ctx.worktreeRoot, join(ctx.worktreeRoot, path))).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+      requireThat(expected.kind === "deleted" ? bytes === null : bytes !== null && hash(bytes) === expected.sha256, "RECOVERY_CONFLICT", "Target differs from baseline and recovery contents");
     }
-  }
-  requireThat((await compareSnapshot(ctx, snapshot)).matches, "RECOVERY_CONFLICT", "Restored inputs do not match snapshot");
-  await mutateState(ctx, { ...meta, operationId: `restore-${hash(claim.recovery.operationId)}` }, { command: "restore.publish", input }, current => {
-    const held = current.claims[ctx.workspaceId];
-    requireThat(held?.state === "restore-target" && held.epoch === claim.epoch && held.instanceId === meta.actor.instanceId,
-      "STALE_WRITE_TOKEN", "Restore ownership changed before publication");
-    assertContract(getTask(current, input.taskId), claim.contractVersion);
-    current.claims[ctx.workspaceId] = { ...held, state: "writer", recovery: null }; return [ctx.workspaceId];
+    for (const entry of snapshot.entries) {
+      const file = await safePath(ctx.worktreeRoot, join(ctx.worktreeRoot, entry.path));
+      if (entry.kind === "deleted") await unlink(file).catch(error => { if (error.code !== "ENOENT") throw error; });
+      else {
+        await mkdir(dirname(file), { recursive: true });
+        const tmp = `${file}.${randomUUID()}.vinea-restore`;
+        try {
+          const handle = await open(tmp, "wx", entry.mode === "100755" ? 0o755 : 0o644);
+          try { await handle.writeFile(contents.get(entry.path)!); await handle.sync(); } finally { await handle.close(); }
+          await rename(tmp, file); await chmod(file, entry.mode === "100755" ? 0o755 : 0o644);
+        } finally { await unlink(tmp).catch(error => { if (error.code !== "ENOENT") throw error; }); }
+      }
+    }
+    requireThat((await compareSnapshot(ctx, snapshot)).matches, "RECOVERY_CONFLICT", "Restored inputs do not match snapshot");
+    current.claims[ctx.workspaceId] = { ...claim, state: "writer", recovery: null }; return [ctx.workspaceId];
   });
 }
