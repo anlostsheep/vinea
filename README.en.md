@@ -2,10 +2,11 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Vinea is a lightweight collaboration kernel for AI coding. The user defines
-the goal, constraints and acceptance criteria; agents choose the execution
-path. State stays in the local Git common directory, shared by linked
-worktrees, never tracked, committed or pushed through Git.
+Vinea is a lightweight AI-coding collaboration kernel for Codex, Claude Code and
+Grok Build. The user defines goals, constraints and acceptance; agents choose an
+execution path within that authority. Contracts, planning documents, execution
+requests, ownership and evidence stay in the local Git common directory, shared
+by linked worktrees and never tracked, committed or pushed through Git.
 
 The committed public plugin is [`plugins/vinea`](plugins/vinea). It contains
 one bundled Node CLI and nine host-prefixed skills: `vinea:run`,
@@ -17,11 +18,31 @@ stage commands and task storage of `v0.3.x`. Upgrades do not migrate old `.vinea
 data automatically; legacy data stays read-only and explicit imports grant no
 execution authority.
 
+## Upgrading to 2.0
+
+**2.0.0 changes the execution contract incompatibly; it is not a drop-in 1.0.x update.**
+
+- New tasks pin `planning-authorization-v1`. Persistent brainstorm/plan requires
+  readable brief/plan artifacts for the current contract, not just chat or todos.
+- Creating a task, setting `businessWrite`, or choosing `run` is not authorization.
+  A concrete user implementation request is recorded separately before claim.
+- Suspension revokes authorization and fences tokens. Cached-token contributions,
+  snapshots and delivery verify planning content; restore writes serialize against
+  suspension and revision. A timeout is not successful revocation.
+- Older tasks remain readable, but active tasks without the new protocol are
+  blocked. No state is migrated and no authority is inferred automatically. Stop
+  or complete existing execution and inspect ownership before upgrading. Decide
+  any migration separately; never edit state or change CLI versions to bypass gates.
+
+These checks coordinate cooperating agents, not a host sandbox. User quotations
+and references are caller-reported, not authenticated, and arbitrary local
+filesystem writes cannot be intercepted by Vinea.
+
 ## Install from the Git marketplace
 
-The public plugin id is `vinea@vinea`. The repository contains both host
-manifests and a prebuilt CLI, so users do not clone the repository or run
-`npm install`.
+The Codex/Claude Code plugin id is `vinea@vinea`. The repository contains both
+host manifests and a prebuilt CLI; Grok Build reads the Claude-compatible manifest.
+Users do not need to clone and build the source.
 
 ### Codex
 
@@ -34,7 +55,7 @@ To pin an exact release instead of following `main`, register the marketplace
 at an annotated tag:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -48,14 +69,26 @@ claude plugin install vinea@vinea --scope user
 To pin an exact release:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.1
+claude plugin marketplace add anlostsheep/vinea@v2.0.0
 claude plugin install vinea@vinea --scope user
 ```
 
-After either installation, fully restart the host and start a **new session**.
+### Grok Build
+
+Adding a marketplace does not install its plugin. Install explicitly:
+
+```sh
+grok plugin marketplace add anlostsheep/vinea
+grok plugin install vinea --trust
+```
+
+Use `--trust` only for a reviewed, trusted source. This follows the source's current
+version. Vinea has no hooks or MCP server; Grok uses the same skills and CLI.
+
+After installation, reload plugins or restart the host and start a **new session**.
 An installed plugin tree does not prove that an already-running session loaded
-its skills. Verify both states separately with `codex plugin list` or
-`claude plugin list`, then confirm that the new session can discover
+its skills. Verify both states separately with `codex plugin list`,
+`claude plugin list` or `grok plugin list`, then confirm that the new session can discover
 `vinea:orient`.
 
 ### Upgrade, roll back, or remove
@@ -75,7 +108,7 @@ add the desired tag (use an older tag to roll back):
 ```sh
 codex plugin remove vinea@vinea
 codex plugin marketplace remove vinea
-codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -85,6 +118,17 @@ Claude Code can refresh the marketplace and plugin directly:
 claude plugin marketplace update vinea
 claude plugin update vinea@vinea --scope user
 ```
+
+Grok Build refreshes its selected source and plugin:
+
+```sh
+grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin update vinea
+grok plugin list
+```
+
+An update is not permission to enable a disabled plugin. A code rollback does not
+roll back or migrate task state; do not run an older writer on a newer store.
 
 To change a pinned Claude Code version, remove the plugin and marketplace,
 then add the desired tag and install again. To remove Vinea completely:
@@ -164,13 +208,19 @@ create a local release with:
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 1.0.2
+npm run release -- 2.0.0
 ```
 
 The command runs the full checks, stages only release artifacts, creates a
 release commit and annotated `vX.Y.Z` tag, and intentionally does **not** push.
 Publication remains a separate, explicitly approved action. See
 [`CHANGELOG.md`](CHANGELOG.md) for release notes.
+
+After validation, publish `main` and the version tag together:
+
+```sh
+git push --atomic origin main refs/tags/v2.0.0
+```
 
 ## Workflow
 
@@ -205,7 +255,7 @@ authorized isolated recovery target and retains a hold on the original directory
 
 ## Repository state and validation
 
-The unreleased `planning-authorization-v1` protocol separates contract ceilings
+The 2.0 `planning-authorization-v1` protocol separates contract ceilings
 from execution authority. Persistent brainstorm/plan tasks store current brief
 and plan Markdown with `task document`. `task authorize` separately records the
 actual user implementation request, quotation and real reference. An entry label
@@ -247,10 +297,30 @@ Validate the local store:
 node plugins/vinea/bin/vinea.mjs validate --json
 ```
 
-`validate` is read-only and exits nonzero for missing, invalid, incomplete or
-locked state. It does not run business tests or initialize a fresh CI clone.
+`validate` is read-only and exits nonzero for missing, invalid, incomplete,
+locked, conflicted or blocked state. It does not run business tests or initialize a fresh CI clone.
 The protocol coordinates cooperating agents; it is not a sandbox against
 arbitrary local filesystem access.
+
+Agents use these commands within actual authority; users need not drive a CLI
+stage sequence:
+
+| Command | Purpose |
+| --- | --- |
+| `task create` | Store a contract without acquiring writes |
+| `task document` | Save immutable, versioned brief/plan Markdown |
+| `task authorize` | Record a concrete implementation request and real source |
+| `work claim` | Acquire this worktree under valid authorization |
+| `task suspend` | Revoke authority and retain uncertain writer holds |
+| `continue` / `doctor` | Inspect authorization, ownership, artifacts and gaps |
+
+Directly authorized small work needs no mandatory planning phase. Valid bound
+continuation does not repeatedly ask for approval; "next step" does not expand
+an earlier capability ceiling.
+
+Version 2.0 evidence: [authorization checks](docs/verification/vinea-execution-boundaries-2026-09-20.md)
+and [review repairs](docs/verification/vinea-execution-boundaries-review-repair-2026-09-20.md).
+All 136 local tests passing does not establish live end-to-end acceptance in every host.
 
 See the [CLI reference](hosts/public-plugin/CLI.md),
 [execution evidence](docs/verification/vinea-vnext-execution.md), and

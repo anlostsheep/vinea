@@ -2,9 +2,10 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Vinea 是面向 AI 编程的轻量协作内核：用户确定目标、约束和交付标准，agent
-选择执行路径。任务状态只保存在 Git 共同目录中，在本机多个 worktree 和
-agent 间共享，不进入 Git 跟踪、提交或推送。
+Vinea 是面向 Codex、Claude Code 和 Grok Build 的轻量 AI 编程协作内核：
+用户确定目标、约束和交付标准，agent 在授权范围内选择执行路径。
+合同、规划文档、执行授权、写入占用和验证证据保存在 Git 共同目录中，
+可在本机 worktree 和 agent 间接续，不进入 Git 跟踪、提交或推送。
 
 仓库中提交的公开插件位于 [`plugins/vinea`](plugins/vinea)。它包含一个已经
 打包的 Node CLI，以及九个带宿主前缀的技能：`vinea:run`、
@@ -14,10 +15,27 @@ agent 间共享，不进入 Git 跟踪、提交或推送。
 `v1.0.0` 引入本内核重写，与 `v0.3.x` 的阶段命令和任务存储不兼容。
 升级不会自动迁移旧 `.vinea`；旧数据保持只读，显式导入也不会继承执行权限。
 
+## 2.0 升级必读
+
+**2.0.0 是不兼容的执行契约升级，不是 1.0.x 的直接替换。**
+
+- 新任务固定为 `planning-authorization-v1` 协议。持久化 brainstorm/plan
+  必须留下当前合同版本的 brief/plan；聊天摘要和待办列表不能代替文件。
+- 创建任务、设置 `businessWrite` 或切换到 `run` 均不代表获得执行授权。
+  agent 需单独记录明确的用户实施请求，再申请当前 worktree 的写权。
+- 暂停会撤销授权并使旧令牌失效。缓存令牌的贡献、快照和交付也校验规划
+  文件；恢复写盘与暂停、合同修订串行化，失败和占锁不冒充成功停止。
+- 1.0.x 任务保持可读，但活动任务没有新授权协议时会被阻止执行。**不自动
+  迁移、不修改原始任务、不从旧授权推导新授权。** 升级前停止或完成原有
+  执行，并核对占用；需要迁移时另行决定，不能手改状态或换旧 CLI 绕过门禁。
+
+这些检查约束遵循协议的 agent，不是宿主沙箱。用户原话和引用仍由调用方
+提供，Vinea 不认证其真伪，也不能阻止任意本地进程绕过 CLI 写文件。
+
 ## 通过 Git marketplace 安装
 
-公开插件 ID 为 `vinea@vinea`。仓库同时提供两个宿主的清单和预构建 CLI，
-用户无需克隆仓库，也无需运行 `npm install`。
+Codex/Claude Code 的公开插件 ID 为 `vinea@vinea`。仓库提供双宿主清单和
+预构建 CLI；Grok Build 读取兼容的 Claude 清单。用户无需克隆源码构建。
 
 ### Codex
 
@@ -30,7 +48,7 @@ codex plugin add vinea@vinea
 marketplace：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -44,13 +62,25 @@ claude plugin install vinea@vinea --scope user
 固定到精确版本：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.1
+claude plugin marketplace add anlostsheep/vinea@v2.0.0
 claude plugin install vinea@vinea --scope user
 ```
 
-无论使用哪种宿主，安装后都要完全重启宿主并开始一个**新会话**。插件文件
+### Grok Build
+
+添加 marketplace 后，还需要安装具体插件；只添加源不会启用技能：
+
+```sh
+grok plugin marketplace add anlostsheep/vinea
+grok plugin install vinea --trust
+```
+
+`--trust` 表示信任该插件；只对已审核、可信的来源使用。此命令跟随源的
+当前版本。Vinea 不附带 hooks 或 MCP server，Grok 复用同一组技能和 CLI。
+
+无论使用哪种宿主，安装后都要重载插件或重启宿主，并开始一个**新会话**。插件文件
 已经安装，并不能证明正在运行的旧会话已经加载了技能。请分别验证两种状态：
-先运行 `codex plugin list` 或 `claude plugin list`，再确认新会话能够发现
+先运行 `codex plugin list`、`claude plugin list` 或 `grok plugin list`，再确认新会话能够发现
 `vinea:orient`。
 
 ### 升级、回滚或卸载
@@ -70,7 +100,7 @@ codex plugin add vinea@vinea
 ```sh
 codex plugin remove vinea@vinea
 codex plugin marketplace remove vinea
-codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -80,6 +110,17 @@ Claude Code 可以直接刷新 marketplace 和插件：
 claude plugin marketplace update vinea
 claude plugin update vinea@vinea --scope user
 ```
+
+Grok Build 刷新对应源和已安装插件：
+
+```sh
+grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin update vinea
+grok plugin list
+```
+
+更新版本与启用插件是两回事；原来禁用的插件不应因更新而被擅自启用。
+回滚插件代码也不会回滚或迁移任务数据，不能拿旧 writer 操作新协议状态。
 
 如果要切换 Claude Code 的固定版本，请删除插件和 marketplace，再添加目标
 tag 并重新安装。完全卸载 Vinea：
@@ -150,12 +191,18 @@ marketplace 都携带生成后的版本。Claude marketplace 的插件条目会�
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 1.0.2
+npm run release -- 2.0.0
 ```
 
 该命令会运行完整检查，只暂存发布产物，创建 release commit 和带注释的
 `vX.Y.Z` tag，并且刻意**不会**推送。发布仍是一个需要单独明确批准的操作。
 发布说明见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+验证完成后，将 `main` 与版本 tag 一起发布到 Git marketplace：
+
+```sh
+git push --atomic origin main refs/tags/v2.0.0
+```
 
 ## 工作流
 
@@ -184,7 +231,7 @@ debug；这些入口不是必须按顺序经过的阶段。裸 `/vinea` 只是�
 
 ## 仓库状态与验证
 
-未发布的授权协议 `planning-authorization-v1` 将任务约定与执行权限分开。
+2.0 的授权协议 `planning-authorization-v1` 将任务约定与执行权限分开。
 持久化 brainstorm/plan 通过 `task document` 保存当前合同版本的 brief/plan；
 聊天计划不代替文件。`task authorize` 单独记录用户的明确实施请求、原话和
 真实来源，`run` 标签及 `businessWrite` 字段本身不能取得写权。
@@ -218,9 +265,28 @@ clone 不携带这些状态，不提供跨机器同步。
 node plugins/vinea/bin/vinea.mjs validate --json
 ```
 
-`validate` 只读检查内核状态，缺失、损坏、未完成初始化或占锁时退出非零。
+`validate` 只读检查内核状态，缺失、损坏、未完成初始化、占锁、冲突或旧协议
+活动任务被阻止时退出非零。
 它不替代业务测试，也不把 CI 新 clone 中缺失本地状态当成自动初始化信号。
 协议约束合作的 agent，不是阻止任意本地进程写文件的安全沙箱。
+
+2.0 的核心命令由 agent 按实际授权调用，而不是要求用户逐条执行 CLI：
+
+| 命令 | 作用 |
+| --- | --- |
+| `task create` | 保存约定，不自动取得写权 |
+| `task document` | 保存版本化、不可变的 brief/plan Markdown |
+| `task authorize` | 记录明确实施请求、实际原话和来源 |
+| `work claim` | 在有效授权内取得本 worktree 的写权 |
+| `task suspend` | 撤销授权、围栏旧令牌，保留不确定写入者的 hold |
+| `continue` / `doctor` | 核对当前授权、占用、产物及恢复缺口 |
+
+明确授权的简短任务可以直接执行，不强制经过 brainstorm/plan。已授权任务
+的普通接续不重复要求批准；“继续下一步”本身不扩大原先的能力边界。
+
+本版验证：[授权门禁](docs/verification/vinea-execution-boundaries-2026-09-20.md)、
+[复现与修复](docs/verification/vinea-execution-boundaries-review-repair-2026-09-20.md)。
+全量 136 项测试通过不等于所有宿主真实会话均已端到端验收。
 
 完整命令载荷见 [CLI 参考](hosts/public-plugin/CLI.md)，验证边界见
 [执行证据](docs/verification/vinea-vnext-execution.md) 与

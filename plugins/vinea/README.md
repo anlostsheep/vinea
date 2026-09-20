@@ -2,11 +2,15 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Vinea 是面向 AI 编程的轻量协作内核。用户确定目标和约束，agent 选择执行
+Vinea 是面向 Codex、Claude Code 和 Grok Build 的轻量协作内核。用户确定目标和约束，agent 选择执行
 路径。本机 worktree 在 Git 共同目录的 `vinea/` 共享状态，不进入 Git 跟踪。
 
 `v1.0.0` 引入本内核重写，与 `v0.3.x` 的阶段命令和任务存储不兼容。
 安装或升级不自动迁移旧 `.vinea`；显式导入旧资料不会继承执行权限。
+
+**2.0.0 是不兼容升级。** 新任务固定执行授权协议；1.0.x 活动任务保持可读，
+但缺少该协议时不会获得写权，验证会返回 blocked。升级不迁移任务，也不
+继承旧授权。升级前停止或完成旧执行，核对占用；不要换旧 CLI 绕过门禁。
 
 ## 为宿主安装
 
@@ -19,10 +23,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-固定到 1.0.1：
+固定到 2.0.0：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -33,12 +37,21 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-固定到 1.0.1：
+固定到 2.0.0：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.1
+claude plugin marketplace add anlostsheep/vinea@v2.0.0
 claude plugin install vinea@vinea --scope user
 ```
+
+Grok Build 可读取本包的 Claude 兼容清单，添加源后再显式安装：
+
+```sh
+grok plugin marketplace add anlostsheep/vinea
+grok plugin install vinea --trust
+```
+
+`--trust` 只用于可信来源；仅添加 marketplace 不会安装或启用插件。
 
 ## 升级、回滚或卸载
 
@@ -56,7 +69,7 @@ codex plugin add vinea@vinea
 ```sh
 codex plugin remove vinea@vinea
 codex plugin marketplace remove vinea
-codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -66,6 +79,17 @@ Claude Code 可以直接更新跟随 marketplace 的安装：
 claude plugin marketplace update vinea
 claude plugin update vinea@vinea --scope user
 ```
+
+Grok Build 更新对应源与插件：
+
+```sh
+grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin update vinea
+grok plugin list
+```
+
+更新版本不等于启用插件，应保留用户原来的启用/禁用选择。
+回滚代码不回滚任务状态，不能让旧 writer 操作新协议数据。
 
 对于固定版本的 Claude Code 安装，请删除插件和 marketplace，添加目标 tag
 后重新安装。完全卸载 Vinea：
@@ -102,6 +126,7 @@ claude plugin uninstall vinea@vinea-local --scope user
 ```sh
 codex plugin list
 claude plugin list
+grok plugin list
 ```
 
 然后再单独确认新会话能够发现 `vinea:orient`。插件文件已经安装，并不能

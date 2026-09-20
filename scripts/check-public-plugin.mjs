@@ -23,10 +23,10 @@ const languageSwitch = "[简体中文](README.md) | [English](README.en.md)";
 const operationalCommands = [
   "codex plugin marketplace add anlostsheep/vinea",
   "codex plugin add vinea@vinea",
-  "codex plugin marketplace add anlostsheep/vinea --ref v1.0.1",
+  "codex plugin marketplace add anlostsheep/vinea --ref v2.0.0",
   "claude plugin marketplace add anlostsheep/vinea",
   "claude plugin install vinea@vinea --scope user",
-  "claude plugin marketplace add anlostsheep/vinea@v1.0.1",
+  "claude plugin marketplace add anlostsheep/vinea@v2.0.0",
   "codex plugin marketplace upgrade vinea",
   "codex plugin remove vinea@vinea",
   "claude plugin marketplace update vinea",
@@ -35,6 +35,11 @@ const operationalCommands = [
   "claude plugin uninstall vinea@vinea-local --scope user",
   "codex plugin list",
   "claude plugin list",
+  "grok plugin marketplace add anlostsheep/vinea",
+  "grok plugin install vinea --trust",
+  "grok plugin marketplace update https://github.com/anlostsheep/vinea.git",
+  "grok plugin update vinea",
+  "grok plugin list",
 ];
 const rootPackage = await readJson(join(projectRoot, "package.json"));
 const version = requiredString(rootPackage.version, "package.json version");

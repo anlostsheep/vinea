@@ -10,6 +10,13 @@ Version `v1.0.0` introduces this kernel rewrite, breaking compatibility with
 the stage commands and task storage of `v0.3.x`. Installation does not migrate
 old `.vinea` data automatically, and explicit imports grant no execution authority.
 
+**2.0.0 is a breaking upgrade.** New tasks pin their execution protocol. Older
+active tasks remain readable but cannot acquire writes without that protocol;
+validation reports blocked. Stop or finish existing execution and inspect ownership
+before upgrading. No migration or inherited authorization is performed, and an
+older CLI is not a workaround for the gate. Codex, Claude Code and Grok Build use
+the same skills and bundled CLI; Grok accepts the Claude-compatible manifest.
+
 ## Install for your host
 
 The public plugin id is `vinea@vinea`.
@@ -21,10 +28,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-To pin release 1.0.1:
+To pin release 2.0.0:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
+codex plugin marketplace add anlostsheep/vinea --ref v2.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -35,12 +42,22 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-To pin release 1.0.1:
+To pin release 2.0.0:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v1.0.1
+claude plugin marketplace add anlostsheep/vinea@v2.0.0
 claude plugin install vinea@vinea --scope user
 ```
+
+For Grok Build, add the source and explicitly install its plugin:
+
+```sh
+grok plugin marketplace add anlostsheep/vinea
+grok plugin install vinea --trust
+```
+
+Use `--trust` only for a trusted source. Adding a marketplace does not install or
+enable its plugins.
 
 ## Upgrade, roll back, or remove
 
@@ -58,7 +75,7 @@ use an older tag to roll back:
 ```sh
 codex plugin remove vinea@vinea
 codex plugin marketplace remove vinea
-codex plugin marketplace add anlostsheep/vinea --ref v0.3.1
+codex plugin marketplace add anlostsheep/vinea --ref v1.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -68,6 +85,17 @@ Claude Code can update a marketplace-following installation directly:
 claude plugin marketplace update vinea
 claude plugin update vinea@vinea --scope user
 ```
+
+For Grok Build, update only the selected source and plugin:
+
+```sh
+grok plugin marketplace update https://github.com/anlostsheep/vinea.git
+grok plugin update vinea
+grok plugin list
+```
+
+Version updates are separate from enablement; preserve the user's existing choice.
+Rolling back code does not roll back task data; do not use older writers on a newer store.
 
 For a pinned Claude Code installation, remove the plugin and marketplace, add
 the desired tag, and install again. To remove Vinea completely:
@@ -107,6 +135,7 @@ installed state:
 ```sh
 codex plugin list
 claude plugin list
+grok plugin list
 ```
 
 Then separately confirm that the new session can discover `vinea:orient`. An

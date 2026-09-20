@@ -5,6 +5,8 @@ host manifests and marketplaces are generated from it by the release checks.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-20
+
 ### Changed
 
 - Breaking execution protocol: new tasks pin `planning-authorization-v1`.
