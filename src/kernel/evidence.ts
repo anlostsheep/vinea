@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { verificationFence } from "./control-policy.js";
 import { requireThat } from "./errors.js";
 import { assertEntry, assertContract, getTask } from "./policy.js";
 import { decisionRule, environmentRule, one, integer, nullable, array, text } from "./schema.js";
@@ -12,16 +13,18 @@ export interface EvidenceInput {
 }
 // Only the command runner invokes this with command-runner; it is not a CLI endpoint.
 export async function appendEvidence(ctx: RepositoryContext, meta: Meta, input: EvidenceInput,
-  source: Evidence["source"], artifactId: Id | null): Promise<Evidence> {
+  source: Evidence["source"], artifactId: Id | null, expectedFence?: string): Promise<Evidence> {
   assertPersistence(meta); environmentRule(input.environment);
   one("pass", "fail", "unverified")(input.result); nullable(one("red", "green"))(input.phase);
   nullable(array(text))(input.argv); nullable(integer)(input.exitCode); text(input.summary);
   if (input.result === "pass" && input.exitCode !== null) requireThat(input.exitCode === 0, "EVIDENCE_INVALID", "Passing command cannot have a failing exit code");
   if (input.phase === "red") requireThat(input.result === "fail" && input.exitCode !== null && input.exitCode > 0, "EVIDENCE_INVALID", "RED needs a real nonzero failure");
   if (input.phase === "green") requireThat(input.result === "pass" && input.exitCode === 0, "EVIDENCE_INVALID", "GREEN needs exit zero");
-  const receipt = await mutateState(ctx, meta, { command: "evidence.append", input, source, artifactId }, state => {
+  const receipt = await mutateState(ctx, meta, { command: "evidence.append", input, source, artifactId, expectedFence: expectedFence ?? null }, state => {
     const task = getTask(state, input.taskId);
     assertEntry(meta, task, "state-write"); assertContract(task, input.contractVersion);
+    if (expectedFence !== undefined) requireThat(verificationFence(task, meta.actor.instanceId) === expectedFence,
+      "VERIFICATION_REVOKED", "Task control or authorization changed while the command ran; its result cannot establish current verification");
     requireThat(state.snapshots[input.snapshotId], "SNAPSHOT_UNAVAILABLE", "Evidence snapshot does not exist");
     const { taskId: _, ...fields } = input;
     const e: Evidence = { ...fields, id: randomUUID(), actor: meta.actor, source, artifactId, cwd: ctx.worktreeRoot, sequence: state.revision + 1 };

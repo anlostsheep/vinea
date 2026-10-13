@@ -4,12 +4,13 @@ import { contractDraftRule, decisionRule, text } from "./schema.js";
 import { readState, mutateState } from "./store.js";
 import { requireThat } from "./errors.js";
 import type { ContractDraft, Contract, Decision, Meta, RepositoryContext, Task } from "./types.js";
+import { newTaskControl } from "./control-policy.js";
 import { TASK_PROTOCOL, taskWorkflow } from "./workflow-policy.js";
 
 export function makeTask(title: string, draft: ContractDraft, decision: Decision, meta: Meta): Task {
   return { id: randomUUID(), title, status: "active", contracts: [{ ...structuredClone(draft), version: 1, decision }],
     owner: { instanceId: meta.actor.instanceId, epoch: 1 }, assignments: {}, contributions: {}, evidence: {}, checks: {},
-    diagnostics: [], deliveries: {}, userAcceptances: [], relatedTo: null, legacySource: null,
+    diagnostics: [], deliveries: {}, userAcceptances: [], relatedTo: null, legacySource: null, control: newTaskControl(),
     workflow: { protocol: TASK_PROTOCOL, planningRequired: ["brainstorm", "plan"].includes(meta.invocation.entry), documents: [], authorizations: [] } };
 }
 export async function createGoal(ctx: RepositoryContext, meta: Meta, input: { title: string; contract: ContractDraft; decision: Decision; planningRequired?: boolean }): Promise<Task> {

@@ -1,3 +1,5 @@
+import { controlView } from "./kernel/control-policy.js";
+import { previewUpgrade } from "./kernel/upgrade.js";
 import { resolveActor, bindSession, readBindings } from "./kernel/sessions.js";
 import { readState, inspectStore } from "./kernel/store.js";
 import { getTask, currentContract } from "./kernel/policy.js";
@@ -6,7 +8,7 @@ import { object, id, text, bool, invocationRule, metaRule, record } from "./kern
 import { commands } from "./cli/commands.js";
 import { requireThat, KernelError } from "./kernel/errors.js";
 import { loadSnapshot } from "./kernel/snapshots.js";
-import type { RepositoryContext, Meta, ActorSelector, Actor, Task, Snapshot } from "./kernel/types.js";
+import type { RepositoryContext, Meta, ActorSelector, Actor, Task, Snapshot, Claim } from "./kernel/types.js";
 
 export interface CommandEnvelope { meta: Omit<Meta, "actor"> & { actor: ActorSelector }; payload: unknown }
 export interface CommandResponse {
@@ -15,9 +17,9 @@ export interface CommandResponse {
 }
 const selectorRule = object({ host: text }, { instanceId: id, hostSessionId: text, newInstance: bool });
 const envelopeRule = object({ meta: object({ operationId: id, actor: selectorRule, invocation: invocationRule }), payload: () => {} });
-export function taskSummary(task: Task) {
+export function taskSummary(task: Task, claims: readonly Claim[] = []) {
   return { id: task.id, title: task.title, status: task.status, contract: currentContract(task), owner: task.owner,
-    assignments: Object.values(task.assignments), contributionIds: Object.keys(task.contributions),
+    control: controlView(task, claims), assignments: Object.values(task.assignments), contributionIds: Object.keys(task.contributions),
     evidenceIds: Object.values(task.evidence).sort((a, b) => a.sequence - b.sequence).slice(-20).map(e => e.id),
     checkSetIds: Object.keys(task.checks), deliveryIds: Object.keys(task.deliveries), userAcceptances: task.userAcceptances,
     relatedTo: task.relatedTo, legacySource: task.legacySource, workflow: task.workflow ?? null, diagnostics: task.diagnostics.slice(-20) };
@@ -33,6 +35,9 @@ export async function executeCommand(ctx: RepositoryContext, command: string, en
     requireThat(Object.hasOwn(commands, command), "COMMAND_UNKNOWN", "Unknown command; use --help");
     const entry = commands[command]!;
     entry.check(envelope.payload);
+    if (!["init", "store upgrade"].includes(command)) {
+      requireThat((await readState(ctx)).kernelSchemaVersion === 2, "STORE_UPGRADE_REQUIRED", "Schema 1 is read-only; use store preview-upgrade and explicitly authorize upgrade");
+    }
     if (meta.invocation.activation === "bound-followup") {
       const payload = record(envelope.payload);
       const taskId = payload.taskId ?? (payload.from ? record(payload.from).taskId : undefined);
@@ -42,7 +47,7 @@ export async function executeCommand(ctx: RepositoryContext, command: string, en
     let data = await entry.handler(ctx, meta, envelope.payload as never);
     if (command === "task create" || command === "debug open") {
       const task = data as Task;
-      await bindSession(ctx, meta, { taskId: task.id, assignmentId: null }); data = taskSummary(task);
+      await bindSession(ctx, meta, { taskId: task.id, assignmentId: null }); data = taskSummary(task, Object.values((await readState(ctx)).claims));
     }
     if (command === "snapshot capture") {
       const s = data as Snapshot;
@@ -64,14 +69,15 @@ export async function executeCommand(ctx: RepositoryContext, command: string, en
 }
 export async function executeReadCommand(ctx: RepositoryContext, command: string, input: { taskId?: string; sourceRoot?: string; resourceId?: string; limit?: number; after?: string }): Promise<CommandResponse> {
   let data: unknown;
-  if (["doctor", "validate"].includes(command)) data = await inspectStore(ctx);
+  if (command === "store preview-upgrade") data = await previewUpgrade(ctx);
+  else if (["doctor", "validate"].includes(command)) data = await inspectStore(ctx);
   else if (command === "snapshot show") {
     requireThat(input.resourceId, "ID_REQUIRED", "Specify --id"); data = await loadSnapshot(ctx, input.resourceId);
   } else if (command === "legacy inspect") {
     requireThat(input.sourceRoot, "SOURCE_REQUIRED", "Specify the exact legacy source root"); data = await inspectLegacy(input.sourceRoot);
   } else {
     const state = await readState(ctx);
-    if (command === "task show") { requireThat(input.taskId, "TASK_REQUIRED", "Specify --task"); data = taskSummary(getTask(state, input.taskId, false)); }
+    if (command === "task show") { requireThat(input.taskId, "TASK_REQUIRED", "Specify --task"); data = taskSummary(getTask(state, input.taskId, false), Object.values(state.claims)); }
     else if (["evidence show", "check show", "contribution show", "delivery show"].includes(command)) {
       requireThat(input.taskId && input.resourceId, "ID_REQUIRED", "Specify --task and --id"); id(input.resourceId);
       const task = getTask(state, input.taskId, false);
@@ -83,10 +89,10 @@ export async function executeReadCommand(ctx: RepositoryContext, command: string
       const limit = input.limit ?? 20;
       requireThat(Number.isSafeInteger(limit) && limit >= 1 && limit <= 100, "LIMIT_INVALID", "Page size must be between 1 and 100");
       if (input.after) id(input.after);
-      const tasks = Object.values(state.tasks).filter(t => !input.after || t.id > input.after).sort((a, b) => a.id < b.id ? -1 : 1);
+      const tasks = Object.values(state.tasks).filter(t => (command !== "orient" || t.status !== "cancelled") && (!input.after || t.id > input.after)).sort((a, b) => a.id < b.id ? -1 : 1);
       const page = tasks.slice(0, limit);
       data = { revision: state.revision, tasks: page.map(t => ({ id: t.id, title: t.title, status: t.status,
-        protocol: t.workflow?.protocol ?? null,
+        protocol: t.workflow?.protocol ?? null, control: controlView(t, Object.values(state.claims)),
         goal: currentContract(t).goal, contractVersion: currentContract(t).version, owner: t.owner, relatedTo: t.relatedTo })),
         nextAfter: tasks.length > limit ? page.at(-1)!.id : null };
     }

@@ -16,6 +16,7 @@ export function currentDocuments(task: Task): PlanningArtifact[] {
   });
 }
 export function assertExecution(task: Task): ExecutionAuthorization {
+  requireThat(!task.control?.paused, "EXECUTION_NOT_AUTHORIZED", "Execution was paused; record a fresh implementation request");
   const workflow = taskWorkflow(task), authorization = workflow.authorizations.at(-1);
   requireThat(authorization && !authorization.revoked && authorization.contractVersion === task.contracts.at(-1)!.version,
     "EXECUTION_NOT_AUTHORIZED", "Record an explicit implementation request for the current contract before acquiring business writes");

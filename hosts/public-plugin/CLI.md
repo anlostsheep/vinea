@@ -125,6 +125,150 @@ natural-language intent. It cannot intercept arbitrary host editor/shell writes.
 `entry=run`, an allowed grant or a successful claim is never independent proof
 of user consent.
 
+## User-directed task control (schema 2, Vinea 3.0)
+
+Users control the task; its owner and writers are replaceable. Control does not
+require the old owner's cooperation, a claim, business-write permission or valid
+planning artifacts. Corrupt authoritative state still fails closed.
+
+All five commands take `{taskId, contractVersion, expectedControlRevision,
+ownerEpoch, request:{userMessage,reference,action}, reason}`. Copy versions from
+the latest task view (initial control revision is zero). The request contains the
+actual user words and a retrievable reference; `action` matches the command.
+These are auditable caller declarations, not host authentication. A different
+instance ID is not a trusted identity and ordinary joining is not a control request.
+
+| Command / action | Behavior |
+| --- | --- |
+| `task takeover` / `takeover` | Caller accepts ownership and replaces the old owner's related work |
+| `task replace-executor` / `replace-executor` | Also takes `{fromInstanceId,to:Actor}`; replaces that actor's work, including unclaimed assignments; an unrelated owner stays |
+| `task pause` / `pause` | Revokes all execution authority, retaining the task and files |
+| `task cancel` / `cancel` | Pauses and records cancelled without requiring acceptance or creating delivery |
+| `task reopen` / `reopen` | Reopens cancelled work under the same ID with the caller as owner |
+
+All accept `continue`, `run` or `debug`, with `named-entry`/`named-request`,
+`analysisOnly:false`, `persist:true`. Fresh unbound sessions are supported.
+Planning/read-only entries, `activation:none` and `bound-followup` cannot supply
+new control authority. Existing owner-only `task suspend` remains compatible.
+
+Replacement preserves other collaborators' exact valid claims, epochs and
+authorization (1A). Revoked work cannot be reclaimed by the old actor or bypassed
+through the old handoff API. Reassignment to the same actor later is explicit,
+not a permanent identity ban. Ownership transfer does not grant business writes.
+
+Responses include historical `event`, `current` and `stillCurrent`. Replaying an
+old operation does not repeat it. If superseded, `stillCurrent:false` prevents the
+receipt from being mistaken for current ownership. Refresh on `CONTROL_CHANGED`.
+
+| Example | Task | Owner | Contract | Old A writer | Retained B writer |
+| --- | --- | --- | --- | --- | --- |
+| Before | T / active | A | 3 | valid | valid |
+| C replaces A | T / active | C | 3 | fenced; unknown directory held | unchanged |
+| User cancels | T / cancelled | C | 3 | still fenced | fenced/held |
+| D reopens | T / active | D | 4 | never revived | history retained; no automatic execution |
+
+Reopening (2B) appends a new round/contract without restoring approvals or tokens.
+Review and register current brief/plan when required, then record a fresh
+implementation request and claim. Reviewed unchanged document text may be reused;
+old artifact IDs cannot automatically authorize new work. Old open assignments
+become cancelled until explicitly reassigned. Prior evidence stays readable but
+cannot pass current-version acceptance. Delivered/archived work uses linked repair.
+
+Task control writes status, owner and control history/revocations; execution writes
+claims/epochs; the workflow writes contracts/planning/authorization. Bindings are
+disposable hints. `task-control-v1` does not replace `planning-authorization-v1`.
+
+For tasks that already have control history, legacy work handoff/takeover must use
+transferOwner:false. Transfer responsibility with an explicit task takeover request
+so it has current provenance and a control event. Even before that boundary, a legacy
+owner transfer cannot restore a recipient whose main execution was revoked.
+
+### Resuming replacement work
+
+Control may succeed while execution is blocked. Use public recovery tickets in
+`current.recoveries` with `work resume`, not a raw claim or old write token:
+`{taskId,recoveryId,contractVersion,request:{userMessage,reference,action:"resume"},
+mode,stopBasis,stopReference,snapshotId,baseCommit,abandonUncaptured}`.
+
+| mode | Preconditions and behavior |
+| --- | --- |
+| `existing` | Same directory and confirmed stop; inspect existing files, no reset/stash; null snapshotId/baseCommit, abandonUncaptured:false |
+| `snapshot` | Different clean worktree with matching baseline; source snapshot covers every granted path; supply snapshotId, null baseCommit, abandonUncaptured:false |
+| `baseline` | Different clean worktree at exact full HEAD baseCommit; user explicitly chooses abandonUncaptured:true, null snapshotId; same task, no claim to recover old uncaptured changes |
+
+Stop basis is `unknown`, `holder-release`, `host-stop-receipt` or
+`user-declared-stop`. Receipt/declaration require a nonempty stopReference;
+holder-release requires an already released source. Unknown is allowed only for
+isolated modes. Silence and timeout do not prove a stop. Do not select baseline
+mode for the user: it can omit valuable uncaptured changes. With no snapshot,
+offer confirmed-stop local inspection or an explicitly chosen isolated baseline,
+preserving the same task ID. Unknown source directories remain held. Task state
+does not terminate host processes or stop arbitrary shell/editor writes.
+
+After pause or cancellation/reopen, a fresh explicitly requested resume may use
+`recoveryId:null` plus `from:OccupancyRef`, copied from `control.recoverySources`
+in task show or continue. The continue view additionally exposes
+`occupiedWrites[].ref`; task show does not. The caller must hold current authority for that work.
+This creates a new ticket and operation; an aborted recoveryId or old operation
+cannot be revived. If an active ticket exists, use it instead. Plain claim cannot
+skip unresolved retained source work, even after fresh authorization.
+
+A source reference identifies the historical occupancy, not whoever currently uses
+that directory. If the source was released and reused, an existing ticket (or its
+recorded historical source) can still restore an immutable snapshot or use an
+explicitly selected baseline in isolation. It cannot resume existing files there,
+release the new occupant, or replace its claim. A subsequent takeover preserves the
+original source reference. Clearing a hold confirms stopping; it does not cancel
+an existing pending/reserved recovery ticket, which must still be resumed. Without
+such a ticket, a stopped and released workspace may use ordinary work claim when
+current authorization, assignment and other occupancy checks permit it. Other
+unresolved source holds can still require an explicit recovery choice.
+
+Failed restoration retains its reservation and partial files. Retry the identical
+resume only while current. Pause/cancel/replacement aborts it; reopening and fresh
+authorization cannot revive that operation. Restore writes and revocation share
+the store lock; a busy response is not evidence of successful stopping.
+
+Task summaries and continuation include recent control history, recovery tickets
+and nextActions. Cancelled tasks remain explicitly readable and in task list, but
+default orient omits them and continue does not bind to them. The authorized flag
+describes recorded authority; planning integrity, file state and tokens still need
+checking. Pending and reserved tickets receive different guidance; a fresh recovery
+is suggested only for actual unresolved source holds without a current ticket.
+Historical recoverySources alone do not require recovery. Source references used
+by the hints are available within the same control summary in both task show and
+continue. A hold may be cleared by its original holder with holder-release after
+stopping, or with actual stop evidence under the documented clear-hold rules.
+
+Missing implementation authority is recorded by the current owner using task
+authorize under run/debug, named-entry/named-request, after a real user implementation
+request and current planning checks. The continue entry cannot mint this authority;
+changing an entry label without that request is not permission. Missing progress
+cannot be fabricated from an unavailable agent's chat.
+
+### Explicit store upgrade
+
+New stores use schema 2. This CLI reads schema 1 but rejects ordinary mutations
+with STORE_UPGRADE_REQUIRED. Reads and installation never migrate. Use read-only
+`store preview-upgrade --json` for expectedRevision, expectedFingerprint and
+occupied directories. Then, only with explicit authorization, `store upgrade`
+takes `{expectedRevision,expectedFingerprint,request:{userMessage,reference,
+action:"upgrade"}}` under the control entry rules above.
+
+All writers/restorations/unknown holds must first be resolved with the pinned CLI
+and real stop evidence. A changed source rejects the old preview. Upgrade locks
+the store, saves exact source bytes in an immutable backup, publishes atomically
+and records an idempotent receipt. Publication failure leaves old state usable and
+the identical request retryable. There is no automatic rollback/downgrade; never
+overwrite later work with an old backup.
+
+Only active tasks receive initial control metadata. Historical delivered/archived
+records, artifacts, snapshots and existing authorization provenance remain intact;
+pre-protocol tasks do not gain a fabricated execution protocol. Old schema-1 CLIs
+reject new state. Coordinate client upgrades separately; never switch an active
+task's pinned CLI to bypass a gate. Old .vinea is not migrated by this operation.
+Fixture testing does not authorize a real-store upgrade or plugin installation.
+
 ## Transfers and Snapshots
 
 `work handoff` payload:

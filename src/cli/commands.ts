@@ -1,3 +1,6 @@
+import { takeOverTask, replaceExecutor, pauseTask, cancelTask, reopenTask } from "../kernel/task-control.js";
+import { resumeWork } from "../kernel/resumption.js";
+import { upgradeStore } from "../kernel/upgrade.js";
 import { initializeStore } from "../kernel/store.js";
 import { createGoal, reviseContract } from "../kernel/contracts.js";
 import { addAssignment, claimWork, releaseWork } from "../kernel/ownership.js";
@@ -11,7 +14,7 @@ import { openRepair, recordDiagnostic } from "../kernel/debug.js";
 import { importLegacy } from "../legacy/import.js";
 import { recordPlanningDocument, authorizeExecution, suspendExecution } from "../kernel/workflow.js";
 import { object, id, text, bool, integer, nullable, array, one, actorRule, decisionRule, contractDraftRule,
-  tokenRule, environmentRule, checkRowRule, verificationRule, executionRequestRule, type Rule } from "../kernel/schema.js";
+  tokenRule, environmentRule, checkRowRule, verificationRule, executionRequestRule, controlRequestRule, type Rule } from "../kernel/schema.js";
 import type { RepositoryContext, Meta } from "../kernel/types.js";
 
 type Handler = (ctx: RepositoryContext, meta: Meta, payload: never) => unknown;
@@ -23,7 +26,17 @@ const evidence = { ...snapshot, result: one("pass", "fail", "unverified"), phase
 const assignment = object({ outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool });
 const contribution = object({ kind: one("analysis", "change"), assignmentId: nullable(id), contractVersion: integer,
   snapshotId: nullable(id), evidenceIds: array(id), summary: text, writeToken: nullable(tokenRule) });
+const control = { ...version, expectedControlRevision: integer, ownerEpoch: integer, request: controlRequestRule, reason: text };
 export const commands: Record<string, { handler: Handler; check: Rule }> = {
+  "task takeover": route(takeOverTask, object(control)),
+  "task replace-executor": route(replaceExecutor, object({ ...control, fromInstanceId: id, to: actorRule })),
+  "task pause": route(pauseTask, object(control)),
+  "task cancel": route(cancelTask, object(control)),
+  "task reopen": route(reopenTask, object(control)),
+  "store upgrade": route(upgradeStore, object({ expectedRevision: integer, expectedFingerprint: text, request: controlRequestRule })),
+  "work resume": route(resumeWork, object({ ...version, recoveryId: nullable(id), request: controlRequestRule,
+    mode: one("existing", "snapshot", "baseline"), stopBasis: one("unknown", "holder-release", "host-stop-receipt", "user-declared-stop"),
+    stopReference: nullable(text), snapshotId: nullable(id), baseCommit: nullable(text), abandonUncaptured: bool }, { from: ref })),
   "init": route(initializeStore, decisionRule),
   "task create": route(createGoal, object({ title: text, contract: contractDraftRule, decision: decisionRule }, { planningRequired: bool })),
   "task document": route(recordPlanningDocument, object({ ...version, ownerEpoch: integer, kind: one("brief", "plan"), content: text })),

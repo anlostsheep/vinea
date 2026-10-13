@@ -8,7 +8,7 @@ export function getTask(state: RepositoryState, taskId: string, mutable = true):
   id(taskId);
   const task = state.tasks[taskId];
   requireThat(task, "TASK_NOT_FOUND", "Task was not found");
-  if (mutable) requireThat(task.status === "active", "TASK_READ_ONLY", "Delivered and archived tasks are immutable; open a linked repair");
+  if (mutable) requireThat(task.status === "active", "TASK_READ_ONLY", "Task is not active; explicitly reopen cancelled work or open a linked repair for a delivery");
   return task;
 }
 export function currentContract(task: Task): Contract { return task.contracts[task.contracts.length - 1]!; }

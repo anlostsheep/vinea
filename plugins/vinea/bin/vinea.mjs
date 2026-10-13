@@ -70,6 +70,25 @@ function assertRepositoryState(value) {
   }
   for (const [key, task2] of Object.entries(state.tasks)) {
     if (key !== task2.id || !task2.contracts.length || task2.owner.epoch < 1) invalid(key, "invalid task identity");
+    if (state.kernelSchemaVersion === 1 && (task2.control || task2.status === "cancelled")) invalid(key, "task control requires schema 2");
+    if (task2.status === "cancelled" && !task2.control) invalid(key, "cancelled task has no control history");
+    if (task2.control) {
+      const c = task2.control;
+      if (c.round !== 1 + c.events.filter((e) => e.action === "reopen").length || c.events.length !== c.revision || c.events.some((e, i) => e.revision !== i + 1 || e.round < 1 || e.round > c.round || e.request.action !== e.action || e.assignmentIds.some((a) => a !== null && !task2.assignments[a])) || new Set(c.events.map((e) => e.id)).size !== c.events.length) invalid(key, "invalid control history");
+      if (new Set(c.revoked.map((r) => JSON.stringify([r.instanceId, r.assignmentId]))).size !== c.revoked.length || c.revoked.some((r) => r.assignmentId !== null && !task2.assignments[r.assignmentId])) invalid(key, "invalid work revocation");
+      const pending = /* @__PURE__ */ new Set();
+      for (const r of c.recoveries) {
+        if (r.from.taskId !== key || r.from.assignmentId !== r.assignmentId || r.assignmentId !== null && !task2.assignments[r.assignmentId] || r.contractVersion < 1 || r.contractVersion > task2.contracts.length) invalid(key, "invalid recovery ticket");
+        if (["pending", "reserved"].includes(r.state)) {
+          if (pending.has(r.assignmentId) || task2.status !== "active") invalid(key, "conflicting recovery ticket");
+          pending.add(r.assignmentId);
+        }
+        if (r.state === "reserved" && (!r.token || !r.operationId)) invalid(key, "missing recovery reservation");
+        if (r.token && (r.token.taskId !== key || r.token.assignmentId !== r.assignmentId || r.token.instanceId !== r.toInstanceId)) invalid(key, "invalid ticket token");
+      }
+      if (new Set(c.recoveries.map((r) => r.id)).size !== c.recoveries.length) invalid(key, "duplicate recovery ticket");
+      if (task2.status === "cancelled" && (!c.paused || task2.workflow?.authorizations.some((a) => !a.revoked))) invalid(key, "cancelled execution remains authorized");
+    }
     if (task2.relatedTo && !state.tasks[task2.relatedTo.taskId]?.deliveries[task2.relatedTo.deliveryId]) invalid(key, "missing original delivery");
     task2.contracts.forEach((c, i) => {
       if (c.version !== i + 1 || !c.acceptance.length || new Set(c.acceptance.map((a) => a.id)).size !== c.acceptance.length) invalid(key, "invalid contract history");
@@ -113,7 +132,7 @@ function assertRepositoryState(value) {
   }
   for (const [key, receipt] of Object.entries(state.operations)) if (key !== receipt.operationId || receipt.revision < 1 || receipt.revision > state.revision) invalid(key, "invalid operation receipt");
 }
-var text, id, integer, bool, one, nullable, array, object, map, pathRule, hash, actorRule, decisionRule, executionRequestRule, planningArtifactRule, authorizationRule, workflowRule, invocationRule, metaRule, grantRule, criterionRule, draftFields, contractDraftRule, contractRule, ownerRule, tokenFields, tokenRule, recoveryRule, claimRule, environmentRule, entryRule, snapshotRule, evidenceRule, checkRowRule, verificationRule, checkRule, contributionRule, diagnosticRule, assignmentRule, deliveryRule, taskRule, stateRule;
+var text, id, integer, bool, one, nullable, array, object, map, pathRule, hash, actorRule, decisionRule, controlRequestRule, executionRequestRule, planningArtifactRule, authorizationRule, workflowRule, invocationRule, metaRule, grantRule, criterionRule, draftFields, contractDraftRule, contractRule, ownerRule, tokenFields, tokenRule, recoveryRule, claimRule, environmentRule, entryRule, snapshotRule, evidenceRule, checkRowRule, verificationRule, checkRule, contributionRule, diagnosticRule, assignmentRule, deliveryRule, taskStatusRule, occupancyRule, controlEventRule, ticketRule, controlRule, taskRule, stateRule;
 var init_schema = __esm({
   "src/kernel/schema.ts"() {
     "use strict";
@@ -161,6 +180,7 @@ var init_schema = __esm({
     };
     actorRule = object({ instanceId: id, host: text }, { hostSessionId: text });
     decisionRule = object({ summary: text, reference: nullable(text) });
+    controlRequestRule = object({ userMessage: text, reference: text, action: one("takeover", "replace-executor", "pause", "cancel", "reopen", "resume", "upgrade") });
     executionRequestRule = object({ kind: one("implementation-request", "implementation-confirmation", "continuation", "plan-approval"), userMessage: text, reference: text, action: nullable(text) });
     planningArtifactRule = object({ id, kind: one("brief", "plan"), contractVersion: integer, path: pathRule, sha256: hash });
     authorizationRule = object({ id, contractVersion: integer, documentIds: array(id), request: executionRequestRule, actor: actorRule, recordedAt: text, revoked: nullable(decisionRule) });
@@ -188,8 +208,44 @@ var init_schema = __esm({
     diagnosticRule = object({ id, kind: one("fact", "hypothesis", "ruled-out", "change", "validation-gap"), text, evidenceIds: array(id), actor: actorRule, createdAt: text });
     assignmentRule = object({ id, outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool, status: one("open", "closed", "cancelled") });
     deliveryRule = object({ id, contractVersion: integer, snapshotId: id, checkSetIds: array(id), contributionIds: array(id), exclusions: array(text), owner: ownerRule, acceptedGaps: array(object({ acceptanceId: id, decision: decisionRule })), createdAt: text });
-    taskRule = object({ id, title: text, status: one("active", "delivered", "archived"), contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) }, { workflow: workflowRule });
-    stateRule = object({ kernelSchemaVersion: one(1), repositoryId: id, revision: integer, tasks: map(taskRule), claims: map(claimRule), epochs: map(integer, text), snapshots: map(snapshotRule), operations: map(object({ operationId: id, requestHash: hash, revision: integer, resourceIds: array(id) })) });
+    taskStatusRule = one("active", "delivered", "archived", "cancelled");
+    occupancyRule = object({ taskId: id, assignmentId: nullable(id), workspaceId: id, instanceId: id, epoch: integer });
+    controlEventRule = object({
+      id,
+      revision: integer,
+      round: integer,
+      action: one("takeover", "replace-executor", "pause", "cancel", "reopen"),
+      actor: actorRule,
+      request: controlRequestRule,
+      reason: text,
+      recordedAt: text,
+      previousOwner: ownerRule,
+      owner: ownerRule,
+      previousStatus: taskStatusRule,
+      status: taskStatusRule,
+      replacedInstanceId: nullable(id),
+      assignmentIds: array(nullable(id))
+    });
+    ticketRule = object({
+      id,
+      assignmentId: nullable(id),
+      from: occupancyRule,
+      toInstanceId: id,
+      contractVersion: integer,
+      state: one("pending", "reserved", "completed", "aborted"),
+      operationId: nullable(id),
+      token: nullable(tokenRule)
+    });
+    controlRule = object({
+      revision: integer,
+      round: integer,
+      paused: bool,
+      events: array(controlEventRule),
+      revoked: array(object({ instanceId: id, assignmentId: nullable(id) })),
+      recoveries: array(ticketRule)
+    });
+    taskRule = object({ id, title: text, status: taskStatusRule, contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) }, { workflow: workflowRule, control: controlRule });
+    stateRule = object({ kernelSchemaVersion: one(1, 2), repositoryId: id, revision: integer, tasks: map(taskRule), claims: map(claimRule), epochs: map(integer, text), snapshots: map(snapshotRule), operations: map(object({ operationId: id, requestHash: hash, revision: integer, resourceIds: array(id) })) });
   }
 });
 
@@ -330,6 +386,7 @@ function currentDocuments(task2) {
   });
 }
 function assertExecution(task2) {
+  requireThat(!task2.control?.paused, "EXECUTION_NOT_AUTHORIZED", "Execution was paused; record a fresh implementation request");
   const workflow = taskWorkflow(task2), authorization = workflow.authorizations.at(-1);
   requireThat(
     authorization && !authorization.revoked && authorization.contractVersion === task2.contracts.at(-1).version,
@@ -355,7 +412,7 @@ function getTask(state, taskId, mutable = true) {
   id(taskId);
   const task2 = state.tasks[taskId];
   requireThat(task2, "TASK_NOT_FOUND", "Task was not found");
-  if (mutable) requireThat(task2.status === "active", "TASK_READ_ONLY", "Delivered and archived tasks are immutable; open a linked repair");
+  if (mutable) requireThat(task2.status === "active", "TASK_READ_ONLY", "Task is not active; explicitly reopen cancelled work or open a linked repair for a delivery");
   return task2;
 }
 function currentContract(task2) {
@@ -405,6 +462,341 @@ var init_policy = __esm({
   }
 });
 
+// src/kernel/control-policy.ts
+function matchesOccupancy(claim, from) {
+  return !!claim && claim.taskId === from.taskId && claim.assignmentId === from.assignmentId && claim.workspaceId === from.workspaceId && claim.instanceId === from.instanceId && claim.epoch === from.epoch;
+}
+function newTaskControl() {
+  return { revision: 0, round: 1, paused: false, events: [], revoked: [], recoveries: [] };
+}
+function assertControlRequest(meta, request, action) {
+  controlRequestRule(request);
+  assertEntry(meta, null, "state-write");
+  requireThat(
+    ["run", "continue", "debug"].includes(meta.invocation.entry) && !meta.invocation.analysisOnly,
+    "ENTRY_SCOPE_DENIED",
+    "Task control requires an explicit run, continue or debug request"
+  );
+  requireThat(
+    ["named-entry", "named-request"].includes(meta.invocation.activation),
+    "CONTROL_REQUEST_REQUIRED",
+    "A bound follow-up cannot supply a new user control decision"
+  );
+  requireThat(request.action === action, "CONTROL_REQUEST_REQUIRED", "User control request names another action");
+}
+function assertActorWork(task2, instanceId, assignmentId) {
+  requireThat(
+    !task2.control?.revoked.some((r) => r.instanceId === instanceId && r.assignmentId === assignmentId),
+    "EXECUTOR_REPLACED",
+    "This work was revoked; inspect task control and obtain an explicit reassignment"
+  );
+}
+function controlView(task2, claims = []) {
+  const control2 = task2.control;
+  const authorization = task2.workflow?.authorizations.at(-1);
+  const authorized = task2.status === "active" && !control2?.paused && !!authorization && !authorization.revoked && authorization.contractVersion === currentContract(task2).version;
+  const recoveries = control2?.recoveries.filter((r) => ["pending", "reserved"].includes(r.state)) ?? [];
+  const taskClaims = claims.filter((c) => c.taskId === task2.id);
+  const holds = taskClaims.filter((c) => c.state === "unknown-writer-hold");
+  const currentSources = holds.map(({ taskId, assignmentId, workspaceId, instanceId, epoch }) => ({ taskId, assignmentId, workspaceId, instanceId, epoch }));
+  const recoverySources = [...new Map([...currentSources, ...(control2?.recoveries ?? []).filter((r) => r.state === "aborted").map((r) => r.from)].map((from) => [canonicalJson(from), from])).values()];
+  const needsFreshRecovery = holds.some((hold) => !recoveries.some((r) => r.assignmentId === hold.assignmentId) && !taskClaims.some((c) => c.assignmentId === hold.assignmentId && ["writer", "released", "restore-target"].includes(c.state) && c.epoch > hold.epoch));
+  const nextActions = task2.status === "cancelled" ? ["task reopen: requires an explicit user request; does not authorize implementation"] : task2.status !== "active" ? ["debug open: preserve the original delivery"] : [
+    "task takeover / task replace-executor: explicit user request; no previous owner cooperation needed",
+    ...!authorized ? ["Review current planning; after an explicit implementation request the current owner uses task authorize through run/debug with named-entry/named-request. continue cannot create execution authority"] : [],
+    ...recoveries.some((r) => r.state === "pending") ? ["work resume: use a pending recoveries[].id in this control summary; prove the source stopped, restore an isolated snapshot, or explicitly choose an isolated Git baseline"] : [],
+    ...recoveries.some((r) => r.state === "reserved") ? ["Retry the original work resume operation for the reserved recovery only while its authorization and contract remain current; do not create a new reservation"] : [],
+    ...needsFreshRecovery ? ["For unresolved retained work, use a fresh work resume with recoveryId:null and a relevant from reference in this control summary's recoverySources; old aborted operations remain invalid"] : [],
+    ...holds.length ? ["work clear-hold: only after actual stopping. The original holder may use holder-release; otherwise provide real stop evidence. Clearing a source hold does not cancel a pending/reserved recovery; without one, normal work claim rules still apply"] : [],
+    "task pause / task cancel: explicit user request; host process stopping is separate"
+  ];
+  return {
+    status: task2.status,
+    protocol: control2 ? "task-control-v1" : null,
+    revision: control2?.revision ?? null,
+    round: control2?.round ?? null,
+    paused: control2?.paused ?? false,
+    authorized,
+    executableCandidate: task2.status === "active" && authorized,
+    events: control2?.events.slice(-20) ?? [],
+    recoveries,
+    recoverySources,
+    nextActions
+  };
+}
+function verificationFence(task2, instanceId) {
+  const event = task2.control?.events.filter((e) => ["pause", "cancel", "reopen"].includes(e.action) || e.replacedInstanceId === instanceId).at(-1);
+  const authorization = task2.workflow?.authorizations.at(-1);
+  return JSON.stringify([task2.status, task2.control?.paused ?? false, authorization?.id ?? null, authorization?.revoked ?? null, event?.id ?? null]);
+}
+var init_control_policy = __esm({
+  "src/kernel/control-policy.ts"() {
+    "use strict";
+    init_errors();
+    init_policy();
+    init_schema();
+  }
+});
+
+// src/kernel/ownership.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+function executionKey(taskId, assignmentId) {
+  return JSON.stringify([taskId, assignmentId]);
+}
+function assertWorkspaceClaimable(state, workspaceId) {
+  requireThat(!state.claims[workspaceId] || state.claims[workspaceId].state === "released", "WORKSPACE_OCCUPIED", "Workspace is written, restoring, or held by an unknown writer");
+}
+async function assertCurrentToken(ctx, state, meta, token) {
+  tokenRule(token);
+  const claim = state.claims[ctx.workspaceId], task2 = getTask(state, token.taskId);
+  requireThat(
+    claim?.state === "writer" && token.workspaceId === ctx.workspaceId && claim.instanceId === meta.actor.instanceId && token.instanceId === claim.instanceId && token.epoch === claim.epoch && token.taskId === claim.taskId && token.assignmentId === claim.assignmentId && token.epoch === state.epochs[executionKey(token.taskId, token.assignmentId)],
+    "STALE_WRITE_TOKEN",
+    "Write ownership is absent, stale, held, or restoring"
+  );
+  assertActorWork(task2, meta.actor.instanceId, token.assignmentId);
+  assertContract(task2, token.contractVersion);
+  assertContract(task2, claim.contractVersion);
+  assertExecution(task2);
+  await validatePlanningArtifacts(ctx, task2);
+}
+async function assertWriteToken(ctx, state, meta, token) {
+  await assertCurrentToken(ctx, state, meta, token);
+  assertEntry(meta, getTask(state, token.taskId), "business-write");
+}
+async function addAssignment(ctx, meta, input) {
+  const result = await mutateState(ctx, meta, { command: "assignment.add", input }, async (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "delegate");
+    assertOwner(task2, meta, input.ownerEpoch);
+    await validatePlanningArtifacts(ctx, task2);
+    const assignment2 = { ...structuredClone(input.assignment), id: randomUUID3(), status: "open" };
+    task2.assignments[assignment2.id] = assignment2;
+    return [assignment2.id];
+  });
+  return (await readState(ctx)).tasks[input.taskId].assignments[result.resourceIds[0]];
+}
+async function claimWork(ctx, meta, input) {
+  const receipt = await mutateState(ctx, meta, { command: "work.claim", input, workspaceId: ctx.workspaceId }, async (state) => {
+    const task2 = getTask(state, input.taskId);
+    assertEntry(meta, task2, "business-write");
+    assertContract(task2, input.contractVersion);
+    await validatePlanningArtifacts(ctx, task2);
+    assertActorWork(task2, meta.actor.instanceId, input.assignmentId);
+    requireThat(
+      !task2.control?.recoveries.some((r) => r.assignmentId === input.assignmentId && ["pending", "reserved"].includes(r.state)),
+      "RECOVERY_REQUIRED",
+      "Use work resume with the current recovery ticket before claiming replacement work"
+    );
+    const assignment2 = input.assignmentId === null ? null : task2.assignments[input.assignmentId];
+    const previous = state.claims[ctx.workspaceId];
+    const key = executionKey(input.taskId, input.assignmentId);
+    const same = previous?.state === "writer" && previous.instanceId === meta.actor.instanceId && previous.taskId === input.taskId && previous.assignmentId === input.assignmentId && previous.epoch === state.epochs[key];
+    if (same && previous.contractVersion === input.contractVersion) return [ctx.workspaceId, String(previous.epoch)];
+    if (!same) assertWorkspaceClaimable(state, ctx.workspaceId);
+    const completedEpoch = Math.max(0, ...Object.values(state.claims).filter((c) => c.taskId === task2.id && c.assignmentId === input.assignmentId && ["writer", "released"].includes(c.state)).map((c) => c.epoch));
+    requireThat(
+      same || !Object.values(state.claims).some((c) => c.taskId === task2.id && c.assignmentId === input.assignmentId && c.state === "unknown-writer-hold" && c.epoch >= completedEpoch),
+      "RECOVERY_REQUIRED",
+      "Retained source work needs a fresh work resume decision; use its public occupancy reference, not a plain claim"
+    );
+    if (input.assignmentId !== null) requireThat(assignment2?.status === "open" && assignment2.businessWrite && (assignment2.assignee === null || assignment2.assignee === meta.actor.instanceId), "ASSIGNMENT_NOT_GRANTED", "Assignment is not granted to this writer");
+    else requireThat(same || task2.owner.instanceId === meta.actor.instanceId, "ASSIGNMENT_NOT_GRANTED", "Only the owner or current handed-off writer can claim unassigned implementation");
+    requireThat(!Object.values(state.claims).some((c) => c.workspaceId !== ctx.workspaceId && c.taskId === input.taskId && c.assignmentId === input.assignmentId && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "Execution is occupied in another workspace");
+    const epoch = (state.epochs[key] ?? 0) + 1;
+    state.epochs[key] = epoch;
+    state.claims[ctx.workspaceId] = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch, state: "writer", recovery: null };
+    return [ctx.workspaceId, String(epoch)];
+  });
+  const token = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch: Number(receipt.resourceIds[1]) };
+  await assertWriteToken(ctx, await readState(ctx), meta, token);
+  return token;
+}
+function toWriteToken(claim) {
+  const { taskId, assignmentId, workspaceId, instanceId, epoch, contractVersion } = claim;
+  return { taskId, assignmentId, workspaceId, instanceId, epoch, contractVersion };
+}
+async function releaseWork(ctx, meta, token) {
+  tokenRule(token);
+  await mutateState(ctx, meta, { command: "work.release", token }, (state) => {
+    assertEntry(meta, getTask(state, token.taskId, false), "state-write");
+    const claim = state.claims[ctx.workspaceId];
+    requireThat(
+      claim?.state === "writer" && claim.instanceId === meta.actor.instanceId && claim.instanceId === token.instanceId && token.workspaceId === ctx.workspaceId && claim.taskId === token.taskId && claim.assignmentId === token.assignmentId && claim.epoch === token.epoch,
+      "STALE_WRITE_TOKEN",
+      "Cannot release a different, held, or restoring writer"
+    );
+    state.claims[ctx.workspaceId] = { ...claim, state: "released", recovery: null };
+    return [ctx.workspaceId];
+  });
+}
+var init_ownership = __esm({
+  "src/kernel/ownership.ts"() {
+    "use strict";
+    init_control_policy();
+    init_errors();
+    init_store();
+    init_policy();
+    init_schema();
+    init_workflow_policy();
+    init_workflow();
+  }
+});
+
+// src/kernel/task-control.ts
+import { randomUUID as randomUUID4 } from "node:crypto";
+function revokeTaskExecution(ctx, state, task2, meta, decision) {
+  for (const authorization of task2.workflow?.authorizations ?? []) if (!authorization.revoked) authorization.revoked = structuredClone(decision);
+  if (task2.control) {
+    task2.control.paused = true;
+    for (const recovery of task2.control.recoveries) if (["pending", "reserved"].includes(recovery.state)) recovery.state = "aborted";
+  }
+  for (const claim of Object.values(state.claims).filter((c) => c.taskId === task2.id && ["writer", "restore-target"].includes(c.state))) {
+    const key = executionKey(task2.id, claim.assignmentId);
+    state.epochs[key] = (state.epochs[key] ?? claim.epoch) + 1;
+    state.claims[claim.workspaceId] = claim.instanceId === meta.actor.instanceId && claim.workspaceId === ctx.workspaceId ? { ...claim, state: "released", recovery: null } : { ...claim, state: "unknown-writer-hold" };
+  }
+}
+function replaceActor(state, task2, from, to) {
+  requireThat(from !== to.instanceId, "EXECUTOR_UNCHANGED", "Select a different receiving executor");
+  const control2 = task2.control;
+  const assignments = Object.values(task2.assignments).filter((a) => a.assignee === from && a.status !== "closed");
+  const claims = Object.values(state.claims).filter((c) => c.taskId === task2.id && c.instanceId === from && (c.assignmentId === null ? task2.owner.instanceId === from || ["writer", "restore-target"].includes(c.state) : task2.assignments[c.assignmentId]?.assignee === from || task2.assignments[c.assignmentId]?.assignee === null && ["writer", "restore-target"].includes(c.state)) && !Object.values(state.claims).some((other) => other.taskId === task2.id && other.assignmentId === c.assignmentId && other.instanceId !== from && ["writer", "restore-target"].includes(other.state)));
+  const inherited = control2.recoveries.filter((r) => r.toInstanceId === from && ["pending", "reserved"].includes(r.state));
+  const work = /* @__PURE__ */ new Set([...assignments.map((a) => a.id), ...inherited.map((r) => r.assignmentId)]);
+  for (const claim of claims) work.add(claim.assignmentId);
+  if (task2.owner.instanceId === from) work.add(null);
+  requireThat(work.size, "EXECUTOR_NOT_ASSIGNED", "This actor has no current responsibility in the task");
+  for (const assignmentId of work) {
+    if (!control2.revoked.some((r) => r.instanceId === from && r.assignmentId === assignmentId)) control2.revoked.push({ instanceId: from, assignmentId });
+    control2.revoked = control2.revoked.filter((r) => r.instanceId !== to.instanceId || r.assignmentId !== assignmentId);
+    for (const ticket of control2.recoveries) if (ticket.assignmentId === assignmentId && ["pending", "reserved"].includes(ticket.state)) ticket.state = "aborted";
+    if (Object.values(state.claims).some((c) => c.taskId === task2.id && c.assignmentId === assignmentId && c.instanceId !== from && ["writer", "restore-target"].includes(c.state))) continue;
+    const key = executionKey(task2.id, assignmentId);
+    state.epochs[key] = (state.epochs[key] ?? 0) + 1;
+    const inheritedSource = inherited.find((r) => r.assignmentId === assignmentId)?.from;
+    const ownClaim = claims.filter((c) => c.assignmentId === assignmentId).sort((a, b) => b.epoch - a.epoch)[0];
+    const inheritedClaim = inheritedSource && matchesOccupancy(state.claims[inheritedSource.workspaceId], inheritedSource) ? state.claims[inheritedSource.workspaceId] : void 0;
+    const claim = ownClaim ?? inheritedClaim;
+    const source = ownClaim ? {
+      taskId: ownClaim.taskId,
+      assignmentId,
+      workspaceId: ownClaim.workspaceId,
+      instanceId: ownClaim.instanceId,
+      epoch: ownClaim.epoch
+    } : inheritedSource;
+    if (source) {
+      if (claim && ["writer", "restore-target"].includes(claim.state)) state.claims[claim.workspaceId] = { ...claim, state: "unknown-writer-hold" };
+      control2.recoveries.push({
+        id: randomUUID4(),
+        assignmentId,
+        from: { ...source },
+        toInstanceId: to.instanceId,
+        contractVersion: currentContract(task2).version,
+        state: "pending",
+        operationId: null,
+        token: null
+      });
+    }
+    if (assignmentId !== null) {
+      const assignment2 = task2.assignments[assignmentId];
+      assignment2.assignee = to.instanceId;
+      if (assignment2.status === "cancelled") assignment2.status = "open";
+    }
+  }
+  if (task2.owner.instanceId === from) task2.owner = { instanceId: to.instanceId, epoch: task2.owner.epoch + 1 };
+  return [...work];
+}
+async function controlTask(ctx, meta, input, action, target) {
+  assertControlRequest(meta, input.request, action);
+  text(input.reason);
+  integer(input.expectedControlRevision);
+  integer(input.ownerEpoch);
+  if (target) actorRule(target.to);
+  const receipt = await mutateState(ctx, meta, { command: `task.${action}`, input, target: target ?? null }, (state) => {
+    const task3 = getTask(state, input.taskId, false);
+    assertContract(task3, input.contractVersion);
+    requireThat(task3.control, "TASK_CONTROL_REQUIRED", "Upgrade this store explicitly before task control");
+    requireThat(
+      task3.control.revision === input.expectedControlRevision && task3.owner.epoch === input.ownerEpoch,
+      "CONTROL_CHANGED",
+      "Task control changed; refresh task show before deciding again"
+    );
+    requireThat(
+      action === "reopen" ? task3.status === "cancelled" : task3.status === "active",
+      "TASK_READ_ONLY",
+      "Only cancelled tasks can reopen; delivered history uses a linked repair"
+    );
+    const control2 = task3.control, previousOwner = { ...task3.owner }, previousStatus = task3.status;
+    let assignments = [], replaced = null;
+    if (action === "takeover" || action === "replace-executor") {
+      const from = action === "takeover" ? task3.owner.instanceId : target.from;
+      const to = action === "takeover" ? meta.actor : target.to;
+      replaced = from;
+      assignments = replaceActor(state, task3, from, to);
+    } else {
+      revokeTaskExecution(ctx, state, task3, meta, { summary: input.reason, reference: input.request.reference });
+      if (action === "cancel") task3.status = "cancelled";
+      if (action === "reopen") {
+        task3.status = "active";
+        control2.round++;
+        task3.owner = { instanceId: meta.actor.instanceId, epoch: task3.owner.epoch + 1 };
+        const contract = currentContract(task3);
+        task3.contracts.push({
+          ...structuredClone(contract),
+          version: contract.version + 1,
+          decision: { summary: `Reopened: ${input.reason}`, reference: input.request.reference }
+        });
+        for (const assignment2 of Object.values(task3.assignments)) if (assignment2.status === "open") assignment2.status = "cancelled";
+        control2.revoked = control2.revoked.filter((r) => r.instanceId !== meta.actor.instanceId || r.assignmentId !== null);
+      }
+    }
+    const event2 = {
+      id: meta.operationId,
+      revision: ++control2.revision,
+      round: control2.round,
+      action,
+      actor: structuredClone(meta.actor),
+      request: structuredClone(input.request),
+      reason: input.reason,
+      recordedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      previousOwner,
+      owner: { ...task3.owner },
+      previousStatus,
+      status: task3.status,
+      replacedInstanceId: replaced,
+      assignmentIds: assignments
+    };
+    control2.events.push(event2);
+    return [task3.id, event2.id];
+  });
+  const currentState = await readState(ctx), task2 = getTask(currentState, input.taskId, false);
+  const event = task2.control.events.find((e) => e.id === receipt.resourceIds[1]);
+  return {
+    taskId: task2.id,
+    event,
+    current: { owner: task2.owner, contractVersion: currentContract(task2).version, ...controlView(task2, Object.values(currentState.claims)) },
+    stillCurrent: task2.control.revision === event.revision && task2.owner.epoch === event.owner.epoch && task2.status === event.status
+  };
+}
+var takeOverTask, replaceExecutor, pauseTask, cancelTask, reopenTask;
+var init_task_control = __esm({
+  "src/kernel/task-control.ts"() {
+    "use strict";
+    init_errors();
+    init_policy();
+    init_control_policy();
+    init_schema();
+    init_store();
+    init_ownership();
+    takeOverTask = (ctx, meta, input) => controlTask(ctx, meta, input, "takeover");
+    replaceExecutor = (ctx, meta, input) => controlTask(ctx, meta, input, "replace-executor", { from: input.fromInstanceId, to: input.to });
+    pauseTask = (ctx, meta, input) => controlTask(ctx, meta, input, "pause");
+    cancelTask = (ctx, meta, input) => controlTask(ctx, meta, input, "cancel");
+    reopenTask = (ctx, meta, input) => controlTask(ctx, meta, input, "reopen");
+  }
+});
+
 // src/kernel/workflow.ts
 var workflow_exports = {};
 __export(workflow_exports, {
@@ -413,7 +805,7 @@ __export(workflow_exports, {
   suspendExecution: () => suspendExecution,
   validatePlanningArtifacts: () => validatePlanningArtifacts
 });
-import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash2, randomUUID as randomUUID5 } from "node:crypto";
 async function validatePlanningArtifacts(ctx, task2) {
   for (const document of currentDocuments(task2)) {
     try {
@@ -447,7 +839,7 @@ async function recordPlanningDocument(ctx, meta, input) {
     const sha256 = createHash2("sha256").update(input.content).digest("hex");
     const path = `tasks/${task2.id}/planning/v${input.contractVersion}/${input.kind}-${sha256}.md`;
     await writeManaged(ctx, meta, path, input.content, true);
-    const document = { id: randomUUID3(), kind: input.kind, contractVersion: input.contractVersion, path, sha256 };
+    const document = { id: randomUUID5(), kind: input.kind, contractVersion: input.contractVersion, path, sha256 };
     workflow.documents.push(document);
     return [document.id];
   });
@@ -491,7 +883,7 @@ async function authorizeExecution(ctx, meta, input) {
       "A revoked or superseded approval cannot authorize a new execution attempt"
     );
     const authorization2 = {
-      id: randomUUID3(),
+      id: randomUUID5(),
       contractVersion: input.contractVersion,
       documentIds: documents.map((d) => d.id),
       request: structuredClone(input.request),
@@ -500,6 +892,7 @@ async function authorizeExecution(ctx, meta, input) {
       revoked: null
     };
     workflow.authorizations.push(authorization2);
+    if (task3.control) task3.control.paused = false;
     assertExecution(task3);
     return [authorization2.id];
   });
@@ -518,15 +911,10 @@ async function suspendExecution(ctx, meta, input) {
     assertEntry(meta, task2, "state-write");
     assertOwner(task2, meta, input.ownerEpoch);
     assertContract(task2, input.contractVersion);
-    const workflow = taskWorkflow(task2);
-    for (const authorization of workflow.authorizations) if (!authorization.revoked) authorization.revoked = structuredClone(input.decision);
-    for (const claim of Object.values(state.claims).filter((c) => c.taskId === task2.id && ["writer", "restore-target"].includes(c.state))) {
-      const key = JSON.stringify([claim.taskId, claim.assignmentId]);
-      state.epochs[key] = (state.epochs[key] ?? claim.epoch) + 1;
-      state.claims[claim.workspaceId] = claim.instanceId === meta.actor.instanceId && claim.workspaceId === ctx.workspaceId ? { ...claim, state: "released", recovery: null } : { ...claim, state: "unknown-writer-hold" };
-    }
+    taskWorkflow(task2);
+    revokeTaskExecution(ctx, state, task2, meta, input.decision);
     task2.diagnostics.push({
-      id: randomUUID3(),
+      id: randomUUID5(),
       kind: "change",
       text: `Execution suspended: ${input.decision.summary}; inspect business changes separately`,
       evidenceIds: [],
@@ -539,103 +927,13 @@ async function suspendExecution(ctx, meta, input) {
 var init_workflow = __esm({
   "src/kernel/workflow.ts"() {
     "use strict";
+    init_task_control();
     init_policy();
     init_workflow_policy();
     init_store();
     init_io();
     init_schema();
     init_errors();
-  }
-});
-
-// src/kernel/ownership.ts
-import { randomUUID as randomUUID4 } from "node:crypto";
-function executionKey(taskId, assignmentId) {
-  return JSON.stringify([taskId, assignmentId]);
-}
-function assertWorkspaceClaimable(state, workspaceId) {
-  requireThat(!state.claims[workspaceId] || state.claims[workspaceId].state === "released", "WORKSPACE_OCCUPIED", "Workspace is written, restoring, or held by an unknown writer");
-}
-async function assertCurrentToken(ctx, state, meta, token) {
-  tokenRule(token);
-  const claim = state.claims[ctx.workspaceId], task2 = getTask(state, token.taskId);
-  requireThat(
-    claim?.state === "writer" && token.workspaceId === ctx.workspaceId && claim.instanceId === meta.actor.instanceId && token.instanceId === claim.instanceId && token.epoch === claim.epoch && token.taskId === claim.taskId && token.assignmentId === claim.assignmentId && token.epoch === state.epochs[executionKey(token.taskId, token.assignmentId)],
-    "STALE_WRITE_TOKEN",
-    "Write ownership is absent, stale, held, or restoring"
-  );
-  assertContract(task2, token.contractVersion);
-  assertContract(task2, claim.contractVersion);
-  assertExecution(task2);
-  await validatePlanningArtifacts(ctx, task2);
-}
-async function assertWriteToken(ctx, state, meta, token) {
-  await assertCurrentToken(ctx, state, meta, token);
-  assertEntry(meta, getTask(state, token.taskId), "business-write");
-}
-async function addAssignment(ctx, meta, input) {
-  const result = await mutateState(ctx, meta, { command: "assignment.add", input }, async (state) => {
-    const task2 = getTask(state, input.taskId);
-    assertEntry(meta, task2, "delegate");
-    assertOwner(task2, meta, input.ownerEpoch);
-    await validatePlanningArtifacts(ctx, task2);
-    const assignment2 = { ...structuredClone(input.assignment), id: randomUUID4(), status: "open" };
-    task2.assignments[assignment2.id] = assignment2;
-    return [assignment2.id];
-  });
-  return (await readState(ctx)).tasks[input.taskId].assignments[result.resourceIds[0]];
-}
-async function claimWork(ctx, meta, input) {
-  const receipt = await mutateState(ctx, meta, { command: "work.claim", input, workspaceId: ctx.workspaceId }, async (state) => {
-    const task2 = getTask(state, input.taskId);
-    assertEntry(meta, task2, "business-write");
-    assertContract(task2, input.contractVersion);
-    await validatePlanningArtifacts(ctx, task2);
-    const assignment2 = input.assignmentId === null ? null : task2.assignments[input.assignmentId];
-    const previous = state.claims[ctx.workspaceId];
-    const key = executionKey(input.taskId, input.assignmentId);
-    const same = previous?.state === "writer" && previous.instanceId === meta.actor.instanceId && previous.taskId === input.taskId && previous.assignmentId === input.assignmentId && previous.epoch === state.epochs[key];
-    if (same && previous.contractVersion === input.contractVersion) return [ctx.workspaceId, String(previous.epoch)];
-    if (!same) assertWorkspaceClaimable(state, ctx.workspaceId);
-    if (input.assignmentId !== null) requireThat(assignment2?.status === "open" && assignment2.businessWrite && (assignment2.assignee === null || assignment2.assignee === meta.actor.instanceId), "ASSIGNMENT_NOT_GRANTED", "Assignment is not granted to this writer");
-    else requireThat(same || task2.owner.instanceId === meta.actor.instanceId, "ASSIGNMENT_NOT_GRANTED", "Only the owner or current handed-off writer can claim unassigned implementation");
-    requireThat(!Object.values(state.claims).some((c) => c.workspaceId !== ctx.workspaceId && c.taskId === input.taskId && c.assignmentId === input.assignmentId && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "Execution is occupied in another workspace");
-    const epoch = (state.epochs[key] ?? 0) + 1;
-    state.epochs[key] = epoch;
-    state.claims[ctx.workspaceId] = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch, state: "writer", recovery: null };
-    return [ctx.workspaceId, String(epoch)];
-  });
-  const token = { ...input, workspaceId: ctx.workspaceId, instanceId: meta.actor.instanceId, epoch: Number(receipt.resourceIds[1]) };
-  await assertWriteToken(ctx, await readState(ctx), meta, token);
-  return token;
-}
-function toWriteToken(claim) {
-  const { taskId, assignmentId, workspaceId, instanceId, epoch, contractVersion } = claim;
-  return { taskId, assignmentId, workspaceId, instanceId, epoch, contractVersion };
-}
-async function releaseWork(ctx, meta, token) {
-  tokenRule(token);
-  await mutateState(ctx, meta, { command: "work.release", token }, (state) => {
-    assertEntry(meta, getTask(state, token.taskId, false), "state-write");
-    const claim = state.claims[ctx.workspaceId];
-    requireThat(
-      claim?.state === "writer" && claim.instanceId === meta.actor.instanceId && claim.instanceId === token.instanceId && token.workspaceId === ctx.workspaceId && claim.taskId === token.taskId && claim.assignmentId === token.assignmentId && claim.epoch === token.epoch,
-      "STALE_WRITE_TOKEN",
-      "Cannot release a different, held, or restoring writer"
-    );
-    state.claims[ctx.workspaceId] = { ...claim, state: "released", recovery: null };
-    return [ctx.workspaceId];
-  });
-}
-var init_ownership = __esm({
-  "src/kernel/ownership.ts"() {
-    "use strict";
-    init_errors();
-    init_store();
-    init_policy();
-    init_schema();
-    init_workflow_policy();
-    init_workflow();
   }
 });
 
@@ -649,7 +947,7 @@ __export(snapshots_exports, {
   restoreSnapshot: () => restoreSnapshot,
   validateSnapshotContents: () => validateSnapshotContents
 });
-import { createHash as createHash3, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash3, randomUUID as randomUUID6 } from "node:crypto";
 import { lstat as lstat2, readFile as readFile2, mkdir as mkdir2, unlink as unlink2, chmod, open as open2, rename as rename2 } from "node:fs/promises";
 import { dirname as dirname2, join as join3 } from "node:path";
 function fingerprintSnapshot(baseCommit, scope, entries) {
@@ -712,7 +1010,7 @@ async function captureSnapshot(ctx, meta, input) {
   const first = await collect(ctx, scope, limits), second = await collect(ctx, scope, limits);
   requireThat(first.fingerprint === second.fingerprint, "SNAPSHOT_CHANGED", "Inputs changed during capture");
   const snapshot2 = {
-    id: randomUUID5(),
+    id: randomUUID6(),
     fingerprint: first.fingerprint,
     baseCommit: first.baseCommit,
     scope,
@@ -808,7 +1106,7 @@ async function restoreSnapshot(ctx, meta, input) {
       });
       else {
         await mkdir2(dirname2(file), { recursive: true });
-        const tmp = `${file}.${randomUUID5()}.vinea-restore`;
+        const tmp = `${file}.${randomUUID6()}.vinea-restore`;
         try {
           const handle = await open2(tmp, "wx", entry.mode === "100755" ? 493 : 420);
           try {
@@ -848,10 +1146,91 @@ var init_snapshots = __esm({
   }
 });
 
+// src/kernel/sessions.ts
+var sessions_exports = {};
+__export(sessions_exports, {
+  bindSession: () => bindSession,
+  readBindings: () => readBindings,
+  resolveActor: () => resolveActor
+});
+import { createHash as createHash4 } from "node:crypto";
+import { readdir } from "node:fs/promises";
+async function readBindings(ctx) {
+  let names;
+  try {
+    names = await readdir(await storagePath(ctx, "runtime/bindings"));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+  const out = [];
+  for (const name of names.sort()) {
+    requireThat(/^[a-f0-9]{64}\.json$/.test(name), "BINDING_INVALID", "Unexpected binding artifact");
+    const value = JSON.parse((await readManaged(ctx, `runtime/bindings/${name}`)).toString("utf8"));
+    bindingRule(value);
+    out.push(value);
+  }
+  return out;
+}
+async function resolveActor(ctx, selector) {
+  requireThat(typeof selector.host === "string" && !!selector.host.trim(), "ACTOR_RESOLUTION_REQUIRED", "Host is required");
+  requireThat(!(selector.newInstance && selector.instanceId), "ACTOR_IDENTITY_MISMATCH", "New and existing identities cannot be combined");
+  const all = await readBindings(ctx);
+  const matches = all.filter((b) => b.actor.host === selector.host && !!selector.hostSessionId && b.actor.hostSessionId === selector.hostSessionId);
+  const ids = new Set(matches.map((b) => b.actor.instanceId));
+  requireThat(ids.size <= 1, "ACTOR_IDENTITY_MISMATCH", "Host session has ambiguous instances");
+  if (selector.instanceId) {
+    id(selector.instanceId);
+    const previous = all.find((b) => b.actor.instanceId === selector.instanceId)?.actor;
+    requireThat(
+      !previous || previous.host === selector.host && (!selector.hostSessionId || !previous.hostSessionId || previous.hostSessionId === selector.hostSessionId),
+      "ACTOR_IDENTITY_MISMATCH",
+      "Instance host/session differs"
+    );
+    requireThat(matches.every((b) => b.actor.instanceId === selector.instanceId), "ACTOR_IDENTITY_MISMATCH", "Host session belongs to another instance");
+    const actor = {
+      ...previous ?? {},
+      instanceId: selector.instanceId,
+      host: selector.host,
+      ...selector.hostSessionId ? { hostSessionId: selector.hostSessionId } : {}
+    };
+    actorRule(actor);
+    return actor;
+  }
+  if (matches.length) return matches[0].actor;
+  if (selector.newInstance) return newActor(selector.host, selector.hostSessionId);
+  throw new KernelError("ACTOR_RESOLUTION_REQUIRED", "Reuse the echoed instance ID, resolve a real host session, or explicitly open a new instance");
+}
+async function bindSession(ctx, meta, input) {
+  const task2 = getTask(await readState(ctx), input.taskId, false);
+  requireThat(input.assignmentId === null || task2.assignments[input.assignmentId], "ASSIGNMENT_NOT_FOUND", "Assignment does not exist");
+  const binding = { actor: meta.actor, workspaceId: ctx.workspaceId, ...input };
+  bindingRule(binding);
+  if (meta.invocation.persist) {
+    assertEntry(meta, task2, "state-write");
+    const hash3 = createHash4("sha256").update(JSON.stringify([meta.actor.instanceId, ctx.workspaceId])).digest("hex");
+    await writeJson(ctx, meta, `runtime/bindings/${hash3}.json`, binding);
+  }
+  return binding;
+}
+var bindingRule;
+var init_sessions = __esm({
+  "src/kernel/sessions.ts"() {
+    "use strict";
+    init_errors();
+    init_schema();
+    init_policy();
+    init_repository();
+    init_store();
+    init_io();
+    bindingRule = object({ actor: actorRule, workspaceId: id, taskId: id, assignmentId: nullable(id) });
+  }
+});
+
 // src/kernel/store.ts
-import { mkdir as mkdir3, lstat as lstat3, rmdir, unlink as unlink3, readdir } from "node:fs/promises";
+import { mkdir as mkdir3, lstat as lstat3, rmdir, unlink as unlink3, readdir as readdir2 } from "node:fs/promises";
 import { join as join4 } from "node:path";
-import { createHash as createHash4, randomUUID as randomUUID6 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 async function initializeStore(ctx, meta, decision) {
   metaRule(meta);
@@ -868,8 +1247,8 @@ async function initializeStore(ctx, meta, decision) {
     return;
   }
   const state = {
-    kernelSchemaVersion: 1,
-    repositoryId: randomUUID6(),
+    kernelSchemaVersion: 2,
+    repositoryId: randomUUID7(),
     revision: 0,
     tasks: {},
     claims: {},
@@ -914,7 +1293,7 @@ async function withLock(ctx, meta, operation) {
     }
   }
   try {
-    await writeJson(ctx, meta, "runtime/store.lock/owner.json", { pid: process.pid, token: randomUUID6(), createdAt: (/* @__PURE__ */ new Date()).toISOString() });
+    await writeJson(ctx, meta, "runtime/store.lock/owner.json", { pid: process.pid, token: randomUUID7(), createdAt: (/* @__PURE__ */ new Date()).toISOString() });
     return await operation();
   } finally {
     await unlink3(join4(path, "owner.json")).catch((error) => {
@@ -928,9 +1307,11 @@ async function mutateState(ctx, meta, request, change) {
   assertPersistence(meta);
   if (meta.invocation.activation === "none") throw new KernelError("ACTIVATION_REQUIRED", "Explicit Vinea activation is required before any write");
   await readState(ctx);
-  const requestHash = createHash4("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex");
+  const requestHash = createHash5("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex");
   return withLock(ctx, meta, async () => {
-    const before = await readState(ctx), previous = before.operations[meta.operationId];
+    const before = await readState(ctx);
+    if (before.kernelSchemaVersion !== 2) throw new KernelError("STORE_UPGRADE_REQUIRED", "Schema 1 is read-only in this CLI; preview and explicitly authorize store upgrade");
+    const previous = before.operations[meta.operationId];
     if (previous) {
       if (previous.requestHash !== requestHash) throw new KernelError("OPERATION_ID_REUSED", "Operation payload or actor differs");
       return previous;
@@ -949,7 +1330,7 @@ async function lookupOperation(ctx, meta, request) {
   metaRule(meta);
   assertPersistence(meta);
   const previous = (await readState(ctx)).operations[meta.operationId];
-  if (previous && previous.requestHash !== createHash4("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex")) {
+  if (previous && previous.requestHash !== createHash5("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex")) {
     throw new KernelError("OPERATION_ID_REUSED", "Operation payload or actor differs");
   }
   return previous;
@@ -957,7 +1338,7 @@ async function lookupOperation(ctx, meta, request) {
 async function inspectLegacyCoexistence(ctx) {
   const root = await safePath(ctx.worktreeRoot, join4(ctx.worktreeRoot, ".vinea/tasks/active"));
   try {
-    for (const entry of await readdir(root, { withFileTypes: true })) {
+    for (const entry of await readdir2(root, { withFileTypes: true })) {
       if (entry.isSymbolicLink()) throw new KernelError("UNSAFE_PATH", "Legacy task directory is a symbolic link");
       if (!entry.isDirectory()) continue;
       const path = await safePath(ctx.worktreeRoot, join4(root, entry.name, "task.json"));
@@ -1046,7 +1427,7 @@ async function inspectStore(ctx) {
     issues.push({ code: "BINDING_INVALID", path: "runtime/bindings", message: "Binding data is invalid; durable ownership was not changed" });
   }
   try {
-    const entries = await readdir(await storagePath(ctx, "runtime/store.lock"));
+    const entries = await readdir2(await storagePath(ctx, "runtime/store.lock"));
     if (status === "ready") status = "locked";
     issues.push({ code: "STORE_LOCKED", path: "runtime/store.lock", message: `Lock present (${entries.length} files); inspect the owner before manual recovery` });
   } catch (error) {
@@ -1064,87 +1445,6 @@ var init_store = __esm({
   }
 });
 
-// src/kernel/sessions.ts
-var sessions_exports = {};
-__export(sessions_exports, {
-  bindSession: () => bindSession,
-  readBindings: () => readBindings,
-  resolveActor: () => resolveActor
-});
-import { createHash as createHash5 } from "node:crypto";
-import { readdir as readdir2 } from "node:fs/promises";
-async function readBindings(ctx) {
-  let names;
-  try {
-    names = await readdir2(await storagePath(ctx, "runtime/bindings"));
-  } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
-  const out = [];
-  for (const name of names.sort()) {
-    requireThat(/^[a-f0-9]{64}\.json$/.test(name), "BINDING_INVALID", "Unexpected binding artifact");
-    const value = JSON.parse((await readManaged(ctx, `runtime/bindings/${name}`)).toString("utf8"));
-    bindingRule(value);
-    out.push(value);
-  }
-  return out;
-}
-async function resolveActor(ctx, selector) {
-  requireThat(typeof selector.host === "string" && !!selector.host.trim(), "ACTOR_RESOLUTION_REQUIRED", "Host is required");
-  requireThat(!(selector.newInstance && selector.instanceId), "ACTOR_IDENTITY_MISMATCH", "New and existing identities cannot be combined");
-  const all = await readBindings(ctx);
-  const matches = all.filter((b) => b.actor.host === selector.host && !!selector.hostSessionId && b.actor.hostSessionId === selector.hostSessionId);
-  const ids = new Set(matches.map((b) => b.actor.instanceId));
-  requireThat(ids.size <= 1, "ACTOR_IDENTITY_MISMATCH", "Host session has ambiguous instances");
-  if (selector.instanceId) {
-    id(selector.instanceId);
-    const previous = all.find((b) => b.actor.instanceId === selector.instanceId)?.actor;
-    requireThat(
-      !previous || previous.host === selector.host && (!selector.hostSessionId || !previous.hostSessionId || previous.hostSessionId === selector.hostSessionId),
-      "ACTOR_IDENTITY_MISMATCH",
-      "Instance host/session differs"
-    );
-    requireThat(matches.every((b) => b.actor.instanceId === selector.instanceId), "ACTOR_IDENTITY_MISMATCH", "Host session belongs to another instance");
-    const actor = {
-      ...previous ?? {},
-      instanceId: selector.instanceId,
-      host: selector.host,
-      ...selector.hostSessionId ? { hostSessionId: selector.hostSessionId } : {}
-    };
-    actorRule(actor);
-    return actor;
-  }
-  if (matches.length) return matches[0].actor;
-  if (selector.newInstance) return newActor(selector.host, selector.hostSessionId);
-  throw new KernelError("ACTOR_RESOLUTION_REQUIRED", "Reuse the echoed instance ID, resolve a real host session, or explicitly open a new instance");
-}
-async function bindSession(ctx, meta, input) {
-  const task2 = getTask(await readState(ctx), input.taskId, false);
-  requireThat(input.assignmentId === null || task2.assignments[input.assignmentId], "ASSIGNMENT_NOT_FOUND", "Assignment does not exist");
-  const binding = { actor: meta.actor, workspaceId: ctx.workspaceId, ...input };
-  bindingRule(binding);
-  if (meta.invocation.persist) {
-    assertEntry(meta, task2, "state-write");
-    const hash3 = createHash5("sha256").update(JSON.stringify([meta.actor.instanceId, ctx.workspaceId])).digest("hex");
-    await writeJson(ctx, meta, `runtime/bindings/${hash3}.json`, binding);
-  }
-  return binding;
-}
-var bindingRule;
-var init_sessions = __esm({
-  "src/kernel/sessions.ts"() {
-    "use strict";
-    init_errors();
-    init_schema();
-    init_policy();
-    init_repository();
-    init_store();
-    init_io();
-    bindingRule = object({ actor: actorRule, workspaceId: id, taskId: id, assignmentId: nullable(id) });
-  }
-});
-
 // src/cli.ts
 init_repository();
 init_errors();
@@ -1153,6 +1453,61 @@ import { parseArgs } from "node:util";
 import { readFile as readFile4 } from "node:fs/promises";
 import { resolve as resolve4 } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// src/application.ts
+init_control_policy();
+
+// src/kernel/upgrade.ts
+init_errors();
+init_control_policy();
+init_schema();
+init_store();
+init_io();
+import { createHash as createHash6 } from "node:crypto";
+var digest = (bytes) => createHash6("sha256").update(bytes).digest("hex");
+async function previewUpgrade(ctx) {
+  const state = await readState(ctx);
+  const bytes = await readManaged(ctx, "tasks/state.json");
+  requireThat(canonicalJson(JSON.parse(bytes.toString())) === canonicalJson(state), "UPGRADE_SOURCE_CHANGED", "Refresh the upgrade preview");
+  const occupied = Object.values(state.claims).filter((c) => c.state !== "released").map((c) => ({ workspaceId: c.workspaceId, state: c.state }));
+  return {
+    from: state.kernelSchemaVersion,
+    to: 2,
+    expectedRevision: state.revision,
+    expectedFingerprint: digest(bytes),
+    occupied,
+    ready: state.kernelSchemaVersion === 1 && occupied.length === 0,
+    nextAction: "Explicit store upgrade after all writers and holds are resolved; never switch an active task's pinned CLI"
+  };
+}
+async function upgradeStore(ctx, meta, input) {
+  assertControlRequest(meta, input.request, "upgrade");
+  const requestHash = digest(canonicalJson({ command: "store.upgrade", input, actor: meta.actor, invocation: meta.invocation }));
+  return withLock(ctx, meta, async () => {
+    const state = await readState(ctx), previous = state.operations[meta.operationId];
+    if (previous) {
+      requireThat(previous.requestHash === requestHash, "OPERATION_ID_REUSED", "Upgrade operation differs");
+      return { schemaVersion: state.kernelSchemaVersion, backup: `backups/schema-1-${previous.resourceIds[0]}.json`, replayed: true };
+    }
+    requireThat(state.kernelSchemaVersion === 1, "STORE_ALREADY_UPGRADED", "Schema 2 is already installed; no downgrade is available");
+    const bytes = await readManaged(ctx, "tasks/state.json");
+    requireThat(
+      state.revision === input.expectedRevision && digest(bytes) === input.expectedFingerprint,
+      "UPGRADE_SOURCE_CHANGED",
+      "State changed since the preview; inspect it again"
+    );
+    requireThat(Object.values(state.claims).every((c) => c.state === "released"), "WORKSPACE_OCCUPIED", "Resolve all writers, restorations and holds before upgrading");
+    const backup = `backups/schema-1-${input.expectedFingerprint}.json`;
+    await writeManaged(ctx, meta, backup, bytes, true);
+    state.kernelSchemaVersion = 2;
+    for (const task2 of Object.values(state.tasks)) if (task2.status === "active") task2.control = newTaskControl();
+    state.revision++;
+    state.operations[meta.operationId] = { operationId: meta.operationId, requestHash, revision: state.revision, resourceIds: [input.expectedFingerprint] };
+    assertRepositoryState(state);
+    await writeJson(ctx, meta, "tasks/state.json", state);
+    return { schemaVersion: 2, backup, replayed: false };
+  });
+}
 
 // src/application.ts
 init_sessions();
@@ -1164,7 +1519,7 @@ init_io();
 init_schema();
 import { readdir as readdir3, readFile as readFile3, lstat as lstat4 } from "node:fs/promises";
 import { join as join5, resolve as resolve3, relative as relative2 } from "node:path";
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 function issueCode(error) {
   const code = error?.code;
   if (typeof code === "string" && /^[A-Z_]+$/.test(code)) return code;
@@ -1214,7 +1569,7 @@ async function inspectLegacy(sourceRoot) {
           if (pending.size) throw new Error("LEGACY_PENDING_MUTATION");
           records.push({
             path: directory,
-            fingerprint: createHash6("sha256").update(bytes).digest("hex"),
+            fingerprint: createHash7("sha256").update(bytes).digest("hex"),
             originalId: task2.id,
             originalStatus: task2.status,
             title: task2.title,
@@ -1247,12 +1602,158 @@ async function inspectLegacy(sourceRoot) {
   } catch (error) {
     issues.push({ path: root, code: issueCode(error) });
   }
-  const fingerprints = [...files].sort(([a], [b]) => a.localeCompare(b)).map(([path, bytes]) => [path, createHash6("sha256").update(bytes).digest("hex")]);
-  return { records, fingerprint: createHash6("sha256").update(canonicalJson(fingerprints)).digest("hex"), issues };
+  const fingerprints = [...files].sort(([a], [b]) => a.localeCompare(b)).map(([path, bytes]) => [path, createHash7("sha256").update(bytes).digest("hex")]);
+  return { records, fingerprint: createHash7("sha256").update(canonicalJson(fingerprints)).digest("hex"), issues };
 }
 
 // src/application.ts
 init_schema();
+
+// src/cli/commands.ts
+init_task_control();
+
+// src/kernel/resumption.ts
+init_errors();
+init_control_policy();
+init_policy();
+init_store();
+init_ownership();
+init_snapshots();
+init_workflow();
+init_schema();
+init_repository();
+import { createHash as createHash8, randomUUID as randomUUID8 } from "node:crypto";
+async function resumeWork(ctx, meta, input) {
+  assertControlRequest(meta, input.request, "resume");
+  requireThat(
+    input.recoveryId === null ? !!input.from : input.from === void 0,
+    "RECOVERY_SOURCE_REQUIRED",
+    "Select either an existing recoveryId or null recoveryId with an explicit source reference"
+  );
+  const receipt = await mutateState(ctx, meta, { command: "work.resume", input, workspaceId: ctx.workspaceId }, async (state2) => {
+    const task3 = getTask(state2, input.taskId);
+    assertEntry(meta, task3, "business-write");
+    assertContract(task3, input.contractVersion);
+    await validatePlanningArtifacts(ctx, task3);
+    let ticket2 = task3.control?.recoveries.find((r) => r.id === input.recoveryId);
+    if (input.recoveryId === null) {
+      const from = input.from, source2 = state2.claims[from.workspaceId];
+      requireThat(task3.control && from.taskId === task3.id, "RECOVERY_SOURCE_REQUIRED", "Source must belong to this task");
+      const historical = task3.control.recoveries.some((r) => canonicalJson(r.from) === canonicalJson(from));
+      requireThat(
+        matchesOccupancy(source2, from) ? ["unknown-writer-hold", "released"].includes(source2.state) : historical,
+        "OCCUPANCY_CHANGED",
+        "Source is not a retained occupancy or a recorded historical recovery source"
+      );
+      requireThat(
+        !task3.control.recoveries.some((r) => r.assignmentId === from.assignmentId && ["pending", "reserved"].includes(r.state)),
+        "RECOVERY_REQUIRED",
+        "Use the existing current recovery ticket instead of replacing it implicitly"
+      );
+      ticket2 = {
+        id: randomUUID8(),
+        assignmentId: from.assignmentId,
+        from: { ...from },
+        toInstanceId: meta.actor.instanceId,
+        contractVersion: input.contractVersion,
+        state: "pending",
+        operationId: null,
+        token: null
+      };
+      task3.control.recoveries.push(ticket2);
+    }
+    requireThat(
+      ticket2?.state === "pending" && ticket2.toInstanceId === meta.actor.instanceId,
+      "RECOVERY_ABORTED",
+      "Recovery ticket was consumed, revoked or assigned to another executor"
+    );
+    assertActorWork(task3, meta.actor.instanceId, ticket2.assignmentId);
+    requireThat(
+      ticket2.assignmentId === null ? input.recoveryId !== null || task3.owner.instanceId === meta.actor.instanceId : task3.assignments[ticket2.assignmentId]?.businessWrite && task3.assignments[ticket2.assignmentId]?.status === "open" && [null, meta.actor.instanceId].includes(task3.assignments[ticket2.assignmentId].assignee),
+      "ASSIGNMENT_NOT_GRANTED",
+      "Recovery is no longer assigned to this executor"
+    );
+    const source = state2.claims[ticket2.from.workspaceId];
+    const sameSource = matchesOccupancy(source, ticket2.from);
+    requireThat(!sameSource || ["unknown-writer-hold", "released"].includes(source.state), "OCCUPANCY_CHANGED", "Original source is still active");
+    const isolated = ticket2.from.workspaceId !== ctx.workspaceId;
+    if (input.stopBasis === "host-stop-receipt" || input.stopBasis === "user-declared-stop") {
+      requireThat(input.stopReference?.trim(), "STOP_EVIDENCE_REQUIRED", "Identify the actual host receipt or user stop declaration");
+    }
+    if (input.stopBasis === "holder-release") requireThat(sameSource && source.state === "released", "STOP_EVIDENCE_REQUIRED", "Holder release does not describe the current source");
+    if (input.mode === "existing") {
+      requireThat(sameSource, "OCCUPANCY_CHANGED", "The source directory was reused; select isolated snapshot or baseline recovery without touching its new occupant");
+      requireThat(
+        sameSource && !isolated && input.stopBasis !== "unknown" && input.snapshotId === null && input.baseCommit === null && !input.abandonUncaptured,
+        "STOP_EVIDENCE_REQUIRED",
+        "Existing files need a confirmed stopped source in this workspace"
+      );
+    } else {
+      requireThat(isolated, "ISOLATED_RECOVERY_REQUIRED", "Snapshot or baseline continuation needs another physical worktree");
+      assertWorkspaceClaimable(state2, ctx.workspaceId);
+      requireThat(!await gitOutput(ctx.worktreeRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]), "RECOVERY_CONFLICT", "Target has unconfirmed changes");
+      const base = (await gitOutput(ctx.worktreeRoot, ["rev-parse", "--verify", "HEAD"])).trim();
+      if (input.mode === "snapshot") {
+        requireThat(input.snapshotId && !input.abandonUncaptured && input.baseCommit === null, "SNAPSHOT_UNAVAILABLE", "Select a complete recovery snapshot");
+        const snapshot2 = await loadSnapshot(ctx, input.snapshotId);
+        requireThat(snapshot2.workspaceId === ticket2.from.workspaceId && snapshot2.baseCommit === base, "SNAPSHOT_UNAVAILABLE", "Snapshot source or target baseline differs");
+        requireThat(
+          currentContract(task3).grant.allowedPaths.every((path) => snapshot2.scope.some((root) => path === root || path.startsWith(`${root}/`))),
+          "SNAPSHOT_UNAVAILABLE",
+          "Recovery snapshot must cover every granted business path"
+        );
+        snapshot2.entries.forEach((e) => assertWritablePath(task3, e.path));
+      } else {
+        requireThat(
+          input.mode === "baseline" && input.abandonUncaptured && input.snapshotId === null && input.baseCommit === base,
+          "BASELINE_DECISION_REQUIRED",
+          "Explicitly choose this exact clean Git commit and decline uncaptured source changes"
+        );
+      }
+    }
+    requireThat(!Object.values(state2.claims).some((c) => c.taskId === task3.id && c.assignmentId === ticket2.assignmentId && ["writer", "restore-target"].includes(c.state)), "WORKSPACE_OCCUPIED", "A current executor already exists");
+    const key = executionKey(task3.id, ticket2.assignmentId), epoch = (state2.epochs[key] ?? 0) + 1;
+    state2.epochs[key] = epoch;
+    if (input.stopBasis !== "unknown" && sameSource) state2.claims[source.workspaceId] = { ...source, state: "released", recovery: null };
+    const token2 = {
+      taskId: task3.id,
+      assignmentId: ticket2.assignmentId,
+      workspaceId: ctx.workspaceId,
+      instanceId: meta.actor.instanceId,
+      contractVersion: input.contractVersion,
+      epoch
+    };
+    state2.claims[ctx.workspaceId] = input.mode === "snapshot" ? { ...token2, state: "restore-target", recovery: { snapshotId: input.snapshotId, operationId: meta.operationId } } : { ...token2, state: "writer", recovery: null };
+    ticket2.state = "reserved";
+    ticket2.operationId = meta.operationId;
+    ticket2.token = token2;
+    return [ticket2.id, String(epoch)];
+  });
+  const state = await readState(ctx), task2 = getTask(state, input.taskId);
+  const ticket = task2.control?.recoveries.find((r) => r.id === receipt.resourceIds[0]);
+  requireThat(ticket && ["reserved", "completed"].includes(ticket.state) && ticket.operationId === meta.operationId && ticket.token?.epoch === Number(receipt.resourceIds[1]), "RECOVERY_ABORTED", "This recovery was revoked; old requests cannot restart it");
+  const claim = state.claims[ctx.workspaceId];
+  requireThat(
+    claim && claim.instanceId === meta.actor.instanceId && claim.epoch === ticket.token.epoch,
+    "STALE_WRITE_TOKEN",
+    "Recovery target is no longer current"
+  );
+  if (claim.state === "restore-target") {
+    const snapshot2 = await loadSnapshot(ctx, claim.recovery.snapshotId);
+    await restoreSnapshot(ctx, meta, { taskId: task2.id, snapshotId: snapshot2.id, token: ticket.token, expectedTargetBase: snapshot2.baseCommit });
+  }
+  const token = ticket.token;
+  const completeMeta = { ...meta, operationId: `resume-complete-${createHash8("sha256").update(meta.operationId).digest("hex")}` };
+  await mutateState(ctx, completeMeta, { command: "work.resume.complete", token }, async (current) => {
+    await assertWriteToken(ctx, current, meta, token);
+    const active = getTask(current, input.taskId).control.recoveries.find((r) => r.id === ticket.id);
+    requireThat(active.state === "reserved", "RECOVERY_ABORTED", "Recovery no longer reserved");
+    active.state = "completed";
+    return [ticket.id];
+  });
+  await assertWriteToken(ctx, await readState(ctx), meta, token);
+  return toWriteToken(token);
+}
 
 // src/cli/commands.ts
 init_store();
@@ -1262,11 +1763,12 @@ init_policy();
 init_schema();
 init_store();
 init_errors();
+init_control_policy();
 init_workflow_policy();
-import { randomUUID as randomUUID7 } from "node:crypto";
+import { randomUUID as randomUUID9 } from "node:crypto";
 function makeTask(title, draft, decision, meta) {
   return {
-    id: randomUUID7(),
+    id: randomUUID9(),
     title,
     status: "active",
     contracts: [{ ...structuredClone(draft), version: 1, decision }],
@@ -1280,6 +1782,7 @@ function makeTask(title, draft, decision, meta) {
     userAcceptances: [],
     relatedTo: null,
     legacySource: null,
+    control: newTaskControl(),
     workflow: { protocol: TASK_PROTOCOL, planningRequired: ["brainstorm", "plan"].includes(meta.invocation.entry), documents: [], authorizations: [] }
   };
 }
@@ -1328,6 +1831,7 @@ async function reviseContract(ctx, meta, input) {
 init_ownership();
 
 // src/kernel/continuation.ts
+init_control_policy();
 init_schema();
 init_errors();
 init_policy();
@@ -1350,8 +1854,9 @@ function sourceClaim(state, from) {
 async function continueGoal(ctx, meta, input) {
   metaRule(meta);
   requireThat(meta.invocation.activation !== "none", "ACTIVATION_REQUIRED", "Continuation must be explicitly requested or bound");
-  const state = await readState(ctx), task2 = getTask(state, input.taskId);
-  const binding = await bindSession(ctx, meta, input), missing = [];
+  const state = await readState(ctx), task2 = getTask(state, input.taskId, false);
+  const binding = await bindSession(ctx, task2.status === "active" ? meta : { ...meta, invocation: { ...meta.invocation, persist: false } }, input), missing = [];
+  if (task2.status !== "active") missing.push("TASK_READ_ONLY");
   let writeToken = null;
   const mine = state.claims[ctx.workspaceId];
   if (mine?.instanceId === meta.actor.instanceId && mine.taskId === input.taskId && mine.assignmentId === input.assignmentId) {
@@ -1383,6 +1888,7 @@ async function continueGoal(ctx, meta, input) {
     diagnostics: task2.diagnostics.slice(-20),
     pendingContributionIds: Object.values(task2.contributions).filter((c) => !c.integrated).map((c) => c.id),
     evidenceIds: Object.values(task2.evidence).sort((a, b) => a.sequence - b.sequence).slice(-20).map((e) => e.id),
+    control: controlView(task2, Object.values(state.claims)),
     missing,
     nextCursor: state.revision,
     unchanged: input.afterRevision === state.revision
@@ -1393,6 +1899,13 @@ function transferAuthority(state, meta, input) {
   assertEntry(meta, task2, "business-write");
   assertContract(task2, input.contractVersion);
   actorRule(input.to);
+  assertActorWork(task2, input.to.instanceId, input.from.assignmentId);
+  assertActorWork(task2, input.from.instanceId, input.from.assignmentId);
+  requireThat(
+    !task2.control?.recoveries.some((r) => r.assignmentId === input.from.assignmentId && ["pending", "reserved"].includes(r.state)),
+    "RECOVERY_REQUIRED",
+    "Task control replaced this work; use its current work resume ticket"
+  );
   if (input.decision) decisionRule(input.decision);
   requireThat(input.decision || input.from.instanceId === meta.actor.instanceId, "TRANSFER_DECISION_REQUIRED", "Transferring another instance requires a user decision");
   if (input.to.instanceId !== meta.actor.instanceId) requireThat(
@@ -1401,6 +1914,12 @@ function transferAuthority(state, meta, input) {
     "Handing work to another actor requires authorized collaboration or a user decision"
   );
   if (input.transferOwner) {
+    assertActorWork(task2, input.to.instanceId, null);
+    requireThat(
+      !task2.control?.revision,
+      "TASK_CONTROL_REQUIRED",
+      "This task has control history; use an explicit task takeover to transfer delivery ownership"
+    );
     requireThat(input.ownerEpoch === task2.owner.epoch, "OWNER_CHANGED", "Delivery owner changed");
     requireThat(task2.owner.instanceId === meta.actor.instanceId || input.decision, "TRANSFER_DECISION_REQUIRED", "A contributor cannot transfer delivery responsibility without its owner or a user decision");
   } else requireThat(input.ownerEpoch === null, "OWNER_CHANGED", "Owner epoch is only used when transferring ownership");
@@ -1503,13 +2022,14 @@ async function clearWorkspaceHold(ctx, meta, input) {
 init_snapshots();
 
 // src/kernel/evidence.ts
+init_control_policy();
 init_errors();
 init_policy();
 init_schema();
 init_store();
 init_io();
-import { randomUUID as randomUUID8 } from "node:crypto";
-async function appendEvidence(ctx, meta, input, source, artifactId) {
+import { randomUUID as randomUUID10 } from "node:crypto";
+async function appendEvidence(ctx, meta, input, source, artifactId, expectedFence) {
   assertPersistence(meta);
   environmentRule(input.environment);
   one("pass", "fail", "unverified")(input.result);
@@ -1520,13 +2040,18 @@ async function appendEvidence(ctx, meta, input, source, artifactId) {
   if (input.result === "pass" && input.exitCode !== null) requireThat(input.exitCode === 0, "EVIDENCE_INVALID", "Passing command cannot have a failing exit code");
   if (input.phase === "red") requireThat(input.result === "fail" && input.exitCode !== null && input.exitCode > 0, "EVIDENCE_INVALID", "RED needs a real nonzero failure");
   if (input.phase === "green") requireThat(input.result === "pass" && input.exitCode === 0, "EVIDENCE_INVALID", "GREEN needs exit zero");
-  const receipt = await mutateState(ctx, meta, { command: "evidence.append", input, source, artifactId }, (state) => {
+  const receipt = await mutateState(ctx, meta, { command: "evidence.append", input, source, artifactId, expectedFence: expectedFence ?? null }, (state) => {
     const task2 = getTask(state, input.taskId);
     assertEntry(meta, task2, "state-write");
     assertContract(task2, input.contractVersion);
+    if (expectedFence !== void 0) requireThat(
+      verificationFence(task2, meta.actor.instanceId) === expectedFence,
+      "VERIFICATION_REVOKED",
+      "Task control or authorization changed while the command ran; its result cannot establish current verification"
+    );
     requireThat(state.snapshots[input.snapshotId], "SNAPSHOT_UNAVAILABLE", "Evidence snapshot does not exist");
     const { taskId: _, ...fields } = input;
-    const e = { ...fields, id: randomUUID8(), actor: meta.actor, source, artifactId, cwd: ctx.worktreeRoot, sequence: state.revision + 1 };
+    const e = { ...fields, id: randomUUID10(), actor: meta.actor, source, artifactId, cwd: ctx.worktreeRoot, sequence: state.revision + 1 };
     task2.evidence[e.id] = e;
     return [e.id];
   });
@@ -1551,13 +2076,14 @@ async function recordUserObservation(ctx, meta, input) {
 }
 
 // src/kernel/verification.ts
+init_control_policy();
 init_io();
 init_schema();
 init_policy();
 init_store();
 init_snapshots();
 import { spawn } from "node:child_process";
-import { randomUUID as randomUUID9, createHash as createHash7 } from "node:crypto";
+import { randomUUID as randomUUID11, createHash as createHash9 } from "node:crypto";
 init_errors();
 async function runVerification(ctx, meta, input) {
   assertPersistence(meta);
@@ -1574,6 +2100,8 @@ async function runVerification(ctx, meta, input) {
   const task2 = getTask(await readState(ctx), input.taskId);
   assertEntry(meta, task2, "state-write");
   assertContract(task2, input.contractVersion);
+  requireThat(!task2.control?.paused, "EXECUTION_NOT_AUTHORIZED", "Task execution is paused");
+  const fence = verificationFence(task2, meta.actor.instanceId);
   const request = { command: "verify.reserve", input, workspaceId: ctx.workspaceId };
   const existing = await lookupOperation(ctx, meta, request);
   if (existing) {
@@ -1588,8 +2116,9 @@ async function runVerification(ctx, meta, input) {
     const current = getTask(state, input.taskId);
     assertEntry(meta, current, "state-write");
     assertContract(current, input.contractVersion);
+    requireThat(verificationFence(current, meta.actor.instanceId) === fence, "VERIFICATION_REVOKED", "Task control changed before verification started");
     reserved = true;
-    return [randomUUID9()];
+    return [randomUUID11()];
   });
   requireThat(reserved, "VERIFICATION_INCOMPLETE", "Another invocation owns this verification; the command was not repeated");
   const artifactId = reservation.resourceIds[0];
@@ -1638,7 +2167,7 @@ async function runVerification(ctx, meta, input) {
     environment: input.environment,
     rawOutputStored: false
   }, true);
-  return appendEvidence(ctx, { ...meta, operationId: `evidence-${createHash7("sha256").update(meta.operationId).digest("hex")}` }, {
+  return appendEvidence(ctx, { ...meta, operationId: `evidence-${createHash9("sha256").update(meta.operationId).digest("hex")}` }, {
     taskId: input.taskId,
     contractVersion: input.contractVersion,
     snapshotId: snapshot2.id,
@@ -1648,7 +2177,7 @@ async function runVerification(ctx, meta, input) {
     exitCode: result.code,
     environment: input.environment,
     summary: status === "unverified" ? "Command timed out, terminated, or input changed; not verified" : `Command exited ${result.code}`
-  }, "command-runner", artifactId);
+  }, "command-runner", artifactId, fence);
 }
 
 // src/kernel/contributions.ts
@@ -1657,7 +2186,7 @@ init_store();
 init_policy();
 init_ownership();
 init_snapshots();
-import { randomUUID as randomUUID10 } from "node:crypto";
+import { randomUUID as randomUUID12 } from "node:crypto";
 async function submitContribution(ctx, meta, input) {
   const c = input.contribution;
   if (c.kind === "change") {
@@ -1679,7 +2208,7 @@ async function submitContribution(ctx, meta, input) {
       await assertWriteToken(ctx, state, meta, c.writeToken);
     }
     requireThat(c.evidenceIds.every((e) => !!task2.evidence[e]), "EVIDENCE_NOT_FOUND", "Contribution evidence is absent");
-    const contribution2 = { ...structuredClone(c), id: randomUUID10(), submittedBy: meta.actor.instanceId, integrated: null };
+    const contribution2 = { ...structuredClone(c), id: randomUUID12(), submittedBy: meta.actor.instanceId, integrated: null };
     task2.contributions[contribution2.id] = contribution2;
     return [contribution2.id];
   });
@@ -1711,7 +2240,7 @@ init_schema();
 init_snapshots();
 init_ownership();
 init_workflow();
-import { randomUUID as randomUUID11 } from "node:crypto";
+import { randomUUID as randomUUID13 } from "node:crypto";
 function verifyRows(task2, version2, snapshotId, rows, verification) {
   assertContract(task2, version2);
   array(checkRowRule)(rows);
@@ -1752,7 +2281,7 @@ async function recordCheckSet(ctx, meta, input) {
       requireThat(input.rows.every((r) => r.evidenceIds.every((e) => task2.evidence[e].actor.instanceId === meta.actor.instanceId)), "CHECK_INVALID", "Do not relabel another assessor's evidence as your own check");
     }
     const { taskId: _, ...fields } = input;
-    const checks = { ...structuredClone(fields), id: randomUUID11(), assessor: meta.actor };
+    const checks = { ...structuredClone(fields), id: randomUUID13(), assessor: meta.actor };
     task2.checks[checks.id] = checks;
     return [checks.id];
   });
@@ -1768,6 +2297,7 @@ async function finishGoal(ctx, meta, input) {
     assertEntry(meta, task2, "state-write");
     assertOwner(task2, meta, input.ownerEpoch);
     assertContract(task2, input.contractVersion);
+    requireThat(!task2.control?.paused, "EXECUTION_NOT_AUTHORIZED", "Paused execution cannot finalize delivery");
     await validatePlanningArtifacts(ctx, task2);
     const rows = [];
     for (const id2 of input.checkSetIds) {
@@ -1799,7 +2329,7 @@ async function finishGoal(ctx, meta, input) {
       requireThat(red && evidence2.some((e) => e.phase === "green" && e.result === "pass" && e.exitCode === 0 && e.sequence > red.sequence && e.snapshotId === snapshot2.id), "TDD_EVIDENCE_REQUIRED", "Current TDD evidence needs RED before GREEN");
     }
     const delivery = {
-      id: randomUUID11(),
+      id: randomUUID13(),
       contractVersion: input.contractVersion,
       snapshotId: snapshot2.id,
       checkSetIds: input.checkSetIds,
@@ -1841,7 +2371,7 @@ async function archiveGoal(ctx, meta, input) {
 init_store();
 init_policy();
 init_schema();
-import { randomUUID as randomUUID12 } from "node:crypto";
+import { randomUUID as randomUUID14 } from "node:crypto";
 init_errors();
 async function recordDiagnostic(ctx, meta, input) {
   text(input.text);
@@ -1851,7 +2381,7 @@ async function recordDiagnostic(ctx, meta, input) {
     const task2 = getTask(state, input.taskId);
     assertEntry(meta, task2, "state-write");
     requireThat(input.evidenceIds.every((e) => !!task2.evidence[e]), "EVIDENCE_NOT_FOUND", "Diagnostic evidence is absent");
-    const record2 = { id: randomUUID12(), kind: input.kind, text: input.text, evidenceIds: input.evidenceIds, actor: meta.actor, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
+    const record2 = { id: randomUUID14(), kind: input.kind, text: input.text, evidenceIds: input.evidenceIds, actor: meta.actor, createdAt: (/* @__PURE__ */ new Date()).toISOString() };
     task2.diagnostics.push(record2);
     return [record2.id];
   });
@@ -1866,6 +2396,7 @@ async function openRepair(ctx, meta, input) {
   const receipt = await mutateState(ctx, meta, { command: "debug.open", input }, (state) => {
     const source = getTask(state, input.taskId, false);
     assertEntry(meta, source, "state-write");
+    requireThat(source.status !== "cancelled", "TASK_READ_ONLY", "Use explicit task reopen to continue the same cancelled task");
     let task2 = source;
     if (source.status !== "active" || input.deliveryId) {
       const candidates = Object.keys(source.deliveries);
@@ -1882,7 +2413,7 @@ async function openRepair(ctx, meta, input) {
       state.tasks[task2.id] = task2;
     }
     task2.diagnostics.push({
-      id: randomUUID12(),
+      id: randomUUID14(),
       kind: "fact",
       text: `Expected: ${input.expected}
 Reported actual: ${input.actual}`,
@@ -1954,7 +2485,25 @@ var contribution = object({
   summary: text,
   writeToken: nullable(tokenRule)
 });
+var control = { ...version, expectedControlRevision: integer, ownerEpoch: integer, request: controlRequestRule, reason: text };
 var commands = {
+  "task takeover": route(takeOverTask, object(control)),
+  "task replace-executor": route(replaceExecutor, object({ ...control, fromInstanceId: id, to: actorRule })),
+  "task pause": route(pauseTask, object(control)),
+  "task cancel": route(cancelTask, object(control)),
+  "task reopen": route(reopenTask, object(control)),
+  "store upgrade": route(upgradeStore, object({ expectedRevision: integer, expectedFingerprint: text, request: controlRequestRule })),
+  "work resume": route(resumeWork, object({
+    ...version,
+    recoveryId: nullable(id),
+    request: controlRequestRule,
+    mode: one("existing", "snapshot", "baseline"),
+    stopBasis: one("unknown", "holder-release", "host-stop-receipt", "user-declared-stop"),
+    stopReference: nullable(text),
+    snapshotId: nullable(id),
+    baseCommit: nullable(text),
+    abandonUncaptured: bool
+  }, { from: ref })),
   "init": route(initializeStore, decisionRule),
   "task create": route(createGoal, object({ title: text, contract: contractDraftRule, decision: decisionRule }, { planningRequired: bool })),
   "task document": route(recordPlanningDocument, object({ ...version, ownerEpoch: integer, kind: one("brief", "plan"), content: text })),
@@ -1996,13 +2545,14 @@ init_snapshots();
 var selectorRule = object({ host: text }, { instanceId: id, hostSessionId: text, newInstance: bool });
 var envelopeRule = object({ meta: object({ operationId: id, actor: selectorRule, invocation: invocationRule }), payload: () => {
 } });
-function taskSummary(task2) {
+function taskSummary(task2, claims = []) {
   return {
     id: task2.id,
     title: task2.title,
     status: task2.status,
     contract: currentContract(task2),
     owner: task2.owner,
+    control: controlView(task2, claims),
     assignments: Object.values(task2.assignments),
     contributionIds: Object.keys(task2.contributions),
     evidenceIds: Object.values(task2.evidence).sort((a, b) => a.sequence - b.sequence).slice(-20).map((e) => e.id),
@@ -2029,6 +2579,9 @@ async function executeCommand(ctx, command, envelope) {
     requireThat(Object.hasOwn(commands, command), "COMMAND_UNKNOWN", "Unknown command; use --help");
     const entry = commands[command];
     entry.check(envelope.payload);
+    if (!["init", "store upgrade"].includes(command)) {
+      requireThat((await readState(ctx)).kernelSchemaVersion === 2, "STORE_UPGRADE_REQUIRED", "Schema 1 is read-only; use store preview-upgrade and explicitly authorize upgrade");
+    }
     if (meta.invocation.activation === "bound-followup") {
       const payload = record(envelope.payload);
       const taskId = payload.taskId ?? (payload.from ? record(payload.from).taskId : void 0);
@@ -2039,7 +2592,7 @@ async function executeCommand(ctx, command, envelope) {
     if (command === "task create" || command === "debug open") {
       const task2 = data;
       await bindSession(ctx, meta, { taskId: task2.id, assignmentId: null });
-      data = taskSummary(task2);
+      data = taskSummary(task2, Object.values((await readState(ctx)).claims));
     }
     if (command === "snapshot capture") {
       const s = data;
@@ -2072,7 +2625,8 @@ async function executeCommand(ctx, command, envelope) {
 }
 async function executeReadCommand(ctx, command, input) {
   let data;
-  if (["doctor", "validate"].includes(command)) data = await inspectStore(ctx);
+  if (command === "store preview-upgrade") data = await previewUpgrade(ctx);
+  else if (["doctor", "validate"].includes(command)) data = await inspectStore(ctx);
   else if (command === "snapshot show") {
     requireThat(input.resourceId, "ID_REQUIRED", "Specify --id");
     data = await loadSnapshot(ctx, input.resourceId);
@@ -2083,7 +2637,7 @@ async function executeReadCommand(ctx, command, input) {
     const state = await readState(ctx);
     if (command === "task show") {
       requireThat(input.taskId, "TASK_REQUIRED", "Specify --task");
-      data = taskSummary(getTask(state, input.taskId, false));
+      data = taskSummary(getTask(state, input.taskId, false), Object.values(state.claims));
     } else if (["evidence show", "check show", "contribution show", "delivery show"].includes(command)) {
       requireThat(input.taskId && input.resourceId, "ID_REQUIRED", "Specify --task and --id");
       id(input.resourceId);
@@ -2095,7 +2649,7 @@ async function executeReadCommand(ctx, command, input) {
       const limit = input.limit ?? 20;
       requireThat(Number.isSafeInteger(limit) && limit >= 1 && limit <= 100, "LIMIT_INVALID", "Page size must be between 1 and 100");
       if (input.after) id(input.after);
-      const tasks = Object.values(state.tasks).filter((t) => !input.after || t.id > input.after).sort((a, b) => a.id < b.id ? -1 : 1);
+      const tasks = Object.values(state.tasks).filter((t) => (command !== "orient" || t.status !== "cancelled") && (!input.after || t.id > input.after)).sort((a, b) => a.id < b.id ? -1 : 1);
       const page = tasks.slice(0, limit);
       data = {
         revision: state.revision,
@@ -2104,6 +2658,7 @@ async function executeReadCommand(ctx, command, input) {
           title: t.title,
           status: t.status,
           protocol: t.workflow?.protocol ?? null,
+          control: controlView(t, Object.values(state.claims)),
           goal: currentContract(t).goal,
           contractVersion: currentContract(t).version,
           owner: t.owner,
@@ -2117,7 +2672,7 @@ async function executeReadCommand(ctx, command, input) {
 }
 
 // src/cli.ts
-var reads = ["task show", "task list", "orient", "doctor", "validate", "legacy inspect", "snapshot show", "evidence show", "check show", "contribution show", "delivery show"];
+var reads = ["store preview-upgrade", "task show", "task list", "orient", "doctor", "validate", "legacy inspect", "snapshot show", "evidence show", "check show", "contribution show", "delivery show"];
 var legacy = ["propose", "migrate", "learning", "task transition", "task unblock", "task require", "task accept", "task set-plan", "task set-brief", "task rework", "evidence record"];
 var help = `Vinea: explicit local task collaboration
 

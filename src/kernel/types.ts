@@ -6,6 +6,24 @@ export interface ActorSelector {
   host: string; instanceId?: Id; hostSessionId?: string; newInstance?: boolean;
 }
 export interface Decision { summary: string; reference: string | null }
+export type ControlAction = "takeover" | "replace-executor" | "pause" | "cancel" | "reopen";
+export interface ControlRequest { userMessage: string; reference: string; action: ControlAction | "resume" | "upgrade" }
+export interface ControlEvent {
+  id: Id; revision: number; round: number; action: ControlAction; actor: Actor;
+  request: ControlRequest; reason: string; recordedAt: string;
+  previousOwner: Owner; owner: Owner; previousStatus: Task["status"]; status: Task["status"];
+  replacedInstanceId: Id | null; assignmentIds: Array<Id | null>;
+}
+export interface RecoveryTicket {
+  id: Id; assignmentId: Id | null; from: OccupancyRef; toInstanceId: Id;
+  contractVersion: number; state: "pending" | "reserved" | "completed" | "aborted";
+  operationId: Id | null; token: WriteToken | null;
+}
+export interface TaskControl {
+  revision: number; round: number; paused: boolean; events: ControlEvent[];
+  revoked: Array<{ instanceId: Id; assignmentId: Id | null }>;
+  recoveries: RecoveryTicket[];
+}
 export interface ExecutionRequest {
   kind: "implementation-request" | "implementation-confirmation" | "continuation" | "plan-approval";
   userMessage: string; reference: string; action: string | null;
@@ -113,7 +131,7 @@ export interface Delivery {
   createdAt: string;
 }
 export interface Task {
-  id: Id; title: string; status: "active" | "delivered" | "archived";
+  id: Id; title: string; status: "active" | "delivered" | "archived" | "cancelled";
   contracts: Contract[]; owner: Owner; assignments: Record<Id, Assignment>;
   contributions: Record<Id, Contribution>; evidence: Record<Id, Evidence>;
   checks: Record<Id, CheckSet>; diagnostics: Diagnostic[];
@@ -122,12 +140,13 @@ export interface Task {
   relatedTo: { taskId: Id; deliveryId: Id } | null;
   legacySource: { path: string; fingerprint: string; originalStatus: string } | null;
   workflow?: TaskWorkflow;
+  control?: TaskControl;
 }
 export interface MutationReceipt {
   operationId: Id; requestHash: string; revision: number; resourceIds: Id[];
 }
 export interface RepositoryState {
-  kernelSchemaVersion: 1; repositoryId: Id; revision: number;
+  kernelSchemaVersion: 1 | 2; repositoryId: Id; revision: number;
   tasks: Record<Id, Task>; claims: Record<Id, Claim>;
   epochs: Record<string, number>; snapshots: Record<Id, Snapshot>;
   operations: Record<Id, MutationReceipt>;
@@ -139,4 +158,5 @@ export interface ContinuationView {
   workflow: TaskWorkflow | null;
   diagnostics: Diagnostic[]; pendingContributionIds: Id[];
   evidenceIds: Id[]; missing: string[]; nextCursor: number; unchanged: boolean;
+  control?: unknown;
 }

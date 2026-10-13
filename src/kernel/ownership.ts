@@ -1,3 +1,4 @@
+import { assertActorWork } from "./control-policy.js";
 import { randomUUID } from "node:crypto";
 import { requireThat } from "./errors.js";
 import { readState, mutateState } from "./store.js";
@@ -18,6 +19,7 @@ export async function assertCurrentToken(ctx: RepositoryContext, state: Reposito
     && token.instanceId === claim.instanceId && token.epoch === claim.epoch && token.taskId === claim.taskId
     && token.assignmentId === claim.assignmentId && token.epoch === state.epochs[executionKey(token.taskId, token.assignmentId)],
     "STALE_WRITE_TOKEN", "Write ownership is absent, stale, held, or restoring");
+  assertActorWork(task, meta.actor.instanceId, token.assignmentId);
   assertContract(task, token.contractVersion); assertContract(task, claim.contractVersion);
   assertExecution(task);
   await validatePlanningArtifacts(ctx, task);
@@ -44,6 +46,9 @@ export async function claimWork(ctx: RepositoryContext, meta: Meta, input: { tas
     const task = getTask(state, input.taskId);
     assertEntry(meta, task, "business-write"); assertContract(task, input.contractVersion);
     await validatePlanningArtifacts(ctx, task);
+    assertActorWork(task, meta.actor.instanceId, input.assignmentId);
+    requireThat(!task.control?.recoveries.some(r => r.assignmentId === input.assignmentId && ["pending", "reserved"].includes(r.state)),
+      "RECOVERY_REQUIRED", "Use work resume with the current recovery ticket before claiming replacement work");
     const assignment = input.assignmentId === null ? null : task.assignments[input.assignmentId];
     const previous = state.claims[ctx.workspaceId];
     const key = executionKey(input.taskId, input.assignmentId);
@@ -51,6 +56,11 @@ export async function claimWork(ctx: RepositoryContext, meta: Meta, input: { tas
       && previous.assignmentId === input.assignmentId && previous.epoch === state.epochs[key];
     if (same && previous.contractVersion === input.contractVersion) return [ctx.workspaceId, String(previous.epoch)];
     if (!same) assertWorkspaceClaimable(state, ctx.workspaceId);
+    const completedEpoch = Math.max(0, ...Object.values(state.claims).filter(c => c.taskId === task.id
+      && c.assignmentId === input.assignmentId && ["writer", "released"].includes(c.state)).map(c => c.epoch));
+    requireThat(same || !Object.values(state.claims).some(c => c.taskId === task.id && c.assignmentId === input.assignmentId
+      && c.state === "unknown-writer-hold" && c.epoch >= completedEpoch), "RECOVERY_REQUIRED",
+      "Retained source work needs a fresh work resume decision; use its public occupancy reference, not a plain claim");
     if (input.assignmentId !== null) requireThat(assignment?.status === "open" && assignment.businessWrite
       && (assignment.assignee === null || assignment.assignee === meta.actor.instanceId), "ASSIGNMENT_NOT_GRANTED", "Assignment is not granted to this writer");
     else requireThat(same || task.owner.instanceId === meta.actor.instanceId, "ASSIGNMENT_NOT_GRANTED", "Only the owner or current handed-off writer can claim unassigned implementation");

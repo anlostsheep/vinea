@@ -18,3 +18,5 @@ Capture recoverable selected inputs even if business changes are uncommitted. Do
 Deliver the result, verification and limitations. A defect found by this standalone entry does not expand its authority into repair; use already authorized development or an explicit debug request. Post-delivery repair opens a related task and leaves original evidence unchanged. Reusable learning, additional reviewers and archive are optional, not completion gates.
 
 Keep the selected plugin root and protocol pinned. Distinguish delivery, execution authorization and current writer occupancy; an old `planning` record is not a stop receipt. Report planning/artifact or authorization gaps rather than changing entries, recreating a task or downgrading the CLI to complete delivery.
+
+Cancellation is not successful delivery. An explicit user request to cancel unfinished work uses task cancel through continue/run/debug, not accepted-gap rows or fabricated finish. Cancelled work can reopen under the same ID; its old checks cannot satisfy the new round.

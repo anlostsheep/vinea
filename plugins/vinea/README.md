@@ -2,6 +2,9 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
+> **3.0 升级注意：** 新 CLI 对 schema 1 存储只读；使用前需显式升级存储，旧 CLI 无法读取 schema 2。先处理原执行者和 hold，再协调客户端与存储升级。不要直接替换进行中任务固定的 CLI。详见 [CLI 升级说明](CLI.md#explicit-store-upgrade)。
+
+
 Vinea 是面向 Codex、Claude Code 和 Grok Build 的轻量协作内核。用户确定目标和约束，agent 选择执行
 路径。本机 worktree 在 Git 共同目录的 `vinea/` 共享状态，不进入 Git 跟踪。
 
@@ -23,10 +26,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-固定到 2.0.1：
+固定到 3.0.0：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v2.0.1
+codex plugin marketplace add anlostsheep/vinea --ref v3.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -37,10 +40,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-固定到 2.0.1：
+固定到 3.0.0：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v2.0.1
+claude plugin marketplace add anlostsheep/vinea@v3.0.0
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -169,3 +172,9 @@ Vinea 不提供跨机器同步、MCP server、daemon、hook、app 或云服务�
 
 如果宿主拒绝写入共享状态，按 [宿主接入说明](HOSTS.md) 为实际状态目录取得
 明确授权；不要关闭沙箱、借用他人身份或静默离开 Vinea 继续修改业务代码。
+
+## 3.0：用户控制的接管与重开
+
+用户可通过明确的 `vinea:continue` 指令接管负责人、替换指定协作者、暂停、取消或重开同一任务，无需原 agent 配合。替换保留其他协作者；取消保留文件和历史，重开保留任务 ID，但需新授权，旧验收不会自动通过。文件恢复仍需停止依据或隔离目录；没有快照时，用户可明确选择从可信 Git 基线继续同一任务。
+
+3.0.0 引入不兼容的 schema 2。新 CLI 对 schema 1 只读，真实存储必须先显式预览、处理占用并授权升级；旧 CLI 拒绝新格式。不要自动更换进行中任务的固定 CLI 或迁移存储。入口和示例见 [CLI.md](CLI.md)；本机安装和真实存储升级需要分别执行，不会随 Git 更新自动发生。

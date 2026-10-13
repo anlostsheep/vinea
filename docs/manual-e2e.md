@@ -123,3 +123,22 @@ chat transcripts or private reasoning. Keep secrets out of snapshots/logs.
 Do not claim improved token efficiency without a controlled comparison using
 comparable tasks, models and success criteria. A missing host capability is an
 honest limitation, not a passed multi-agent scenario.
+
+## User-directed task control (not yet live-host verified)
+
+Use an isolated repository and explicit host authorization. This checklist does not
+authorize installation or real-store migration.
+
+1. A owns a task; B writes an assignment in a different worktree. A becomes unavailable.
+2. Fresh C explicitly takes over the exact task. A is fenced; B's token and contribution
+   remain valid. Repeat replacing only B, including an assignment before its first claim.
+3. With no snapshot, offer actual recovery choices. Only on user consent select an
+   isolated clean commit and omit uncaptured changes; retain old files and task ID.
+4. Nonowner D cancels. Check all protocol execution is revoked, no fake delivery and
+   no claim that the host processes were stopped by the state change.
+5. Reopen the same ID: new round/contract, reviewed planning, fresh authorization and
+   no reuse of old checks, tokens or partial recovery operations.
+6. Orient omits cancelled tasks; explicit reads retain history and suggest reopening.
+   Record actual hosts, sessions, versions, files and remaining holds separately.
+
+Kernel/CLI fixture passes do not substitute for this real-host evidence.

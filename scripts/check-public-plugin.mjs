@@ -23,10 +23,10 @@ const languageSwitch = "[简体中文](README.md) | [English](README.en.md)";
 const operationalCommands = [
   "codex plugin marketplace add anlostsheep/vinea",
   "codex plugin add vinea@vinea",
-  "codex plugin marketplace add anlostsheep/vinea --ref v2.0.1",
+  "codex plugin marketplace add anlostsheep/vinea --ref v3.0.0",
   "claude plugin marketplace add anlostsheep/vinea",
   "claude plugin install vinea@vinea --scope user",
-  "claude plugin marketplace add anlostsheep/vinea@v2.0.1",
+  "claude plugin marketplace add anlostsheep/vinea@v3.0.0",
   "codex plugin marketplace upgrade vinea",
   "codex plugin remove vinea@vinea",
   "claude plugin marketplace update vinea",
@@ -87,7 +87,7 @@ for (const path of publicTextPaths) {
 }
 
 const help = await runNode(cliPath, ["--help"]);
-for (const command of ["init", "orient", "task create", "continue", "check record", "debug open", "finish", "archive", "doctor", "validate"]) {
+for (const command of ["init", "orient", "task create", "continue", "check record", "debug open", "finish", "archive", "doctor", "validate", "task takeover", "task replace-executor", "task pause", "task cancel", "task reopen", "work resume", "store preview-upgrade", "store upgrade"]) {
   if (!help.stdout.includes(command)) throw new Error(`Public CLI help is missing ${command}.`);
 }
 

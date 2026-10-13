@@ -21,6 +21,7 @@ export async function openRepair(ctx: RepositoryContext, meta: Meta, input: { ta
   requireThat(["run", "continue", "debug"].includes(meta.invocation.entry), "ENTRY_SCOPE_DENIED", "This entry cannot open repair work");
   const receipt = await mutateState(ctx, meta, { command: "debug.open", input }, state => {
     const source = getTask(state, input.taskId, false); assertEntry(meta, source, "state-write");
+    requireThat(source.status !== "cancelled", "TASK_READ_ONLY", "Use explicit task reopen to continue the same cancelled task");
     let task = source;
     if (source.status !== "active" || input.deliveryId) {
       const candidates = Object.keys(source.deliveries);

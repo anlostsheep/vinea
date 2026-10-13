@@ -8,7 +8,7 @@ import { safePath } from "./kernel/io.js";
 import { executeCommand, executeReadCommand, type CommandEnvelope } from "./application.js";
 import { commands } from "./cli/commands.js";
 
-const reads = ["task show", "task list", "orient", "doctor", "validate", "legacy inspect", "snapshot show", "evidence show", "check show", "contribution show", "delivery show"];
+const reads = ["store preview-upgrade", "task show", "task list", "orient", "doctor", "validate", "legacy inspect", "snapshot show", "evidence show", "check show", "contribution show", "delivery show"];
 const legacy = ["propose", "migrate", "learning", "task transition", "task unblock", "task require", "task accept", "task set-plan", "task set-brief", "task rework", "evidence record"];
 const help = `Vinea: explicit local task collaboration\n\nvinea <command> --input - --json\nRead commands: --task <id> or --source <legacy-directory>\n\n${["session resolve", ...Object.keys(commands), ...reads].sort().join("\n")}\n\nResolve an instance once; reuse its echoed Actor. No automatic Git, migration, or agent dispatch.\n`;
 export async function main(argv: string[], io = { stdin: process.stdin as NodeJS.ReadableStream, stdout: process.stdout as NodeJS.WritableStream, stderr: process.stderr as NodeJS.WritableStream }): Promise<number> {

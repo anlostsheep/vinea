@@ -53,3 +53,11 @@ classifier outage is a host limitation, not permission to use raw stored claims
 as a write token. Only a successful current `continue` response can describe
 the caller's restored token. An empty runtime `missing` list does not establish
 acceptance coverage.
+
+## Task control and format upgrades
+
+Ownership transfer does not stop host processes. Confirm actual stopping before
+reusing a source directory; otherwise keep its hold and use isolated recovery.
+New CLI mutations reject schema 1 until explicit store upgrade; old CLIs reject
+schema 2. Do not change a task's pinned CLI or upgrade its real store as an incidental
+installation step. See CLI.md for preview, backup and recovery conditions.

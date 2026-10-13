@@ -2,6 +2,9 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
+> **Upgrading to 3.0:** The new CLI reads schema 1 without writing; an explicit store upgrade is required for mutations, and old CLIs cannot read schema 2. Resolve writers and holds before coordinating client/store upgrades. Do not replace an active task's pinned CLI. See [store upgrade guidance](CLI.md#explicit-store-upgrade).
+
+
 Vinea is a lightweight AI-coding collaboration kernel. Users define goals and
 constraints; agents choose the execution path. Local worktrees share state in
 the Git common directory's `vinea/`, never through Git tracking or pushes.
@@ -28,10 +31,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-To pin release 2.0.1:
+To pin release 3.0.0:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v2.0.1
+codex plugin marketplace add anlostsheep/vinea --ref v3.0.0
 codex plugin add vinea@vinea
 ```
 
@@ -42,10 +45,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-To pin release 2.0.1:
+To pin release 3.0.0:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v2.0.1
+claude plugin marketplace add anlostsheep/vinea@v3.0.0
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -186,3 +189,9 @@ cross-machine sync, MCP server, daemon, hooks, apps or cloud service.
 For denied shared-store writes, follow [host access setup](HOSTS.md) and obtain
 explicit access to the actual store. Do not disable the sandbox, borrow an
 actor identity or silently continue business edits outside Vinea.
+
+## 3.0: user-directed takeover and reopening
+
+An explicit vinea:continue request can take ownership, replace a specified collaborator, pause, cancel or reopen the same task without the old agent's cooperation. Replacement preserves other collaborators. Cancellation retains files and history; reopening keeps the ID but requires fresh authorization and current verification. Recovery needs stop evidence or an isolated worktree. Without a snapshot the user may explicitly choose a trusted Git baseline for the same task.
+
+Version 3.0.0 introduces the incompatible schema 2. The new CLI reads schema 1 without writing; real stores require explicit preview, resolved occupancy and upgrade authorization. Old CLIs reject the new format. Never automatically change an active task's pinned CLI or migrate state. See [CLI.md](CLI.md) for entry rules and examples. Local installation and real-store upgrades are separate operations and do not happen automatically when Git is updated.

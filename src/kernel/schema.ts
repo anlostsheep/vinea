@@ -42,6 +42,7 @@ export const pathRule: Rule = (v, p = "path") => {
 const hash: Rule = (v, p = "hash") => { if (typeof v !== "string" || !/^[a-f0-9]{64}$/.test(v)) invalid(p, "invalid SHA256"); };
 export const actorRule = object({ instanceId: id, host: text }, { hostSessionId: text });
 export const decisionRule = object({ summary: text, reference: nullable(text) });
+export const controlRequestRule = object({ userMessage: text, reference: text, action: one("takeover", "replace-executor", "pause", "cancel", "reopen", "resume", "upgrade") });
 export const executionRequestRule = object({ kind: one("implementation-request", "implementation-confirmation", "continuation", "plan-approval"), userMessage: text, reference: text, action: nullable(text) });
 const planningArtifactRule = object({ id, kind: one("brief", "plan"), contractVersion: integer, path: pathRule, sha256: hash });
 const authorizationRule = object({ id, contractVersion: integer, documentIds: array(id), request: executionRequestRule, actor: actorRule, recordedAt: text, revoked: nullable(decisionRule) });
@@ -69,8 +70,17 @@ const contributionRule = object({ id, kind: one("analysis", "change"), assignmen
 const diagnosticRule = object({ id, kind: one("fact", "hypothesis", "ruled-out", "change", "validation-gap"), text, evidenceIds: array(id), actor: actorRule, createdAt: text });
 const assignmentRule = object({ id, outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool, status: one("open", "closed", "cancelled") });
 const deliveryRule = object({ id, contractVersion: integer, snapshotId: id, checkSetIds: array(id), contributionIds: array(id), exclusions: array(text), owner: ownerRule, acceptedGaps: array(object({ acceptanceId: id, decision: decisionRule })), createdAt: text });
-const taskRule = object({ id, title: text, status: one("active", "delivered", "archived"), contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) }, { workflow: workflowRule });
-const stateRule = object({ kernelSchemaVersion: one(1), repositoryId: id, revision: integer, tasks: map(taskRule), claims: map(claimRule), epochs: map(integer, text), snapshots: map(snapshotRule), operations: map(object({ operationId: id, requestHash: hash, revision: integer, resourceIds: array(id) })) });
+const taskStatusRule = one("active", "delivered", "archived", "cancelled");
+const occupancyRule = object({ taskId: id, assignmentId: nullable(id), workspaceId: id, instanceId: id, epoch: integer });
+const controlEventRule = object({ id, revision: integer, round: integer, action: one("takeover", "replace-executor", "pause", "cancel", "reopen"), actor: actorRule,
+  request: controlRequestRule, reason: text, recordedAt: text, previousOwner: ownerRule, owner: ownerRule,
+  previousStatus: taskStatusRule, status: taskStatusRule, replacedInstanceId: nullable(id), assignmentIds: array(nullable(id)) });
+const ticketRule = object({ id, assignmentId: nullable(id), from: occupancyRule, toInstanceId: id, contractVersion: integer,
+  state: one("pending", "reserved", "completed", "aborted"), operationId: nullable(id), token: nullable(tokenRule) });
+const controlRule = object({ revision: integer, round: integer, paused: bool, events: array(controlEventRule),
+  revoked: array(object({ instanceId: id, assignmentId: nullable(id) })), recoveries: array(ticketRule) });
+const taskRule = object({ id, title: text, status: taskStatusRule, contracts: array(contractRule), owner: ownerRule, assignments: map(assignmentRule), contributions: map(contributionRule), evidence: map(evidenceRule), checks: map(checkRule), diagnostics: array(diagnosticRule), deliveries: map(deliveryRule), userAcceptances: array(object({ deliveryId: id, decision: decisionRule, actor: actorRule, recordedAt: text })), relatedTo: nullable(object({ taskId: id, deliveryId: id })), legacySource: nullable(object({ path: text, fingerprint: hash, originalStatus: text })) }, { workflow: workflowRule, control: controlRule });
+const stateRule = object({ kernelSchemaVersion: one(1, 2), repositoryId: id, revision: integer, tasks: map(taskRule), claims: map(claimRule), epochs: map(integer, text), snapshots: map(snapshotRule), operations: map(object({ operationId: id, requestHash: hash, revision: integer, resourceIds: array(id) })) });
 
 export function canonicalJson(value: unknown): string {
   function normalize(v: unknown): unknown {
@@ -105,6 +115,30 @@ export function assertRepositoryState(value: unknown): asserts value is Reposito
   }
   for (const [key, task] of Object.entries(state.tasks)) {
     if (key !== task.id || !task.contracts.length || task.owner.epoch < 1) invalid(key, "invalid task identity");
+    if (state.kernelSchemaVersion === 1 && (task.control || task.status === "cancelled")) invalid(key, "task control requires schema 2");
+    if (task.status === "cancelled" && !task.control) invalid(key, "cancelled task has no control history");
+    if (task.control) {
+      const c = task.control;
+      if (c.round !== 1 + c.events.filter(e => e.action === "reopen").length || c.events.length !== c.revision || c.events.some((e, i) => e.revision !== i + 1 || e.round < 1 || e.round > c.round
+        || e.request.action !== e.action || e.assignmentIds.some(a => a !== null && !task.assignments[a]))
+        || new Set(c.events.map(e => e.id)).size !== c.events.length) invalid(key, "invalid control history");
+      if (new Set(c.revoked.map(r => JSON.stringify([r.instanceId, r.assignmentId]))).size !== c.revoked.length
+        || c.revoked.some(r => r.assignmentId !== null && !task.assignments[r.assignmentId])) invalid(key, "invalid work revocation");
+      const pending = new Set<string | null>();
+      for (const r of c.recoveries) {
+        if (r.from.taskId !== key || r.from.assignmentId !== r.assignmentId || (r.assignmentId !== null && !task.assignments[r.assignmentId])
+          || r.contractVersion < 1 || r.contractVersion > task.contracts.length) invalid(key, "invalid recovery ticket");
+        if (["pending", "reserved"].includes(r.state)) {
+          if (pending.has(r.assignmentId) || task.status !== "active") invalid(key, "conflicting recovery ticket");
+          pending.add(r.assignmentId);
+        }
+        if (r.state === "reserved" && (!r.token || !r.operationId)) invalid(key, "missing recovery reservation");
+        if (r.token && (r.token.taskId !== key || r.token.assignmentId !== r.assignmentId || r.token.instanceId !== r.toInstanceId)) invalid(key, "invalid ticket token");
+      }
+      if (new Set(c.recoveries.map(r => r.id)).size !== c.recoveries.length) invalid(key, "duplicate recovery ticket");
+      if (task.status === "cancelled" && (!c.paused || task.workflow?.authorizations.some(a => !a.revoked))) invalid(key, "cancelled execution remains authorized");
+    }
+
     if (task.relatedTo && !state.tasks[task.relatedTo.taskId]?.deliveries[task.relatedTo.deliveryId]) invalid(key, "missing original delivery");
     task.contracts.forEach((c, i) => {
       if (c.version !== i + 1 || !c.acceptance.length || new Set(c.acceptance.map(a => a.id)).size !== c.acceptance.length) invalid(key, "invalid contract history");

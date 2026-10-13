@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { revokeTaskExecution } from "./task-control.js";
 import { assertEntry, assertOwner, assertContract, getTask } from "./policy.js";
 import { assertExecution, currentDocuments, taskWorkflow } from "./workflow-policy.js";
 import { mutateState, readState } from "./store.js";
@@ -66,7 +67,9 @@ export async function authorizeExecution(ctx: RepositoryContext, meta: Meta, inp
     const authorization: ExecutionAuthorization = { id: randomUUID(), contractVersion: input.contractVersion,
       documentIds: documents.map(d => d.id), request: structuredClone(input.request), actor: meta.actor,
       recordedAt: new Date().toISOString(), revoked: null };
-    workflow.authorizations.push(authorization); assertExecution(task); return [authorization.id];
+    workflow.authorizations.push(authorization);
+    if (task.control) task.control.paused = false;
+    assertExecution(task); return [authorization.id];
   });
   const task = getTask(await readState(ctx), input.taskId);
   assertOwner(task, meta, input.ownerEpoch); assertContract(task, input.contractVersion);
@@ -80,16 +83,8 @@ export async function suspendExecution(ctx: RepositoryContext, meta: Meta, input
   await mutateState(ctx, meta, { command: "task.suspend", input }, state => {
     const task = getTask(state, input.taskId);
     assertEntry(meta, task, "state-write"); assertOwner(task, meta, input.ownerEpoch); assertContract(task, input.contractVersion);
-    const workflow = taskWorkflow(task);
-    for (const authorization of workflow.authorizations) if (!authorization.revoked) authorization.revoked = structuredClone(input.decision);
-    for (const claim of Object.values(state.claims).filter(c => c.taskId === task.id && ["writer", "restore-target"].includes(c.state))) {
-      const key = JSON.stringify([claim.taskId, claim.assignmentId]);
-      state.epochs[key] = (state.epochs[key] ?? claim.epoch) + 1;
-      // Revocation is not evidence that another process has stopped writing.
-      state.claims[claim.workspaceId] = claim.instanceId === meta.actor.instanceId && claim.workspaceId === ctx.workspaceId
-        ? { ...claim, state: "released", recovery: null }
-        : { ...claim, state: "unknown-writer-hold" };
-    }
+    taskWorkflow(task);
+    revokeTaskExecution(ctx, state, task, meta, input.decision);
     task.diagnostics.push({ id: randomUUID(), kind: "change", text: `Execution suspended: ${input.decision.summary}; inspect business changes separately`,
       evidenceIds: [], actor: meta.actor, createdAt: new Date().toISOString() });
     return [task.id];

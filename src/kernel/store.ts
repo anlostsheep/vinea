@@ -17,7 +17,7 @@ export async function initializeStore(ctx: RepositoryContext, meta: Meta, decisi
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     await readState(ctx); return;
   }
-  const state: RepositoryState = { kernelSchemaVersion: 1, repositoryId: randomUUID(), revision: 0,
+  const state: RepositoryState = { kernelSchemaVersion: 2, repositoryId: randomUUID(), revision: 0,
     tasks: {}, claims: {}, epochs: {}, snapshots: {}, operations: {} };
   assertRepositoryState(state);
   await writeJson(ctx, meta, "tasks/state.json", state);
@@ -37,7 +37,7 @@ export async function readState(ctx: RepositoryContext): Promise<RepositoryState
     throw new KernelError("STATE_INVALID", "Shared state is malformed or unsupported; it was not repaired");
   }
 }
-async function withLock<T>(ctx: RepositoryContext, meta: Meta, operation: () => Promise<T>): Promise<T> {
+export async function withLock<T>(ctx: RepositoryContext, meta: Meta, operation: () => Promise<T>): Promise<T> {
   assertPersistence(meta);
   const path = await storagePath(ctx, "runtime/store.lock");
   await mkdir(await storagePath(ctx, "runtime"), { recursive: true });
@@ -65,7 +65,9 @@ export async function mutateState(ctx: RepositoryContext, meta: Meta, request: u
   await readState(ctx);
   const requestHash = createHash("sha256").update(canonicalJson({ request, actor: meta.actor, invocation: meta.invocation })).digest("hex");
   return withLock(ctx, meta, async () => {
-    const before = await readState(ctx), previous = before.operations[meta.operationId];
+    const before = await readState(ctx);
+    if (before.kernelSchemaVersion !== 2) throw new KernelError("STORE_UPGRADE_REQUIRED", "Schema 1 is read-only in this CLI; preview and explicitly authorize store upgrade");
+    const previous = before.operations[meta.operationId];
     if (previous) {
       if (previous.requestHash !== requestHash) throw new KernelError("OPERATION_ID_REUSED", "Operation payload or actor differs");
       return previous;

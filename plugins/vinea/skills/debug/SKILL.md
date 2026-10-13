@@ -24,3 +24,5 @@ For a new repair, `task authorize` records the concrete user implementation requ
 When correcting premature implementation, stop writes and revoke the owner's execution authority with `task suspend` (or release only your own claim and report to the owner). Refresh `continue`/`doctor`, including other worktrees, and inspect business changes. Do not equate code rollback or a legacy `planning` status with revoked write ownership. Preserve uncertain remote holds and obtain separate authority for destructive recovery or migration.
 
 An in-flight restore serializes suspension until file writes and publication finish; `STORE_LOCKED` is not successful revocation. Partial recovery retains its contract until completed or explicitly suspended. After `RECOVERY_ABORTED`, inspect partial files and holds instead of retrying an old reservation or assuming new authorization revives it.
+
+Cancelled work uses explicit task reopen under the same ID, not debug open with an invented delivery. For explicit takeover or stop requests use task control and preserve other collaborators. Reopen does not revive execution authority or change delivered/archived history.

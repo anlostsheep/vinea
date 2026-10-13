@@ -59,6 +59,7 @@ export async function finishGoal(ctx: RepositoryContext, meta: Meta, input: {
   requireThat((await compareSnapshot(ctx, snapshot)).matches, "SNAPSHOT_CHANGED", "Delivery inputs changed");
   const receipt = await mutateState(ctx, meta, { command: "finish", input }, async state => {
     const task = getTask(state, input.taskId); assertEntry(meta, task, "state-write"); assertOwner(task, meta, input.ownerEpoch); assertContract(task, input.contractVersion);
+    requireThat(!task.control?.paused, "EXECUTION_NOT_AUTHORIZED", "Paused execution cannot finalize delivery");
     await validatePlanningArtifacts(ctx, task);
     const rows: CheckRow[] = [];
     for (const id of input.checkSetIds) {

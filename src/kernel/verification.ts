@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { verificationFence } from "./control-policy.js";
 import { randomUUID, createHash } from "node:crypto";
 import { assertPersistence, writeJson } from "./io.js";
 import { decisionRule, environmentRule, array, text, nullable, one, id, integer } from "./schema.js";
@@ -21,6 +22,8 @@ export async function runVerification(ctx: RepositoryContext, meta: Meta, input:
   requireThat(input.environment.runtime === process.version && input.environment.platform === process.platform, "VERIFICATION_CONDITIONS_MISMATCH", "Runtime describes the actual Node verifier; other runtimes belong in labels");
   const task = getTask(await readState(ctx), input.taskId);
   assertEntry(meta, task, "state-write"); assertContract(task, input.contractVersion);
+  requireThat(!task.control?.paused, "EXECUTION_NOT_AUTHORIZED", "Task execution is paused");
+  const fence = verificationFence(task, meta.actor.instanceId);
   const request = { command: "verify.reserve", input, workspaceId: ctx.workspaceId };
   const existing = await lookupOperation(ctx, meta, request);
   if (existing) {
@@ -33,6 +36,7 @@ export async function runVerification(ctx: RepositoryContext, meta: Meta, input:
   let reserved = false;
   const reservation = await mutateState(ctx, meta, request, state => {
     const current = getTask(state, input.taskId); assertEntry(meta, current, "state-write"); assertContract(current, input.contractVersion);
+    requireThat(verificationFence(current, meta.actor.instanceId) === fence, "VERIFICATION_REVOKED", "Task control changed before verification started");
     reserved = true; return [randomUUID()];
   });
   requireThat(reserved, "VERIFICATION_INCOMPLETE", "Another invocation owns this verification; the command was not repeated");
@@ -60,5 +64,5 @@ export async function runVerification(ctx: RepositoryContext, meta: Meta, input:
     environment: input.environment, rawOutputStored: false }, true);
   return appendEvidence(ctx, { ...meta, operationId: `evidence-${createHash("sha256").update(meta.operationId).digest("hex")}` }, { taskId: input.taskId, contractVersion: input.contractVersion, snapshotId: snapshot.id,
     result: status, phase: status === "unverified" ? null : input.phase, argv: input.argv, exitCode: result.code,
-    environment: input.environment, summary: status === "unverified" ? "Command timed out, terminated, or input changed; not verified" : `Command exited ${result.code}` }, "command-runner", artifactId);
+    environment: input.environment, summary: status === "unverified" ? "Command timed out, terminated, or input changed; not verified" : `Command exited ${result.code}` }, "command-runner", artifactId, fence);
 }

@@ -5,6 +5,48 @@ host manifests and marketplaces are generated from it by the release checks.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-14
+
+### Breaking compatibility
+
+- New stores use kernel schema 2. This CLI reads schema 1 without mutating it;
+  explicitly preview and authorize store upgrade after resolving all writers and
+  holds. Old CLIs cannot read the new format. There is no automatic migration,
+  downgrade, plugin installation or host-process stopping.
+
+### Task control and recovery
+
+- Make recovery guidance depend on current holds and reservations, expose referenced
+  sources consistently in task show/continue, and clarify authorization entries and
+  when clearing a hold permits ordinary claim. Evidence permissions are unchanged.
+
+- Fix legacy owner-transfer paths bypassing task-control revocations and history.
+- Preserve historical recovery references when a source directory is reused, without
+  changing its new task/assignment claim.
+- Allow fresh explicitly requested recovery after pause/reopen while keeping aborted
+  operations invalid and preventing plain claim from bypassing retained source work.
+
+- Add user-directed ownership transfer, specified-executor replacement, pause,
+  cancellation and same-ID reopening, without old-owner cooperation or write grants.
+- Preserve other collaborators, fence revoked work and expose recovery tickets.
+- Resume from stopped local files, isolated snapshots or user-selected Git baselines;
+  cancellation aborts reservations without deleting files or pretending delivery.
+- Reopening starts a new contract/round without reviving authorization or verification.
+- Introduce schema 2, read-only schema-1 compatibility and explicit backed-up atomic
+  upgrades; old clients reject new state. No automatic migration or downgrade.
+
+### Validation and remaining boundaries
+
+- Local validation: 39 test files / 192 tests, type checking, plugin packaging and
+  generated-artifact checks passed before release preparation. The release command
+  reruns these gates for the versioned artifact.
+- The three P2 review findings were independently rechecked and closed. Later
+  state-aware hint/documentation refinements have local regression coverage.
+- Real-host multi-agent E2E has not been performed. A replaced actor may still append
+  evidence/check reports; selecting those reports for acceptance requires care, and
+  current unsuccessful checks may require explicit exclusion. Execution revocation
+  remains enforced. This low-priority evidence-governance item is not claimed fixed.
+
 ## [2.0.1] - 2026-09-20
 
 ### Fixed

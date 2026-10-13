@@ -1,3 +1,4 @@
+import { assertActorWork, controlView } from "./control-policy.js";
 import { actorRule, decisionRule, metaRule, canonicalJson, one } from "./schema.js";
 import { requireThat, KernelError } from "./errors.js";
 import { currentContract, getTask, assertContract, assertEntry, assertWritablePath } from "./policy.js";
@@ -10,7 +11,7 @@ import type { RepositoryContext, Meta, Id, OccupancyRef, Claim, Actor, Decision,
 import { assertExecution } from "./workflow-policy.js";
 import { validatePlanningArtifacts } from "./workflow.js";
 
-export function occupancyRef(claim: Claim): OccupancyRef {
+export function occupancyRef(claim: OccupancyRef): OccupancyRef {
   const { taskId, assignmentId, workspaceId, instanceId, epoch } = claim;
   return { taskId, assignmentId, workspaceId, instanceId, epoch };
 }
@@ -22,8 +23,9 @@ function sourceClaim(state: RepositoryState, from: OccupancyRef): Claim {
 export async function continueGoal(ctx: RepositoryContext, meta: Meta, input: { taskId: Id; assignmentId: Id | null; afterRevision?: number }): Promise<ContinuationView> {
   metaRule(meta);
   requireThat(meta.invocation.activation !== "none", "ACTIVATION_REQUIRED", "Continuation must be explicitly requested or bound");
-  const state = await readState(ctx), task = getTask(state, input.taskId);
-  const binding = await bindSession(ctx, meta, input), missing: string[] = [];
+  const state = await readState(ctx), task = getTask(state, input.taskId, false);
+  const binding = await bindSession(ctx, task.status === "active" ? meta : { ...meta, invocation: { ...meta.invocation, persist: false } }, input), missing: string[] = [];
+  if (task.status !== "active") missing.push("TASK_READ_ONLY");
   let writeToken: WriteToken | null = null;
   const mine = state.claims[ctx.workspaceId];
   if (mine?.instanceId === meta.actor.instanceId && mine.taskId === input.taskId && mine.assignmentId === input.assignmentId) {
@@ -40,17 +42,24 @@ export async function continueGoal(ctx: RepositoryContext, meta: Meta, input: { 
     assignment: input.assignmentId ? task.assignments[input.assignmentId]! : null,
     occupiedWrites, diagnostics: task.diagnostics.slice(-20), pendingContributionIds: Object.values(task.contributions).filter(c => !c.integrated).map(c => c.id),
     evidenceIds: Object.values(task.evidence).sort((a, b) => a.sequence - b.sequence).slice(-20).map(e => e.id),
-    missing, nextCursor: state.revision, unchanged: input.afterRevision === state.revision };
+    control: controlView(task, Object.values(state.claims)), missing, nextCursor: state.revision, unchanged: input.afterRevision === state.revision };
 }
 type Transfer = { from: OccupancyRef; to: Actor; contractVersion: number; transferOwner: boolean; ownerEpoch: number | null; decision: Decision | null };
 function transferAuthority(state: RepositoryState, meta: Meta, input: Transfer) {
   const task = getTask(state, input.from.taskId);
   assertEntry(meta, task, "business-write"); assertContract(task, input.contractVersion); actorRule(input.to);
+  assertActorWork(task, input.to.instanceId, input.from.assignmentId);
+  assertActorWork(task, input.from.instanceId, input.from.assignmentId);
+  requireThat(!task.control?.recoveries.some(r => r.assignmentId === input.from.assignmentId && ["pending", "reserved"].includes(r.state)),
+    "RECOVERY_REQUIRED", "Task control replaced this work; use its current work resume ticket");
   if (input.decision) decisionRule(input.decision);
   requireThat(input.decision || input.from.instanceId === meta.actor.instanceId, "TRANSFER_DECISION_REQUIRED", "Transferring another instance requires a user decision");
   if (input.to.instanceId !== meta.actor.instanceId) requireThat(input.decision || currentContract(task).grant.delegate,
     "TRANSFER_DECISION_REQUIRED", "Handing work to another actor requires authorized collaboration or a user decision");
   if (input.transferOwner) {
+    assertActorWork(task, input.to.instanceId, null);
+    requireThat(!task.control?.revision, "TASK_CONTROL_REQUIRED",
+      "This task has control history; use an explicit task takeover to transfer delivery ownership");
     requireThat(input.ownerEpoch === task.owner.epoch, "OWNER_CHANGED", "Delivery owner changed");
     requireThat(task.owner.instanceId === meta.actor.instanceId || input.decision, "TRANSFER_DECISION_REQUIRED", "A contributor cannot transfer delivery responsibility without its owner or a user decision");
   }
