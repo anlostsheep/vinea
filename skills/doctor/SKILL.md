@@ -18,3 +18,14 @@ Explain the concrete blocker and the smallest recovery requiring user action. A 
 Check protocol identity, current brief/plan integrity, execution authorization and legacy active-state coexistence. Report a new kernel writer even if an old task says `planning`. Keep the selected plugin root: old directories are not evidence of the active version and do not authorize a downgrade. Pre-protocol tasks remain readable; migration is not automatic. This diagnostic entry never suspends writers or repairs artifacts itself.
 
 Inspect task control history, retained collaborators and recovery nextActions. Explain that task takeover/pause/cancel/reopen can be requested through continue/run/debug; doctor does not perform them. Schema-1 stores require an explicitly authorized format upgrade; never change the pinned CLI to evade a gate.
+
+For schema-1 stores blocked by pre-protocol writer claims, use store preview-upgrade
+to inspect the exact refs and eligibility. This doctor entry remains read-only; an
+explicit run/continue/debug request is required for the mutation. Version 3.0.1 store upgrade can release
+only individually selected legacy writers with explicit stop declarations or host
+receipts and a sourced upgrade request; see stoppedLegacyWriters in CLI.md. Never
+impersonate the old owner, edit claims by hand or infer stopping from age/silence.
+Normal writers, holds and restoration reservations remain protected. A successful
+format upgrade leaves old tasks without an execution protocol; keep them read-only
+or cancel only with an explicit instruction. Do not report this residual diagnostic
+as a failed schema upgrade or silently create implementation authority.

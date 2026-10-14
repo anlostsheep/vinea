@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-> **3.0 升级注意：** 新 CLI 对 schema 1 存储只读；使用前需显式升级存储，旧 CLI 无法读取 schema 2。先处理原执行者和 hold，再协调客户端与存储升级。不要直接替换进行中任务固定的 CLI。详见 [CLI 升级说明](hosts/public-plugin/CLI.md#explicit-store-upgrade)。
+> **3.0 升级注意：** 新 CLI 对 schema 1 存储只读；使用前需显式升级存储，旧 CLI 无法读取 schema 2。常规占用需先处理；3.0.1 可在明确停止并逐项指定时，于升级事务中释放旧协议 writer。不要直接替换进行中任务固定的 CLI。详见 [CLI 升级说明](hosts/public-plugin/CLI.md#explicit-store-upgrade)。
 
 
 Vinea 是面向 Codex、Claude Code 和 Grok Build 的轻量 AI 编程协作内核：
@@ -51,7 +51,7 @@ codex plugin add vinea@vinea
 marketplace：
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v3.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v3.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -65,7 +65,7 @@ claude plugin install vinea@vinea --scope user
 固定到精确版本：
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v3.0.0
+claude plugin marketplace add anlostsheep/vinea@v3.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -193,7 +193,7 @@ marketplace 都携带生成后的版本。Claude marketplace 的插件条目会�
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 3.0.0
+npm run release -- 3.0.1
 ```
 
 该命令会运行完整检查，只暂存发布产物，创建 release commit 和带注释的
@@ -203,7 +203,7 @@ npm run release -- 3.0.0
 验证完成后，将 `main` 与版本 tag 一起发布到 Git marketplace：
 
 ```sh
-git push --atomic origin main refs/tags/v3.0.0
+git push --atomic origin main refs/tags/v3.0.1
 ```
 
 ## 工作流

@@ -61,3 +61,9 @@ reusing a source directory; otherwise keep its hold and use isolated recovery.
 New CLI mutations reject schema 1 until explicit store upgrade; old CLIs reject
 schema 2. Do not change a task's pinned CLI or upgrade its real store as an incidental
 installation step. See CLI.md for preview, backup and recovery conditions.
+
+Version 3.0.1 adds a narrow store-upgrade exception for explicitly selected stopped
+writers on tasks without a workflow protocol. Use preview references and actual stop
+declarations/receipts; preserve the caller's own identity. Other claims and holds
+still block upgrade. A retained old task's TASK_PROTOCOL_REQUIRED after migration
+is distinct from the store format and does not prevent creating new schema-2 tasks.

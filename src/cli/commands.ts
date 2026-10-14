@@ -1,6 +1,6 @@
 import { takeOverTask, replaceExecutor, pauseTask, cancelTask, reopenTask } from "../kernel/task-control.js";
 import { resumeWork } from "../kernel/resumption.js";
-import { upgradeStore } from "../kernel/upgrade.js";
+import { upgradeStore, upgradeInputRule } from "../kernel/upgrade.js";
 import { initializeStore } from "../kernel/store.js";
 import { createGoal, reviseContract } from "../kernel/contracts.js";
 import { addAssignment, claimWork, releaseWork } from "../kernel/ownership.js";
@@ -33,7 +33,7 @@ export const commands: Record<string, { handler: Handler; check: Rule }> = {
   "task pause": route(pauseTask, object(control)),
   "task cancel": route(cancelTask, object(control)),
   "task reopen": route(reopenTask, object(control)),
-  "store upgrade": route(upgradeStore, object({ expectedRevision: integer, expectedFingerprint: text, request: controlRequestRule })),
+  "store upgrade": route(upgradeStore, upgradeInputRule),
   "work resume": route(resumeWork, object({ ...version, recoveryId: nullable(id), request: controlRequestRule,
     mode: one("existing", "snapshot", "baseline"), stopBasis: one("unknown", "holder-release", "host-stop-receipt", "user-declared-stop"),
     stopReference: nullable(text), snapshotId: nullable(id), baseCommit: nullable(text), abandonUncaptured: bool }, { from: ref })),

@@ -66,3 +66,13 @@ holder may clear its hold with holder-release. Clearing a hold keeps any pending
 recovery ticket; without one, ordinary claim may proceed if authorization, assignment
 and remaining occupancy checks pass. New task authorize requires a concrete user
 implementation request through run/debug, not the continue entry.
+
+For schema-1 stores blocked by pre-protocol writer claims, use store preview-upgrade
+to inspect the exact refs and eligibility. Version 3.0.1 store upgrade can release
+only individually selected legacy writers with explicit stop declarations or host
+receipts and a sourced upgrade request; see stoppedLegacyWriters in CLI.md. Never
+impersonate the old owner, edit claims by hand or infer stopping from age/silence.
+Normal writers, holds and restoration reservations remain protected. A successful
+format upgrade leaves old tasks without an execution protocol; keep them read-only
+or cancel only with an explicit instruction. Do not report this residual diagnostic
+as a failed schema upgrade or silently create implementation authority.

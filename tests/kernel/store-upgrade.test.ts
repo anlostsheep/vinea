@@ -85,3 +85,24 @@ test.skipIf(!process.env.VINEA_SCHEMA1_CLI)("pinned original schema-1 CLI reject
     .rejects.toMatchObject({ code: 1, stdout: expect.stringContaining("STATE_INVALID") });
   expect(await fingerprintFixtureTree(f.context.storeRoot)).toBe(before);
 });
+
+test.skipIf(!process.env.VINEA_SCHEMA2_CLI)("a 3.0.0 receipt without an audit artifact remains replayable after this patch", async () => {
+  const f = await legacyFixture(), run = promisify(execFile), meta = f.meta;
+  await writeFile(join(f.root, "upgrade-input.json"), JSON.stringify({ meta, payload: f.input }));
+  const child = await run(process.execPath, [process.env.VINEA_SCHEMA2_CLI!, "store", "upgrade", "--input", "upgrade-input.json", "--json"], { cwd: f.root });
+  expect(JSON.parse(child.stdout).data.schemaVersion).toBe(2);
+  const after = await readState(f.context);
+  expect(after.operations[meta.operationId]!.resourceIds).toHaveLength(1);
+  const replay = await upgradeStore(f.context, meta, f.input);
+  expect(replay.replayed).toBe(true); expect(replay.receipt).toBeNull();
+  expect(await readState(f.context)).toEqual(after);
+});
+
+test.skipIf(!process.env.VINEA_SCHEMA2_CLI)("3.0.0 can read stores with the new audit hash without mutating them", async () => {
+  const f = await legacyFixture(), run = promisify(execFile);
+  await upgradeStore(f.context, f.meta, f.input);
+  const before = await fingerprintFixtureTree(f.context.storeRoot);
+  const result = JSON.parse((await run(process.execPath, [process.env.VINEA_SCHEMA2_CLI!, "task", "list", "--json"], { cwd: f.root })).stdout);
+  expect(result.data.tasks).toHaveLength(1);
+  expect(await fingerprintFixtureTree(f.context.storeRoot)).toBe(before);
+});

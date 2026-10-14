@@ -5,6 +5,21 @@ host manifests and marketplaces are generated from it by the release checks.
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-10-14
+
+### Fixed
+
+- Break the schema-1 upgrade deadlock caused by unavailable owners of pre-protocol
+  writer claims. Explicitly select each stopped legacy writer with its full occupancy
+  reference and stopping provenance; source/epoch checks, fencing, backup and upgrade
+  publication are atomic. Normal writers, holds and restorations remain protected.
+- Preserve immutable, integrity-checked upgrade audit receipts and deterministic
+  retries after publication failure. Keep tasks and historical data without inventing
+  execution protocols, approvals or successful delivery.
+- Expose eligible references in upgrade preview and distinguish retained legacy-task
+  diagnostics from successful format migration and readiness of newly created tasks.
+
+
 ## [3.0.0] - 2026-10-14
 
 ### Breaking compatibility

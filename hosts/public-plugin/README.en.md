@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-> **Upgrading to 3.0:** The new CLI reads schema 1 without writing; an explicit store upgrade is required for mutations, and old CLIs cannot read schema 2. Resolve writers and holds before coordinating client/store upgrades. Do not replace an active task's pinned CLI. See [store upgrade guidance](CLI.md#explicit-store-upgrade).
+> **Upgrading to 3.0:** The new CLI reads schema 1 without writing; an explicit store upgrade is required for mutations, and old CLIs cannot read schema 2. Resolve normal claims first; 3.0.1 can resolve individually selected legacy writers with explicit stop evidence during upgrade. Do not replace an active task's pinned CLI. See [store upgrade guidance](CLI.md#explicit-store-upgrade).
 
 
 Vinea is a lightweight AI-coding collaboration kernel. Users define goals and
@@ -31,10 +31,10 @@ codex plugin marketplace add anlostsheep/vinea
 codex plugin add vinea@vinea
 ```
 
-To pin release 3.0.0:
+To pin release 3.0.1:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v3.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v3.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -45,10 +45,10 @@ claude plugin marketplace add anlostsheep/vinea
 claude plugin install vinea@vinea --scope user
 ```
 
-To pin release 3.0.0:
+To pin release 3.0.1:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v3.0.0
+claude plugin marketplace add anlostsheep/vinea@v3.0.1
 claude plugin install vinea@vinea --scope user
 ```
 

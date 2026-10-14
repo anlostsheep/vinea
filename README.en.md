@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-> **Upgrading to 3.0:** The new CLI reads schema 1 without writing; an explicit store upgrade is required for mutations, and old CLIs cannot read schema 2. Resolve writers and holds before coordinating client/store upgrades. Do not replace an active task's pinned CLI. See [store upgrade guidance](hosts/public-plugin/CLI.md#explicit-store-upgrade).
+> **Upgrading to 3.0:** The new CLI reads schema 1 without writing; an explicit store upgrade is required for mutations, and old CLIs cannot read schema 2. Resolve normal claims first; 3.0.1 can resolve individually selected legacy writers with explicit stop evidence during upgrade. Do not replace an active task's pinned CLI. See [store upgrade guidance](hosts/public-plugin/CLI.md#explicit-store-upgrade).
 
 
 Vinea is a lightweight AI-coding collaboration kernel for Codex, Claude Code and
@@ -58,7 +58,7 @@ To pin an exact release instead of following `main`, register the marketplace
 at an annotated tag:
 
 ```sh
-codex plugin marketplace add anlostsheep/vinea --ref v3.0.0
+codex plugin marketplace add anlostsheep/vinea --ref v3.0.1
 codex plugin add vinea@vinea
 ```
 
@@ -72,7 +72,7 @@ claude plugin install vinea@vinea --scope user
 To pin an exact release:
 
 ```sh
-claude plugin marketplace add anlostsheep/vinea@v3.0.0
+claude plugin marketplace add anlostsheep/vinea@v3.0.1
 claude plugin install vinea@vinea --scope user
 ```
 
@@ -210,7 +210,7 @@ create a local release with:
 
 ```sh
 npm run release -- patch|minor|major
-npm run release -- 3.0.0
+npm run release -- 3.0.1
 ```
 
 The command runs the full checks, stages only release artifacts, creates a
@@ -221,7 +221,7 @@ Publication remains a separate, explicitly approved action. See
 After validation, publish `main` and the version tag together:
 
 ```sh
-git push --atomic origin main refs/tags/v3.0.0
+git push --atomic origin main refs/tags/v3.0.1
 ```
 
 ## Workflow

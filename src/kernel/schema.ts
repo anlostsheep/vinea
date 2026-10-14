@@ -71,7 +71,7 @@ const diagnosticRule = object({ id, kind: one("fact", "hypothesis", "ruled-out",
 const assignmentRule = object({ id, outcome: text, dependsOn: array(id), assignee: nullable(id), businessWrite: bool, status: one("open", "closed", "cancelled") });
 const deliveryRule = object({ id, contractVersion: integer, snapshotId: id, checkSetIds: array(id), contributionIds: array(id), exclusions: array(text), owner: ownerRule, acceptedGaps: array(object({ acceptanceId: id, decision: decisionRule })), createdAt: text });
 const taskStatusRule = one("active", "delivered", "archived", "cancelled");
-const occupancyRule = object({ taskId: id, assignmentId: nullable(id), workspaceId: id, instanceId: id, epoch: integer });
+export const occupancyRule = object({ taskId: id, assignmentId: nullable(id), workspaceId: id, instanceId: id, epoch: integer });
 const controlEventRule = object({ id, revision: integer, round: integer, action: one("takeover", "replace-executor", "pause", "cancel", "reopen"), actor: actorRule,
   request: controlRequestRule, reason: text, recordedAt: text, previousOwner: ownerRule, owner: ownerRule,
   previousStatus: taskStatusRule, status: taskStatusRule, replacedInstanceId: nullable(id), assignmentIds: array(nullable(id)) });

@@ -248,26 +248,82 @@ cannot be fabricated from an unavailable agent's chat.
 
 ### Explicit store upgrade
 
-New stores use schema 2. This CLI reads schema 1 but rejects ordinary mutations
-with STORE_UPGRADE_REQUIRED. Reads and installation never migrate. Use read-only
-`store preview-upgrade --json` for expectedRevision, expectedFingerprint and
-occupied directories. Then, only with explicit authorization, `store upgrade`
-takes `{expectedRevision,expectedFingerprint,request:{userMessage,reference,
-action:"upgrade"}}` under the control entry rules above.
+New stores use schema 2. Schema 1 remains read-only except for explicitly authorized
+`store upgrade`; installation, inspection and ordinary task commands never migrate.
+Run `store preview-upgrade --json` from the selected repository/worktree first.
+It returns expectedRevision, expectedFingerprint, occupied[].ref, taskProtocol and
+canResolveStoppedLegacyWriter. The last flag means eligible for the narrow exception,
+not proof that the process has stopped. ready remains false while occupancy exists.
 
-All writers/restorations/unknown holds must first be resolved with the pinned CLI
-and real stop evidence. A changed source rejects the old preview. Upgrade locks
-the store, saves exact source bytes in an immutable backup, publishes atomically
-and records an idempotent receipt. Publication failure leaves old state usable and
-the identical request retryable. There is no automatic rollback/downgrade; never
-overwrite later work with an old backup.
+`store upgrade` takes `{expectedRevision,expectedFingerprint,
+request:{userMessage,reference,action:"upgrade"},stoppedLegacyWriters?:[]}` under the
+control entry rules above (run/continue/debug, named-entry/named-request, not a
+read-only invocation). The optional list was added in 3.0.1. Omit it for the existing
+no-occupancy path. Each selected item is:
 
-Only active tasks receive initial control metadata. Historical delivered/archived
-records, artifacts, snapshots and existing authorization provenance remain intact;
-pre-protocol tasks do not gain a fabricated execution protocol. Old schema-1 CLIs
-reject new state. Coordinate client upgrades separately; never switch an active
-task's pinned CLI to bypass a gate. Old .vinea is not migrated by this operation.
-Fixture testing does not authorize a real-store upgrade or plugin installation.
+```json
+{
+  "from": {
+    "taskId": "<copy the full occupied[].ref>",
+    "assignmentId": null,
+    "workspaceId": "<exact workspace ID>",
+    "instanceId": "<original writer ID from the reference>",
+    "epoch": 1
+  },
+  "stopBasis": "user-declared-stop",
+  "stopReference": "<retrievable user stop declaration or actual host receipt>",
+  "userMessage": "<actual user instruction identifying this stopped writer>"
+}
+```
+
+Copy the complete reference and its actual epoch/assignment; the example values
+are placeholders. The top-level actor is the new caller's own identity, never the
+old writer's identity. stopBasis accepts user-declared-stop or host-stop-receipt;
+both require nonempty userMessage and stopReference. The upgrade request authorizes
+the selected releases as well as the format change. These records are caller-supplied
+provenance, not host authentication, and the command does not stop processes.
+Old timestamps, a clean Git directory or silence are not stopping evidence.
+
+Only an exact state=writer claim belonging to a task with no workflow execution
+protocol is eligible. Normal protocol writers, unknown-writer-hold and restore-target
+reservations must be resolved separately using their supported stop/recovery paths.
+Any unselected occupancy still blocks the entire upgrade. There is no force flag,
+blanket release or automatic cleanup. In particular, do not convert writer to hold
+by hand, impersonate its owner, delete state, downgrade the CLI or use init as repair.
+
+The upgrade locks the store, revalidates the whole source fingerprint/revision and
+every selected occupancy generation, then preserves the exact original state bytes
+under backups/. Only selected legacy writers become released and their execution
+epochs advance. All releases and schema 2 publication occur in one state transaction;
+no workspace files are edited and no task is automatically cancelled or delivered.
+A changed source or reference, duplicate selection or any ineligible claim fails
+before publication. A rejected selection never partially releases the others.
+
+The returned receipt path points to immutable artifacts/<operationId>/upgrade.json:
+it records caller identity, upgrade request, each stop instruction/reference, source
+and result revisions, backup path and fenced epochs. Its content hash is admitted
+in the state operation receipt atomically with the upgrade. Backup/audit files left
+by a failed publication are prepared artifacts, not proof of committed migration.
+Retry the identical operation only after inspection; deterministic artifacts make
+that retry safe. Missing/changed admitted audit content is UPGRADE_RECEIPT_INVALID,
+not permission to reapply releases. Historical 3.0.0 receipts without an audit file
+remain replayable. There is no automatic rollback/downgrade; never overwrite later
+work with an older backup.
+
+Only active tasks receive initial control metadata. Task IDs, owners, contracts,
+historical delivered/archived records, evidence and snapshots stay intact; no
+workflow protocol or execution authorization is fabricated. The result explicitly
+lists retainedLegacyTaskIds. These old active tasks remain non-executable, so doctor
+may still report TASK_PROTOCOL_REQUIRED after a successful format upgrade. New
+schema-2 tasks can be created and executed normally. Keep old tasks read-only, or
+use task cancel only after a separate explicit cancellation instruction; a format
+upgrade is not a cancellation decision or proof of globally passing acceptance.
+
+All linked worktrees share this one store; independent repositories upgrade
+separately. Old schema-1 CLIs reject schema 2. Coordinate clients and use the current
+supported upgrade CLI explicitly; do not swap a task's pinned CLI to bypass gates.
+Old .vinea is not migrated by this operation. Fixture testing never authorizes real
+business-repository migration or plugin installation.
 
 ## Transfers and Snapshots
 
